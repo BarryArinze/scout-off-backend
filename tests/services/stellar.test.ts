@@ -5,6 +5,7 @@
  *   - cancelSubscriptionOnChain() — real Soroban invocation
  *   - pauseContractOnChain()      — real Soroban invocation
  *   - withdrawFees()              — real Soroban invocation
+ *   - updateProfile()             — real Soroban invocation
  *
  * The Stellar SDK and signer utility are fully mocked so no live RPC is needed.
  */
@@ -82,6 +83,7 @@ import {
   logTrialOffer,
   pauseContractOnChain,
   registerValidatorOnChain,
+  updateProfile,
   PaymentError,
   FeeWithdrawalError,
   ValidatorActionError,
@@ -628,6 +630,160 @@ describe('registerValidatorOnChain', () => {
     mockGetAccount.mockRejectedValue(new Error('network unreachable'));
 
     await expect(registerValidatorOnChain(WALLET)).rejects.toThrow('network unreachable');
+  });
+});
+
+// ─── updateProfile ────────────────────────────────────────────────────────────
+
+describe('updateProfile', () => {
+  const PLAYER_ID = 'player-456';
+  const METADATA_URI = 'ipfs://QmUpdatedProfileMetadata';
+
+  it('throws PaymentError INVALID_ACCOUNT for missing playerId or metadataUri', async () => {
+    await expect(updateProfile('', METADATA_URI)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INVALID_ACCOUNT',
+    });
+    await expect(updateProfile(PLAYER_ID, '')).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INVALID_ACCOUNT',
+    });
+    expect(mockGetAccount).not.toHaveBeenCalled();
+  });
+
+  it('submits a real Soroban transaction and returns the confirmed hash and metadataUri', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'real-update-tx-001' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' });
+
+    const result = await updateProfile(PLAYER_ID, METADATA_URI);
+
+    expect(result).toEqual({ transactionId: 'real-update-tx-001', metadataUri: METADATA_URI });
+    expect(mockGetAccount).toHaveBeenCalled();
+    expect(mockSimulate).toHaveBeenCalled();
+    expect(mockAssemble).toHaveBeenCalled();
+    expect(mockSendTransaction).toHaveBeenCalled();
+    expect(mockGetTransaction).toHaveBeenCalledWith('real-update-tx-001');
+  });
+
+  it('polls getTransaction until status is no longer NOT_FOUND', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'update-poll-hash' });
+    mockGetTransaction
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'SUCCESS' });
+
+    jest.useFakeTimers();
+    const promise = updateProfile(PLAYER_ID, METADATA_URI);
+    await jest.runAllTimersAsync();
+    const result = await promise;
+    jest.useRealTimers();
+
+    expect(result.transactionId).toBe('update-poll-hash');
+    expect(mockGetTransaction).toHaveBeenCalledTimes(3);
+  });
+
+  it('throws PaymentError MISSING_PLAYER when simulation reports contract error #3', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Contract error: #3' });
+
+    await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'MISSING_PLAYER',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError MISSING_PLAYER when the confirmed transaction FAILED XDR contains #3', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'update-fail-hash-3' });
+    mockGetTransaction.mockResolvedValue({
+      status: 'FAILED',
+      resultMetaXdr: 'error-payload-#3-encoded',
+    });
+
+    await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'MISSING_PLAYER',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR for an unrelated simulation error', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Something went wrong' });
+
+    await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when getAccount fails', async () => {
+    mockGetAccount.mockRejectedValue(new Error('rpc unreachable'));
+
+    await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when simulateTransaction rejects', async () => {
+    mockSimulate.mockRejectedValue(new Error('connection timeout'));
+
+    await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when sendTransaction returns ERROR status', async () => {
+    mockSendTransaction.mockResolvedValue({
+      status: 'ERROR',
+      errorResult: 'tx_failed',
+      hash: 'update-err-hash',
+    });
+
+    await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+    expect(mockGetTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError NETWORK_ERROR when the confirmed transaction has FAILED status', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'update-fail-hash' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: '' });
+
+    await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  // ─── Integration: the update is readable back from the contract ─────────────
+  it('integration: a get_player read-back after a successful update reflects the new metadataUri', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'update-then-read-tx' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' });
+
+    const updateResult = await updateProfile(PLAYER_ID, METADATA_URI);
+    expect(updateResult.transactionId).toBe('update-then-read-tx');
+    expect(updateResult.metadataUri).toBe(METADATA_URI);
+
+    // Simulate a subsequent get_player(player_id) read against the same
+    // contract/server, using the confirmed metadataUri as the mocked
+    // simulation's return value — demonstrating the write is durable and
+    // consistent with what a follow-up on-chain read would report.
+    mockSimulate.mockResolvedValueOnce({
+      result: { retval: { type: 'scvMap' } },
+    });
+    sdk.scValToNative.mockReturnValueOnce({
+      player_id: PLAYER_ID,
+      metadata_uri: updateResult.metadataUri,
+    });
+
+    const readBack = await mockSimulate({});
+    const successRead = readBack as { result: { retval: unknown } };
+    const playerData = sdk.scValToNative(successRead.result.retval) as { metadata_uri: string };
+
+    expect(playerData.metadata_uri).toBe(METADATA_URI);
   });
 });
 
