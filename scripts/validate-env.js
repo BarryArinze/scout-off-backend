@@ -37,6 +37,23 @@ function validateRuntimeEnv(env = process.env) {
     }
   }
 
+  // Validate CORS_ALLOWED_ORIGINS if specified
+  const corsOriginsVal = env.CORS_ALLOWED_ORIGINS ?? env.ALLOWED_ORIGINS;
+  if (corsOriginsVal !== undefined) {
+    if (corsOriginsVal.trim() === '') {
+      errors.push('CORS_ALLOWED_ORIGINS cannot be empty when specified');
+    } else {
+      const origins = corsOriginsVal.split(',').map((s) => s.trim());
+      for (const origin of origins) {
+        if (!origin) {
+          errors.push('CORS_ALLOWED_ORIGINS contains empty origin entry');
+        } else if (origin !== '*' && !/^https?:\/\//i.test(origin)) {
+          errors.push(`Invalid CORS origin format: "${origin}". Origins must be "*" or start with http:// or https://`);
+        }
+      }
+    }
+  }
+
   return errors;
 }
 
