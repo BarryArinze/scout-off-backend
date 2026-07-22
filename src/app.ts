@@ -71,9 +71,9 @@ const app = express();
 app.set('etag', false);
 
 const corsOrigin =
-  config.nodeEnv !== 'development' && config.allowedOrigins.length > 0
-    ? config.allowedOrigins
-    : '*';
+  config.allowedOrigins.includes('*')
+    ? '*'
+    : config.allowedOrigins;
 app.use(cors({ origin: corsOrigin }));
 app.use(compression({ threshold: parseInt(process.env.COMPRESSION_THRESHOLD ?? '1024', 10) }));
 app.use(requestTimeout);

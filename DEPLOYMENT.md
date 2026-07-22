@@ -25,6 +25,7 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `ADMIN_WALLET` | — | Single admin wallet address (for backward compatibility) |
 | `ADMIN_WALLETS` | — | Comma-separated list of admin wallet addresses (e.g., `GABC...,GDEF...`) |
 | `ADMIN_THRESHOLD` | — | Number of admin signatures required for high-value operations (default: `1`) |
+| `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS allowed origins (defaults per env: `*` in dev, `https://staging.scoutoff.io` in staging, `https://app.scoutoff.io,https://scoutoff.io` in prod) |
 
 ## Build & Start
 

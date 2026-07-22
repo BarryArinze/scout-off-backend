@@ -69,4 +69,28 @@ describe('validate-env runtime validation', () => {
       'NODE_ENV="invalid_env" is invalid. Must be one of: development, test, production'
     );
   });
+
+  it('should pass on valid CORS_ALLOWED_ORIGINS', () => {
+    const env = {
+      NODE_ENV: 'production',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+      CORS_ALLOWED_ORIGINS: 'https://app.scoutoff.io,https://staging.scoutoff.io',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toEqual([]);
+  });
+
+  it('should report an error on malformed CORS_ALLOWED_ORIGINS', () => {
+    const env = {
+      NODE_ENV: 'production',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+      CORS_ALLOWED_ORIGINS: 'invalid-origin-without-protocol',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toContain(
+      'Invalid CORS origin format: "invalid-origin-without-protocol". Origins must be "*" or start with http:// or https://'
+    );
+  });
 });
