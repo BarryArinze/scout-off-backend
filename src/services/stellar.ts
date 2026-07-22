@@ -42,7 +42,14 @@ export interface ContactPaymentResult {
 export class PaymentError extends Error {
   constructor(
     message: string,
-    public readonly code: 'INSUFFICIENT_FUNDS' | 'INVALID_ACCOUNT' | 'NETWORK_ERROR' | 'MISSING_PLAYER' | 'UNKNOWN',
+    public readonly code:
+      | 'INSUFFICIENT_FUNDS'
+      | 'INVALID_ACCOUNT'
+      | 'NETWORK_ERROR'
+      | 'MISSING_PLAYER'
+      | 'EXPIRED_TRUSTLINE'
+      | 'CONTRACT_ERROR'
+      | 'UNKNOWN',
   ) {
     super(message);
     this.name = 'PaymentError';
@@ -469,6 +476,18 @@ function isInsufficientFeeError(message: string): boolean {
 }
 
 /**
+ * Matches a missing/expired classic Stellar trustline in a simulation/result
+ * error string. The contract's payment token may be a Stellar Asset Contract
+ * wrapping a classic asset, whose trustline errors surface as diagnostic text
+ * rather than a scout_off_shared::errors::Error code, so — like
+ * isContractPausedError() above — this is a best-effort message match rather
+ * than a numbered contract error.
+ */
+function isExpiredTrustlineError(message: string): boolean {
+  return /trust.?line/i.test(message);
+}
+
+/**
  * Invoke `subscribe(scout, tier, duration)` on the Soroban contract.
  *
  * Flow mirrors cancelSubscriptionOnChain() / logTrialOffer():
@@ -599,8 +618,30 @@ export async function purchaseSubscription(
 }
 
 /**
- * Stub: invoke renew_subscription(scout, tier, duration) on the Soroban contract.
- * Extends the existing expiry by `duration` days.
+ * Re-invoke `subscribe(scout, tier, duration)` on the Soroban contract to renew
+ * an existing subscription.
+ *
+ * The subscription contract has no dedicated renewal entry point (see
+ * contracts/subscription/src/lib.rs) — its subscribe() is safely re-callable
+ * while already active and simply overwrites the stored expiry with a fresh
+ * one computed from the current ledger sequence (see its own
+ * resubscribing_while_active_extends_expiry test), which is exactly the
+ * behaviour a renewal needs.
+ *
+ * Flow mirrors purchaseSubscription() / cancelSubscriptionOnChain():
+ *   getAccount → build tx → simulateTransaction → assembleTransaction
+ *   → sign → sendTransaction → poll getTransaction until final status.
+ *
+ * On success returns the confirmed transaction hash and the on-chain expiry
+ * timestamp decoded from the contract's return value — the contract is
+ * authoritative for the new expiry, so currentExpiresAt is not used to
+ * compute it (only recorded on the span for observability).
+ *
+ * Throws PaymentError with code:
+ *   'INSUFFICIENT_FUNDS' — contract error #7 (InsufficientFee)
+ *   'EXPIRED_TRUSTLINE'  — payment token trustline missing/expired
+ *   'CONTRACT_ERROR'     — any other on-chain rejection (e.g. contract panic)
+ *   'NETWORK_ERROR'      — RPC/transport failure, distinct from an on-chain rejection
  */
 export async function renewSubscription(
   scoutWallet: string,
@@ -608,20 +649,134 @@ export async function renewSubscription(
   duration: number,
   currentExpiresAt: number,
 ): Promise<SubscriptionResult> {
-  if (!scoutWallet) {
-    throw new PaymentError('Missing scoutWallet', 'INVALID_ACCOUNT');
-  }
-  // Renewal extends from the current expiry (or now, if already expired)
-  const now = Math.floor(Date.now() / 1000);
-  const base = currentExpiresAt > now ? currentExpiresAt : now;
-  const expiresAt = base + duration * 86400;
-  // TODO: build and submit renew_subscription (or re-call subscribe) Soroban transaction
-  return {
-    transactionId: `stub-renew-txid-${Date.now()}`,
-    tier,
-    expiresAt,
-    status: 'active',
-  };
+  return tracer.startActiveSpan('stellar.renewSubscription', async (span): Promise<SubscriptionResult> => {
+    span.setAttribute('stellar.contract_function', 'subscribe');
+    span.setAttribute('stellar.tier', tier);
+    span.setAttribute('stellar.renewal', true);
+    span.setAttribute('stellar.previous_expires_at', currentExpiresAt);
+    try {
+      if (!scoutWallet) {
+        throw new PaymentError('Missing scoutWallet', 'INVALID_ACCOUNT');
+      }
+
+      const { getPlatformKeypair } = await import('../utils/signer');
+      const keypair = getPlatformKeypair();
+
+      let account;
+      try {
+        account = await server.getAccount(keypair.publicKey());
+      } catch (err) {
+        throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      const contract = new Contract(config.contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: networkPassphrase(),
+      })
+        .addOperation(
+          contract.call(
+            'subscribe',
+            Address.fromString(scoutWallet).toScVal(),
+            nativeToScVal(tier, { type: 'string' }),
+            nativeToScVal(duration, { type: 'u32' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      let simResult;
+      try {
+        simResult = await server.simulateTransaction(tx);
+      } catch (err) {
+        throw new PaymentError(`Simulation request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        const errMsg = simResult.error ?? '';
+        if (isInsufficientFeeError(errMsg)) {
+          throw new PaymentError('Insufficient funds for subscription renewal', 'INSUFFICIENT_FUNDS');
+        }
+        if (isExpiredTrustlineError(errMsg)) {
+          throw new PaymentError('Payment token trustline is missing or expired', 'EXPIRED_TRUSTLINE');
+        }
+        throw new PaymentError(`Simulation failed: ${errMsg}`, 'CONTRACT_ERROR');
+      }
+
+      const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+      preparedTx.sign(keypair);
+
+      let sendResult;
+      try {
+        sendResult = await server.sendTransaction(preparedTx);
+      } catch (err) {
+        throw new PaymentError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+      if (sendResult.status === 'ERROR') {
+        const errMsg = String(sendResult.errorResult ?? '');
+        if (isInsufficientFeeError(errMsg)) {
+          throw new PaymentError('Insufficient funds for subscription renewal', 'INSUFFICIENT_FUNDS');
+        }
+        if (isExpiredTrustlineError(errMsg)) {
+          throw new PaymentError('Payment token trustline is missing or expired', 'EXPIRED_TRUSTLINE');
+        }
+        throw new PaymentError(`Submit failed: ${sendResult.errorResult}`, 'CONTRACT_ERROR');
+      }
+
+      const hash = sendResult.hash;
+      span.setAttribute('stellar.tx_hash', hash);
+
+      let getResult;
+      try {
+        getResult = await server.getTransaction(hash);
+        while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+          await new Promise((r) => setTimeout(r, 1000));
+          getResult = await server.getTransaction(hash);
+        }
+      } catch (err) {
+        throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+        const resultMeta = ((getResult as unknown) as { resultMetaXdr?: string }).resultMetaXdr ?? '';
+        if (isInsufficientFeeError(resultMeta)) {
+          throw new PaymentError('Insufficient funds for subscription renewal', 'INSUFFICIENT_FUNDS');
+        }
+        if (isExpiredTrustlineError(resultMeta)) {
+          throw new PaymentError('Payment token trustline is missing or expired', 'EXPIRED_TRUSTLINE');
+        }
+        throw new PaymentError('subscribe transaction failed on-chain', 'CONTRACT_ERROR');
+      }
+
+      const success = getResult as SorobanRpc.Api.GetSuccessfulTransactionResponse;
+      // Check the *decoded* value, not just whether returnValue is present: a
+      // contract function returning unit (no expiry) still yields a truthy
+      // ScVal wrapping scvVoid, which scValToNative() decodes to `null` rather
+      // than throwing — so `!success.returnValue` alone would silently accept
+      // a null expiry here instead of surfacing the mismatch.
+      const decoded = success.returnValue ? scValToNative(success.returnValue) : null;
+      if (typeof decoded !== 'number') {
+        throw new PaymentError('renew_subscription transaction returned no expiry value', 'CONTRACT_ERROR');
+      }
+      const expiresAt = decoded;
+      span.setAttribute('stellar.expires_at', expiresAt);
+
+      return {
+        transactionId: hash,
+        tier,
+        expiresAt,
+        status: 'active',
+      };
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.setAttribute('error.type', (err as Error).name);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 export type SubscriptionErrorCode =
