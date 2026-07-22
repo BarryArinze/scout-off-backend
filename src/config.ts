@@ -74,7 +74,9 @@ const config = {
     }
     return val;
   })(),
+  dbDriver: (process.env.DB_DRIVER ?? 'sqlite') as 'sqlite' | 'postgres',
   dbPath: process.env.DB_PATH ?? 'scout-off.db',
+  databaseUrl: process.env.DATABASE_URL ?? '',
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),

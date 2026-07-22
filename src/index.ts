@@ -10,18 +10,28 @@ import { checkHealth } from "./services/ipfs";
 import { indexEvents } from "./services/indexer";
 import { getLastLedger, setLastLedger } from "./db";
 
-initDb();
-
-// If INDEXER_BACKFILL_FROM_LEDGER is set and is less than the stored last_ledger,
-// reset last_ledger so the next poll replays from that point.
-if (config.backfillFromLedger !== null) {
-  const stored = getLastLedger();
-  if (config.backfillFromLedger < stored) {
-    setLastLedger(config.backfillFromLedger);
-    logger.info(
-      `Backfill: reset last_ledger from ${stored} to ${config.backfillFromLedger}`,
-    );
+// Database initialization is now async - must be awaited
+async function start() {
+  try {
+    await initDb();
+  } catch (err) {
+    logger.error("Failed to initialize database:", err);
+    process.exit(1);
   }
+
+  // If INDEXER_BACKFILL_FROM_LEDGER is set and is less than the stored last_ledger,
+  // reset last_ledger so the next poll replays from that point.
+  if (config.backfillFromLedger !== null) {
+    const stored = getLastLedger();
+    if (config.backfillFromLedger < stored) {
+      setLastLedger(config.backfillFromLedger);
+      logger.info(
+        `Backfill: reset last_ledger from ${stored} to ${config.backfillFromLedger}`,
+      );
+    }
+  }
+
+  await startServer();
 }
 
 async function startServer() {
@@ -118,7 +128,7 @@ async function startServer() {
   process.on("SIGINT", () => shutdown("SIGINT"));
 }
 
-startServer().catch((err) => {
+start().catch((err) => {
   logger.error("Unhandled startup error:", err);
   process.exit(1);
 });

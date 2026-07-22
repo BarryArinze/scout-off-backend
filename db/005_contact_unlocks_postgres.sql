@@ -1,0 +1,2 @@
+-- Migration 005: contact unlocks (PostgreSQL)
+-- Already defined in 001_initial_postgres.sql, no additional operations needed.

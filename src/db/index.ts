@@ -5,6 +5,9 @@ import { EventRecord, ContractEventType } from '../types';
 import { runMigrations } from './migrate';
 import { logger } from '../utils/logger';
 import { computeChainHash, auditChainContent, GENESIS_HASH } from '../utils/hashChain';
+import { DbDriver } from './driver';
+import { SqliteDriver } from './sqlite-driver';
+import { PostgresDriver } from './postgres-driver';
 
 function slowQueryThresholdMs(): number {
   return parseInt(process.env.SLOW_QUERY_THRESHOLD_MS ?? '50', 10);
@@ -23,67 +26,92 @@ export function timedQuery<T>(sql: string, fn: () => T): T {
 
 // ─── Connection & schema ──────────────────────────────────────────────────────
 
+let _driver: DbDriver | null = null;
 let _db: Database.Database | null = null;
 
 /**
  * Initialise the database connection and run pending migrations.
  * Must be called once at application startup before any query helper is used.
  * Safe to call in tests with DB_PATH=:memory: set before import.
+ * 
+ * For PostgreSQL, this must be awaited as it requires async connection setup.
  */
-export function initDb(): void {
-  _db = new Database(config.dbPath);
-  _db.exec(`
-    CREATE TABLE IF NOT EXISTS events (
-      id         INTEGER PRIMARY KEY AUTOINCREMENT,
-      type       TEXT NOT NULL,
-      ledger     INTEGER NOT NULL,
-      tx_hash    TEXT NOT NULL UNIQUE,
-      payload    TEXT NOT NULL,
-      created_at INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS idx_events_type_ledger ON events (type, ledger);
-    CREATE TABLE IF NOT EXISTS indexer_state (
-      key   TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS players (
-      player_id      TEXT    PRIMARY KEY,
-      wallet         TEXT    NOT NULL,
-      position       TEXT,
-      region         TEXT,
-      metadata_uri   TEXT,
-      progress_level INTEGER DEFAULT 0,
-      created_at     INTEGER
-    );
-    CREATE INDEX IF NOT EXISTS idx_players_region   ON players (region);
-    CREATE INDEX IF NOT EXISTS idx_players_position ON players (position);
-    CREATE INDEX IF NOT EXISTS idx_players_tier     ON players (progress_level);
-    CREATE TABLE IF NOT EXISTS validator_stats (
-      wallet             TEXT PRIMARY KEY,
-      milestones_approved INTEGER DEFAULT 0,
-      milestones_rejected INTEGER DEFAULT 0
-    );
-    CREATE TABLE IF NOT EXISTS pending_milestones (
-      milestone_id    TEXT PRIMARY KEY,
-      player_id       TEXT NOT NULL,
-      validator_wallet TEXT NOT NULL,
-      milestone_type  TEXT NOT NULL,
-      evidence_uri    TEXT NOT NULL,
-      submitted_at    INTEGER NOT NULL
-    );
-    CREATE INDEX IF NOT EXISTS idx_pending_milestones_validator ON pending_milestones (validator_wallet);
-    CREATE INDEX IF NOT EXISTS idx_pending_milestones_player ON pending_milestones (player_id);
-    CREATE TABLE IF NOT EXISTS contact_unlocks (
-      scout_wallet TEXT    NOT NULL,
-      player_id    TEXT    NOT NULL,
-      tx_hash      TEXT    NOT NULL,
-      unlocked_at  INTEGER NOT NULL,
-      PRIMARY KEY (scout_wallet, player_id)
-    );
-    CREATE INDEX IF NOT EXISTS idx_contact_unlocks_scout ON contact_unlocks (scout_wallet);
-  `);
-  // Run SQL migrations (player_profile_history, idempotency_keys, webhook_subscriptions, etc.)
-  runMigrations(_db);
+export async function initDb(): Promise<void> {
+  if (config.dbDriver === 'postgres') {
+    // PostgreSQL initialization
+    if (!config.databaseUrl) {
+      throw new Error(
+        'DATABASE_URL environment variable is required when DB_DRIVER=postgres'
+      );
+    }
+
+    const pgDriver = new PostgresDriver(config.databaseUrl);
+    await pgDriver.connect();
+    _driver = pgDriver;
+
+    logger.info('[db] Connected to PostgreSQL');
+  } else {
+    // SQLite initialization (default)
+    _db = new Database(config.dbPath);
+    _driver = new SqliteDriver(_db);
+
+    // Create initial schema inline (for backwards compatibility with in-memory test databases)
+    _driver.exec(`
+      CREATE TABLE IF NOT EXISTS events (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        type       TEXT NOT NULL,
+        ledger     INTEGER NOT NULL,
+        tx_hash    TEXT NOT NULL UNIQUE,
+        payload    TEXT NOT NULL,
+        created_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_events_type_ledger ON events (type, ledger);
+      CREATE TABLE IF NOT EXISTS indexer_state (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS players (
+        player_id      TEXT    PRIMARY KEY,
+        wallet         TEXT    NOT NULL,
+        position       TEXT,
+        region         TEXT,
+        metadata_uri   TEXT,
+        progress_level INTEGER DEFAULT 0,
+        created_at     INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_players_region   ON players (region);
+      CREATE INDEX IF NOT EXISTS idx_players_position ON players (position);
+      CREATE INDEX IF NOT EXISTS idx_players_tier     ON players (progress_level);
+      CREATE TABLE IF NOT EXISTS validator_stats (
+        wallet             TEXT PRIMARY KEY,
+        milestones_approved INTEGER DEFAULT 0,
+        milestones_rejected INTEGER DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS pending_milestones (
+        milestone_id    TEXT PRIMARY KEY,
+        player_id       TEXT NOT NULL,
+        validator_wallet TEXT NOT NULL,
+        milestone_type  TEXT NOT NULL,
+        evidence_uri    TEXT NOT NULL,
+        submitted_at    INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pending_milestones_validator ON pending_milestones (validator_wallet);
+      CREATE INDEX IF NOT EXISTS idx_pending_milestones_player ON pending_milestones (player_id);
+      CREATE TABLE IF NOT EXISTS contact_unlocks (
+        scout_wallet TEXT    NOT NULL,
+        player_id    TEXT    NOT NULL,
+        tx_hash      TEXT    NOT NULL,
+        unlocked_at  INTEGER NOT NULL,
+        PRIMARY KEY (scout_wallet, player_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_contact_unlocks_scout ON contact_unlocks (scout_wallet);
+    `);
+
+    logger.info(`[db] Connected to SQLite at ${config.dbPath}`);
+  }
+
+  // Run migrations (SQL migration files from db/ directory)
+  runMigrations(_driver);
 
   // Seed a subscription row for the legacy WEBHOOK_URL/WEBHOOK_ENABLED config on
   // first startup, so single-subscriber deployments keep working with the new
@@ -91,12 +119,21 @@ export function initDb(): void {
   ensureLegacyWebhookSubscription();
 }
 
+export function getDriver(): DbDriver {
+  if (!_driver) throw new Error("Database not initialised — call initDb() first");
+  return _driver;
+}
+
 export function getDb(): Database.Database {
-  if (!_db) throw new Error("Database not initialised — call initDb() first");
+  if (!_db) throw new Error("Database not initialised — call initDb() first for SQLite");
   return _db;
 }
 
 export function closeDb(): void {
+  if (_driver) {
+    _driver.close();
+    _driver = null;
+  }
   if (_db) {
     _db.close();
     _db = null;
