@@ -87,9 +87,38 @@ const config = {
     }
     return val;
   })(),
-  dbDriver: (process.env.DB_DRIVER ?? 'sqlite') as 'sqlite' | 'postgres',
+  dbDriver: (() => {
+    const raw = process.env.DB_DRIVER ?? 'sqlite';
+    const valid = ['sqlite', 'postgres'] as const;
+    if (!(valid as readonly string[]).includes(raw)) {
+      throw new Error(
+        `DB_DRIVER="${raw}" is invalid. Must be one of: ${valid.join(', ')}. ` +
+        `Check for typos — an unrecognised value does NOT fall back to SQLite; the server will not start.`
+      );
+    }
+    return raw as 'sqlite' | 'postgres';
+  })(),
   dbPath: process.env.DB_PATH ?? 'scout-off.db',
   databaseUrl: process.env.DATABASE_URL ?? '',
+  /**
+   * Enable SSL/TLS for the PostgreSQL connection.
+   *
+   * Set DATABASE_SSL=true to enable SSL with certificate verification (the
+   * default secure mode).  Set DATABASE_SSL=no-verify to enable SSL but skip
+   * certificate verification (useful for self-signed certs in dev/staging; do
+   * NOT use in production).  Leave unset or set to false to disable SSL
+   * (suitable only for local / private-network Postgres without TLS).
+   *
+   * Most managed providers (RDS, Heroku, Supabase, Railway, Neon) require
+   * SSL — set DATABASE_SSL=true for them.  See docs/postgres-migration.md for
+   * per-provider examples.
+   */
+  databaseSsl: (() => {
+    const raw = (process.env.DATABASE_SSL ?? '').toLowerCase();
+    if (raw === 'true' || raw === '1' || raw === 'yes') return true as const;
+    if (raw === 'no-verify') return 'no-verify' as const;
+    return false as const;
+  })(),
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),

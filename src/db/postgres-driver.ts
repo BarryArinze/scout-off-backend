@@ -6,15 +6,36 @@
  * which is called by the refactored initDb() function.
  */
 
-import { Client } from 'pg';
+import { Client, type ClientConfig } from 'pg';
 import { DbDriver } from './driver';
+
+/** SSL option accepted by the PostgresDriver constructor. */
+export type PostgresSslOption =
+  /** Enable SSL with full certificate verification (recommended for managed providers). */
+  | true
+  /** Enable SSL but skip certificate verification (dev/staging with self-signed certs). */
+  | 'no-verify'
+  /** Disable SSL entirely (local / private-network Postgres without TLS). */
+  | false;
 
 export class PostgresDriver implements DbDriver {
   private client: Client;
   private inTransaction = false;
 
-  constructor(connectionString: string) {
-    this.client = new Client({ connectionString });
+  constructor(connectionString: string, ssl: PostgresSslOption = false) {
+    const clientConfig: ClientConfig = { connectionString };
+
+    if (ssl === true) {
+      // Full certificate verification — the default secure mode for production.
+      clientConfig.ssl = { rejectUnauthorized: true };
+    } else if (ssl === 'no-verify') {
+      // SSL transport enabled, but certificate not verified.  Use only in dev/staging
+      // with self-signed certificates — never in production.
+      clientConfig.ssl = { rejectUnauthorized: false };
+    }
+    // When ssl === false, no ssl property is set — pg connects without TLS.
+
+    this.client = new Client(clientConfig);
   }
 
   /**
