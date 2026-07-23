@@ -120,11 +120,18 @@ export class PostgresDriver implements DbDriver {
     }
   }
 
-  close(): void {
+  /**
+   * Close the PostgreSQL connection.
+   * Returns a Promise that resolves only after client.end() has genuinely
+   * completed so the caller's shutdown sequence can await it before exiting.
+   */
+  async close(): Promise<void> {
     if (this.client) {
-      this.client.end().catch((err) => {
+      try {
+        await this.client.end();
+      } catch (err) {
         console.error('[db] Error closing PostgreSQL connection:', err);
-      });
+      }
     }
   }
 
