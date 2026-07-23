@@ -94,3 +94,56 @@ describe('validate-env runtime validation', () => {
     );
   });
 });
+
+describe('DB_DRIVER validation', () => {
+  const baseEnv = {
+    NODE_ENV: 'development',
+    CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+    JWT_SECRET: 'test-secret',
+  };
+
+  it('passes when DB_DRIVER is "sqlite"', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'sqlite' });
+    expect(errors).toEqual([]);
+  });
+
+  it('passes when DB_DRIVER is "postgres"', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'postgres' });
+    expect(errors).toEqual([]);
+  });
+
+  it('passes when DB_DRIVER is unset (defaults to sqlite)', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv });
+    expect(errors).toEqual([]);
+  });
+
+  it('rejects a typo like "Postgres" (wrong case)', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'Postgres' });
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/DB_DRIVER="Postgres" is invalid/);
+    expect(errors[0]).toMatch(/sqlite.*postgres|postgres.*sqlite/i);
+  });
+
+  it('rejects a typo like "postgresql"', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'postgresql' });
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/DB_DRIVER="postgresql" is invalid/);
+  });
+
+  it('rejects a value with a stray space like " postgres"', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: ' postgres' });
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/DB_DRIVER=" postgres" is invalid/);
+  });
+
+  it('error message names the invalid value clearly', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'mysql' });
+    expect(errors[0]).toContain('mysql');
+  });
+
+  it('error message lists the valid options', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'badval' });
+    expect(errors[0]).toContain('sqlite');
+    expect(errors[0]).toContain('postgres');
+  });
+});
