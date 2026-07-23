@@ -19,13 +19,22 @@
  */
 import Redis from 'ioredis';
 import config from '../config';
+import { logger } from '../utils/logger';
 import { CacheStore } from './cacheStore';
 import { InMemoryCacheStore } from './inMemoryCacheStore';
 import { RedisCacheStore } from './redisCacheStore';
 
 function createStore(): CacheStore {
   if (config.redisUrl) {
-    return new RedisCacheStore(new Redis(config.redisUrl));
+    const client = new Redis(config.redisUrl);
+    // ioredis emits 'error' on connection failures (refused connections,
+    // timeouts, etc.); an EventEmitter 'error' with no listener crashes the
+    // process, so this must be attached even though the cache is meant to
+    // degrade gracefully rather than take the backend down with it.
+    client.on('error', (err) => {
+      logger.error('[cache] Redis client error:', err);
+    });
+    return new RedisCacheStore(client);
   }
   return new InMemoryCacheStore();
 }
