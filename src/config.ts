@@ -41,6 +41,19 @@ const ENV_LOG_LEVEL: Record<NodeEnv, LogLevel> = {
   production: 'warn',
 };
 
+const DEFAULT_CORS_ORIGINS: Record<NodeEnv, string[]> = {
+  development: ['*'],
+  test: ['*'],
+  staging: ['https://staging.scoutoff.io'],
+  production: ['https://app.scoutoff.io', 'https://scoutoff.io'],
+};
+
+const rawCorsOrigins = process.env.CORS_ALLOWED_ORIGINS ?? process.env.ALLOWED_ORIGINS;
+const corsAllowedOrigins =
+  rawCorsOrigins !== undefined && rawCorsOrigins.trim() !== ''
+    ? rawCorsOrigins.split(',').map((o) => o.trim()).filter(Boolean)
+    : DEFAULT_CORS_ORIGINS[nodeEnv];
+
 const config = {
   nodeEnv,
   port: parseInt(process.env.PORT ?? '4000', 10),
@@ -74,7 +87,9 @@ const config = {
     }
     return val;
   })(),
+  dbDriver: (process.env.DB_DRIVER ?? 'sqlite') as 'sqlite' | 'postgres',
   dbPath: process.env.DB_PATH ?? 'scout-off.db',
+  databaseUrl: process.env.DATABASE_URL ?? '',
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),
@@ -108,9 +123,8 @@ const config = {
     // Maximum JSON payload size (default: 1MB)
     json: process.env.JSON_PAYLOAD_LIMIT ?? '1mb',
   },
-  allowedOrigins: process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
-    : [],
+  corsAllowedOrigins,
+  allowedOrigins: corsAllowedOrigins,
   logLevel: (process.env.LOG_LEVEL ?? ENV_LOG_LEVEL[nodeEnv]) as LogLevel,
   showErrorDetails: nodeEnv === 'development' || nodeEnv === 'test',
   useMockServices: nodeEnv === 'development' || nodeEnv === 'test',

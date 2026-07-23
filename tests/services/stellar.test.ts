@@ -83,7 +83,7 @@ import {
   logTrialOffer,
   pauseContractOnChain,
   registerValidatorOnChain,
-  updateProfile,
+  renewSubscription,
   PaymentError,
   FeeWithdrawalError,
   ValidatorActionError,
@@ -920,6 +920,200 @@ describe('logTrialOffer', () => {
     mockGetTransaction.mockRejectedValue(new Error('poll unreachable'));
 
     await expect(logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+});
+
+// ─── renewSubscription ────────────────────────────────────────────────────────
+
+describe('renewSubscription', () => {
+  const TIER = 'basic';
+  const DURATION = 30;
+  const PREVIOUS_EXPIRY = 1700000000;
+
+  it('throws PaymentError INVALID_ACCOUNT for empty wallet', async () => {
+    await expect(renewSubscription('', TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INVALID_ACCOUNT',
+    });
+    expect(mockGetAccount).not.toHaveBeenCalled();
+  });
+
+  it('re-invokes subscribe() and returns the confirmed transaction hash and on-chain expiry', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'real-renew-tx-001' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: { type: 'scvU64' } });
+    const newExpiry = 1712345678;
+    sdk.scValToNative.mockReturnValue(newExpiry);
+
+    const result = await renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY);
+
+    expect(result.transactionId).toBe('real-renew-tx-001');
+    expect(result.tier).toBe(TIER);
+    expect(result.expiresAt).toBe(newExpiry);
+    expect(result.status).toBe('active');
+    expect(mockGetAccount).toHaveBeenCalled();
+    expect(mockSimulate).toHaveBeenCalled();
+    expect(mockAssemble).toHaveBeenCalled();
+    expect(mockSendTransaction).toHaveBeenCalled();
+    expect(mockGetTransaction).toHaveBeenCalledWith('real-renew-tx-001');
+  });
+
+  it('polls getTransaction until status is no longer NOT_FOUND before returning', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'renew-poll-hash' });
+    mockGetTransaction
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'SUCCESS', returnValue: { type: 'scvU64' } });
+    sdk.scValToNative.mockReturnValue(1712345678);
+
+    jest.useFakeTimers();
+    const promise = renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY);
+    await jest.runAllTimersAsync();
+    const result = await promise;
+    jest.useRealTimers();
+
+    expect(result.transactionId).toBe('renew-poll-hash');
+    expect(mockGetTransaction).toHaveBeenCalledTimes(3);
+  });
+
+  it('throws PaymentError INSUFFICIENT_FUNDS when simulation reports contract error #7', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Contract error: #7' });
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INSUFFICIENT_FUNDS',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError INSUFFICIENT_FUNDS when the confirmed tx XDR reports insufficient fee', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'renew-fail-fee' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'error-payload-#7-encoded' });
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INSUFFICIENT_FUNDS',
+    });
+  });
+
+  it('throws PaymentError EXPIRED_TRUSTLINE when simulation reports a missing trustline', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'trustline not found for payment token' });
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'EXPIRED_TRUSTLINE',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError EXPIRED_TRUSTLINE when the confirmed tx XDR reports a trustline error', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'renew-fail-trust' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'TrustLineEntry missing' });
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'EXPIRED_TRUSTLINE',
+    });
+  });
+
+  it('throws PaymentError CONTRACT_ERROR on a generic contract panic during simulation', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'HostError: panicked at contract' });
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'CONTRACT_ERROR',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError CONTRACT_ERROR when sendTransaction returns ERROR status for an unrecognized reason', async () => {
+    mockSendTransaction.mockResolvedValue({
+      status: 'ERROR',
+      errorResult: 'tx_bad_auth',
+      hash: 'renew-err-hash',
+    });
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'CONTRACT_ERROR',
+    });
+    // Transaction never confirmed — getTransaction should NOT be called
+    expect(mockGetTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError CONTRACT_ERROR when the confirmed transaction has FAILED status for an unrecognized reason', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'renew-fail-generic' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: '' });
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'CONTRACT_ERROR',
+    });
+  });
+
+  it('throws PaymentError CONTRACT_ERROR when the confirmed transaction has no returnValue field at all', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'renew-no-retval' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' });
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'CONTRACT_ERROR',
+    });
+  });
+
+  it('throws PaymentError CONTRACT_ERROR (not a silent success) when the contract returns void instead of an expiry', async () => {
+    // A contract function returning unit still yields a truthy ScVal wrapping
+    // scvVoid — scValToNative() decodes that to `null`, not undefined, and
+    // does not throw (verified against @stellar/stellar-base's scval.js).
+    // This reproduces that exact on-the-wire shape to guard against silently
+    // accepting expiresAt: null as if it were a real confirmed expiry.
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'renew-void-retval' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: { type: 'scvVoid' } });
+    sdk.scValToNative.mockReturnValue(null);
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'CONTRACT_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when getAccount fails (RPC unreachable) — distinct from an on-chain rejection', async () => {
+    mockGetAccount.mockRejectedValue(new Error('network unreachable'));
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when simulateTransaction rejects — distinct from an on-chain rejection', async () => {
+    mockSimulate.mockRejectedValue(new Error('connection timeout'));
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when sendTransaction rejects — distinct from an on-chain rejection', async () => {
+    mockSendTransaction.mockRejectedValue(new Error('submit unreachable'));
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when getTransaction polling rejects — distinct from an on-chain rejection', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'renew-poll-fail' });
+    mockGetTransaction.mockRejectedValue(new Error('poll unreachable'));
+
+    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
       name: 'PaymentError',
       code: 'NETWORK_ERROR',
     });

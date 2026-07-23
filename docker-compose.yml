@@ -113,6 +113,30 @@ services:
       timeout: 3s
       retries: 5
 
+  # PostgreSQL service (optional, for testing the PostgreSQL driver).
+  # To use PostgreSQL instead of SQLite:
+  # 1. docker-compose up -d postgres
+  # 2. Set DATABASE_URL and DB_DRIVER environment variables in the backend service
+  postgres:
+    image: postgres:15-alpine
+    container_name: scout-off-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: scout_user
+      POSTGRES_PASSWORD: scout_password
+      POSTGRES_DB: scout_off
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scout_user -d scout_off"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
 volumes:
   # Named volume — survives `docker compose down` (data is only lost on `down -v`)
   scout_db:
+  # PostgreSQL data volume
+  postgres_data:

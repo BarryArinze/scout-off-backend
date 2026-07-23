@@ -26,6 +26,28 @@ describe('CORS origin allowlist', () => {
   afterEach(() => {
     delete process.env.ADMIN_WALLET;
     delete process.env.PLATFORM_SECRET_KEY;
+    delete process.env.CORS_ALLOWED_ORIGINS;
+    delete process.env.ALLOWED_ORIGINS;
+  });
+
+  it('allows requests from an origin allowed via CORS_ALLOWED_ORIGINS', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.CORS_ALLOWED_ORIGINS = ALLOWED;
+
+    const { default: app } = await import('../../src/app');
+    const res = await request(app).get('/health').set('Origin', ALLOWED);
+    expect(res.headers['access-control-allow-origin']).toBe(ALLOWED);
+  });
+
+  it('blocks requests from an origin rejected via CORS_ALLOWED_ORIGINS', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.CORS_ALLOWED_ORIGINS = ALLOWED;
+
+    const { default: app } = await import('../../src/app');
+    const res = await request(app)
+      .get('/health')
+      .set('Origin', 'https://unauthorized.example.com');
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
   });
 
   it('allows requests from an allowlisted origin in production', async () => {
@@ -50,6 +72,7 @@ describe('CORS origin allowlist', () => {
 
   it('allows wildcard in development without ALLOWED_ORIGINS set', async () => {
     process.env.NODE_ENV = 'development';
+    delete process.env.CORS_ALLOWED_ORIGINS;
     delete process.env.ALLOWED_ORIGINS;
 
     const { default: app } = await import('../../src/app');
@@ -59,9 +82,9 @@ describe('CORS origin allowlist', () => {
     expect(res.headers['access-control-allow-origin']).toBe('*');
   });
 
-  it('supports multiple allowlisted origins', async () => {
+  it('supports multiple allowlisted origins via CORS_ALLOWED_ORIGINS', async () => {
     process.env.NODE_ENV = 'production';
-    process.env.ALLOWED_ORIGINS = 'https://app.scoutoff.io,https://staging.scoutoff.io';
+    process.env.CORS_ALLOWED_ORIGINS = 'https://app.scoutoff.io,https://staging.scoutoff.io';
 
     const { default: app } = await import('../../src/app');
     const res = await request(app)
@@ -72,7 +95,7 @@ describe('CORS origin allowlist', () => {
 
   it('returns CORS headers on preflight OPTIONS request for allowed origin', async () => {
     process.env.NODE_ENV = 'production';
-    process.env.ALLOWED_ORIGINS = ALLOWED;
+    process.env.CORS_ALLOWED_ORIGINS = ALLOWED;
 
     const { default: app } = await import('../../src/app');
     const res = await request(app)
@@ -84,7 +107,7 @@ describe('CORS origin allowlist', () => {
 
   it('omits CORS header on preflight OPTIONS for disallowed origin', async () => {
     process.env.NODE_ENV = 'production';
-    process.env.ALLOWED_ORIGINS = ALLOWED;
+    process.env.CORS_ALLOWED_ORIGINS = ALLOWED;
 
     const { default: app } = await import('../../src/app');
     const res = await request(app)
