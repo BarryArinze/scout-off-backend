@@ -139,6 +139,10 @@ const config = {
     // multi-subscriber deployments should manage subscriptions in the DB instead.
     secret: process.env.WEBHOOK_SECRET ?? '',
   },
+  // Symmetric key (32-byte hex, e.g. `openssl rand -hex 32`) used to encrypt
+  // webhook_subscriptions.secret at rest (#686). Required in production —
+  // see src/utils/webhookSecretCipher.ts and docs/secrets-rotation.md.
+  webhookSecretEncryptionKey: process.env.WEBHOOK_SECRET_ENCRYPTION_KEY ?? '',
   rateLimit: {
     enabled: process.env.RATE_LIMIT_ENABLED !== 'false',
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
