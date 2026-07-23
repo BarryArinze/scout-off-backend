@@ -750,8 +750,8 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
 ## Testing
 
 ```bash
-# Smart contract tests (contracts/ not yet implemented — see #216)
-# cd contracts && cargo test
+# Smart contract tests (all four Soroban contracts are implemented and tested)
+cd contracts && cargo test
 
 # Backend tests
 npm run test
