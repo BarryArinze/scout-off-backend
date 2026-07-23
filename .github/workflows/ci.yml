@@ -10,12 +10,17 @@ jobs:
   lint:
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version-file: '.nvmrc'
+          node-version: ${{ matrix.node-version }}
 
       - run: npm ci
 
@@ -25,12 +30,17 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
+
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version-file: '.nvmrc'
+          node-version: ${{ matrix.node-version }}
 
       - run: npm ci
 
@@ -52,7 +62,11 @@ jobs:
         env:
           CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
 
+      # Coverage is only representative once, so upload it from the Node
+      # version .nvmrc pins (20) to keep this identical to the prior
+      # single-version behavior instead of uploading/overwriting 3x.
       - name: Upload coverage to Codecov
+        if: matrix.node-version == 20
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -60,6 +74,7 @@ jobs:
           fail_ci_if_error: false
 
       - name: Upload coverage report as artifact
+        if: matrix.node-version == 20
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
