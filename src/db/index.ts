@@ -45,7 +45,7 @@ export async function initDb(): Promise<void> {
       );
     }
 
-    const pgDriver = new PostgresDriver(config.databaseUrl);
+    const pgDriver = new PostgresDriver(config.databaseUrl, config.databaseSsl);
     await pgDriver.connect();
     _driver = pgDriver;
 
