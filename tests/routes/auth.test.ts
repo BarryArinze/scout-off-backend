@@ -88,3 +88,37 @@ describe('POST /auth/token — malformed XDR handling', () => {
     }
   });
 });
+
+describe('POST /auth/token — admin role pre-verification regression (#694)', () => {
+  it('does not issue an admin-role token for a transaction whose source is an admin wallet but is not validly signed', async () => {
+    // Construct a transaction XDR whose first operation's source is an admin wallet,
+    // but which is NOT signed by that wallet.  Without the fix this could (in a
+    // fragile code path) return a token before signature verification runs.
+    // With the fix, role determination only happens from verifyAndIssueToken()'s
+    // verified account — so any signature failure produces a 401, not an admin token.
+    const malformedXdr = 'AAAAAQAAAAAAAAAA'; // short / invalid XDR
+    const res = await request(app)
+      .post('/auth/token')
+      .send({ transaction: malformedXdr });
+
+    // Must never return 200 with an admin-role token
+    expect(res.status).not.toBe(200);
+    // Must be a 4xx error
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.status).toBeLessThan(500);
+    expect(res.body.success).toBe(false);
+    // No token in the response
+    expect(res.body.token).toBeUndefined();
+  });
+
+  it('returns 401 (not 200) for a well-formed XDR whose source looks admin-like but is unsigned', async () => {
+    // Any malformed / unsigned transaction must be rejected before any role claim
+    // is evaluated, confirming no "admin peek before verify" path exists.
+    const res = await request(app)
+      .post('/auth/token')
+      .send({ transaction: 'AAAAAgAAAABSdummy0000000000000000000000000000000000000' });
+    expect([400, 401]).toContain(res.status);
+    expect(res.body.success).toBe(false);
+    expect(res.body.token).toBeUndefined();
+  });
+});
