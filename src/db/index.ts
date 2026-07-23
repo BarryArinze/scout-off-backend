@@ -129,9 +129,9 @@ export function getDb(): Database.Database {
   return _db;
 }
 
-export function closeDb(): void {
+export async function closeDb(): Promise<void> {
   if (_driver) {
-    _driver.close();
+    await _driver.close();
     _driver = null;
   }
   if (_db) {
