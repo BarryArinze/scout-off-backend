@@ -170,6 +170,40 @@ npm audit
   - Moderate: Fix unless infeasible; document trade-offs
   - High/Critical: Fix immediately or block the PR
 
+### CI Enforcement & Exception Process
+
+CI runs `npm audit --omit=dev --audit-level=high` as a required job (`audit` in
+`.github/workflows/ci.yml`, alongside `lint`/`test`/`contracts`) and fails the
+build on any high/critical finding in **production** dependencies. Dev-only
+tooling (eslint, jest, autocannon, etc.) is excluded via `--omit=dev` so
+findings that never ship don't block merges.
+
+If this job fails on a finding that is genuinely not yet fixable:
+
+1. **Check for a non-breaking fix first.** Most high/critical findings are in
+   transitive dependencies — run `npm audit fix` (no `--force`) to pick up
+   anything resolvable within the existing semver ranges, then check whether
+   the direct dependency has a newer patch version. If the vulnerable package
+   is only pulled in transitively and the maintainer hasn't released a fix
+   yet, add an [`overrides`](https://docs.npmjs.com/cli/v10/configuring-npm/package-json#overrides)
+   entry in `package.json` to force the patched transitive version — this is
+   usually enough and doesn't require touching the direct dependency at all.
+2. **If no fix exists upstream** (no patched version published, or the only
+   fix is a major/breaking bump that needs its own dedicated PR): open a
+   tracking issue documenting the advisory (GHSA/CVE id), the affected
+   package and version, why it can't be resolved right now, and a re-check
+   date no more than 60 days out.
+3. **Get a second maintainer's sign-off** to merge despite the red `audit`
+   check for that one PR (a repo admin can override a single required status
+   check on a PR-by-PR basis — this is not a permanent CI change). Reference
+   the tracking issue from step 2 in both the override and the PR
+   description, e.g. `[audit-exception: GHSA-xxxx-xxxx-xxxx, tracked in #NNN,
+   re-check by YYYY-MM-DD]`.
+4. Do **not** work around the gate by lowering `--audit-level`, adding
+   `--omit` for a production package, or piping the command through
+   `|| true` — those changes are permanent and silently widen the gate for
+   every future PR, not just the one with the known exception.
+
 ### Dependency Update Process
 
 1. **Check for Updates**
