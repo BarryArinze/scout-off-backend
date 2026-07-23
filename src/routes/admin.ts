@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import express from 'express';
 import { getStats, getAllEvents, getFeeSummary, listValidators, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, introspectToken, revokeTokenController, reindex, getValidatorStatsEndpoint, getAuditLog, getAuditChainVerification, importValidators, getPendingActions, getPendingActionById, approvePendingAction } from '../controllers/adminController';
+import { importPlayers } from '../controllers/adminPlayerImportController';
 import { getFeatureFlags, updateFeatureFlag } from '../controllers/featureFlagsController';
 import { exportEvents } from '../controllers/exportController';
 import { listDeadLetters, replayDeadLetter } from '../controllers/webhookAdminController';
@@ -184,6 +185,34 @@ router.post(
   // express.json() middleware in app.ts.
   express.text({ type: ['text/csv', 'text/plain'], limit: '1mb' }),
   importValidators,
+);
+
+/**
+ * POST /api/admin/players/import
+ *
+ * Bulk-onboards players from a CSV or JSON batch (e.g. migrating an
+ * academy's existing roster), reusing the same validation and IPFS pinning
+ * logic as POST /api/players/register.
+ * Accepts either:
+ *   - JSON body: { players: [{ wallet, position, region, metadata|metadataUri }, …] }
+ *   - CSV body (Content-Type: text/csv): rows of wallet,position,region,metadataUri
+ *
+ * Each entry is validated against the single-registration schema and
+ * processed independently — one invalid or failing row doesn't abort the
+ * batch. Batch size is capped by config.playerImport.maxBatchSize.
+ *
+ * @body { players: RegisterPlayerRequest[] } | CSV text
+ * @response 200 { success: true, data: { results, summary } }
+ * @response 400 { success: false, error: string } - Empty/unparseable body or batch too large
+ * @response 401 { success: false, error: string } - Missing token
+ * @response 403 { success: false, error: string } - Non-admin role
+ * @auth Bearer (admin role required)
+ */
+router.post(
+  '/players/import',
+  requireRole('admin'),
+  express.text({ type: ['text/csv', 'text/plain'], limit: '1mb' }),
+  importPlayers,
 );
 
 /**

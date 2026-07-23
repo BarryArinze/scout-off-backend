@@ -11,10 +11,12 @@
  */
 describe('src/services/stellar.ts module wiring', () => {
   it('requires without throwing (the module parses and compiles cleanly)', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     expect(() => require('../../src/services/stellar')).not.toThrow();
   });
 
   it('exports purchaseSubscription and updateProfile as top-level functions', () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const stellar = require('../../src/services/stellar');
     expect(typeof stellar.purchaseSubscription).toBe('function');
     expect(typeof stellar.updateProfile).toBe('function');

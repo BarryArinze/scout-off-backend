@@ -132,6 +132,11 @@ const config = {
   /** TTL for player list cache entries in milliseconds. */
   playerCacheTtlMs: parseInt(process.env.PLAYER_CACHE_TTL_MS ?? '60000', 10),
 
+  playerImport: {
+    /** Maximum number of rows accepted per bulk player import request. */
+    maxBatchSize: parseInt(process.env.PLAYER_IMPORT_MAX_BATCH ?? '500', 10),
+  },
+
   // When set, the search cache (src/services/cache.ts) uses Redis so cache
   // state is shared across multiple backend instances. When unset (default),
   // it falls back to an in-memory Map — no setup required for local dev/CI.
