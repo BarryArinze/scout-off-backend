@@ -1,4 +1,7 @@
-import { validateRuntimeEnv } from '../scripts/validate-env';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
+import { validateRuntimeEnv, findStaleExampleKeys } from '../scripts/validate-env';
 
 describe('validate-env runtime validation', () => {
   it('should pass on a complete valid config (NODE_ENV=development)', () => {
