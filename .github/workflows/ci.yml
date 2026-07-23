@@ -9,6 +9,7 @@ on:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     strategy:
       fail-fast: false
@@ -29,6 +30,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
@@ -50,8 +52,11 @@ jobs:
       - name: Validate env example
         run: node scripts/validate-env.js
 
-      - name: Type check
+      - name: Type check (src)
         run: node node_modules/.bin/tsc --noEmit
+
+      - name: Type check (scripts)
+        run: node node_modules/.bin/tsc --noEmit -p tsconfig.scripts.json
 
       - name: Run tests with coverage
         # node_modules/.bin/jest is unreliable here: jest and jest-cli are
@@ -82,6 +87,7 @@ jobs:
 
   audit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v4
@@ -101,6 +107,7 @@ jobs:
   contracts:
     name: Soroban Contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
