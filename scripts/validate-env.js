@@ -4,7 +4,8 @@
  *
  * Two modes:
  *   1. CI / documentation check (default): verifies every process.env.VAR
- *      referenced in src/ is listed in .env.example.
+ *      referenced in src/ is listed in .env.example, and warns about any
+ *      .env.example entries that have no corresponding reference in src/.
  *   2. Runtime startup check (--runtime): verifies required vars are set in
  *      the current process environment and validates NODE_ENV.
  *
@@ -57,6 +58,43 @@ function validateRuntimeEnv(env = process.env) {
   return errors;
 }
 
+/**
+ * Check .env.example entries that have no corresponding process.env.VAR
+ * reference anywhere in src/. Stale entries are returned as an array of
+ * key names. This is a warning-level check — some variables may be
+ * intentionally documented ahead of use or read via a dynamic pattern that
+ * the static regex cannot detect.
+ *
+ * @param {string}   examplePath  Absolute path to .env.example
+ * @param {string[]} srcFiles     Absolute paths to the .ts source files to scan
+ * @returns {string[]}            Array of stale key names (may be empty)
+ */
+function findStaleExampleKeys(examplePath, srcFiles) {
+  const exampleKeys = fs
+    .readFileSync(examplePath, 'utf8')
+    .split('\n')
+    .filter((l) => l && !l.startsWith('#'))
+    .map((l) => l.split('=')[0].trim())
+    .filter(Boolean);
+
+  // Collect every env key referenced across all source files
+  const referencedKeys = new Set();
+  for (const file of srcFiles) {
+    const content = fs.readFileSync(file, 'utf8');
+    const codeOnly = content
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((line) => line.replace(/\/\/.*$/, ''))
+      .join('\n');
+    const matches = [...codeOnly.matchAll(/process\.env\.([A-Z_]+)/g)];
+    for (const [, key] of matches) {
+      referencedKeys.add(key);
+    }
+  }
+
+  return exampleKeys.filter((k) => !referencedKeys.has(k));
+}
+
 if (require.main === module) {
   // ─── Runtime check ────────────────────────────────────────────────────────────
   if (process.argv.includes('--runtime')) {
@@ -81,11 +119,13 @@ if (require.main === module) {
       .map((l) => l.split('=')[0].trim())
   );
 
+  const srcDir = path.resolve(__dirname, '../src');
   const srcFiles = fs
-    .readdirSync(path.resolve(__dirname, '../src'), { recursive: true })
+    .readdirSync(srcDir, { recursive: true })
     .filter((f) => f.endsWith('.ts'))
-    .map((f) => path.resolve(__dirname, '../src', f));
+    .map((f) => path.resolve(srcDir, f));
 
+  // ── Forward check: src/ → .env.example (hard failure) ────────────────────
   const undocumented = [];
   for (const file of srcFiles) {
     const content = fs.readFileSync(file, 'utf8');
@@ -106,6 +146,14 @@ if (require.main === module) {
     process.exit(1);
   }
 
+  // ── Reverse check: .env.example → src/ (warning only) ────────────────────
+  const staleKeys = findStaleExampleKeys(examplePath, srcFiles);
+  if (staleKeys.length) {
+    console.warn('Warning: the following .env.example entries have no matching process.env reference in src/:');
+    staleKeys.forEach((k) => console.warn(`  ${k}`));
+    console.warn('These may be stale or read via a dynamic pattern not detected by static analysis.');
+  }
+
   console.log('Environment validation passed ✓');
 }
 
@@ -113,5 +161,5 @@ module.exports = {
   REQUIRED_RUNTIME_VARS,
   VALID_NODE_ENVS,
   validateRuntimeEnv,
+  findStaleExampleKeys,
 };
-
