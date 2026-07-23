@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# --- USAGE START ---
 # backup-db.sh — Copy the ScoutOff SQLite database to a timestamped backup location.
 #
 # Supports both local filesystem destinations and S3/GCS URIs:
@@ -22,6 +23,7 @@
 # Exit codes:
 #   0  Success (backup created and verified, or standalone verify passed)
 #   1  Validation, copy, or verification failure
+# --- USAGE END ---
 
 set -euo pipefail
 
@@ -113,7 +115,9 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,24p' "$0"
+      # Extract usage text between marker lines so --help is robust to
+      # future edits that add/remove lines from the header comment.
+      awk '/^# --- USAGE START ---/{found=1; next} /^# --- USAGE END ---/{exit} found{sub(/^# ?/,""); print}' "$0"
       exit 0
       ;;
     *)
