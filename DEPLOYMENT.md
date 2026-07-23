@@ -69,13 +69,16 @@ It supports local paths, AWS S3, and Google Cloud Storage.
 
 ```bash
 # Local
-DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off npm run backup-db
 
 # AWS S3 (requires aws CLI and credentials in environment)
-DB_PATH=/data/scout-off.db BACKUP_DEST=s3://my-bucket/scout-off-backups bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=s3://my-bucket/scout-off-backups npm run backup-db
 
 # Google Cloud Storage (requires gsutil / gcloud SDK)
-DB_PATH=/data/scout-off.db BACKUP_DEST=gs://my-bucket/scout-off-backups bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=gs://my-bucket/scout-off-backups npm run backup-db
+
+# Equivalent direct invocation
+DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off bash scripts/backup-db.sh
 ```
 
 The script exits with code `1` and prints an error to stderr on any failure (file missing, CLI not found, copy error, or verification failure).
@@ -94,15 +97,20 @@ Run periodic drills against historical backups to confirm they remain restorable
 
 ```bash
 # Local backup + sidecar created at backup time
-bash scripts/backup-db.sh --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
+npm run backup-db -- --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
 
 # S3 (downloads backup and .counts sidecar automatically)
-bash scripts/backup-db.sh --verify-only s3://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
+npm run backup-db -- --verify-only s3://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
 
 # GCS
-bash scripts/backup-db.sh --verify-only gs://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
+npm run backup-db -- --verify-only gs://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
 
 # Direct verifier with explicit expected counts (e.g. if the sidecar was lost)
+EXPECT_PLAYERS=120 EXPECT_EVENTS=5400 EXPECT_MIGRATIONS=18 \
+  npm run verify-backup -- /var/backups/scout-off/scout-off-20250720T120000Z.db
+
+# Equivalent direct invocations
+bash scripts/backup-db.sh --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
 EXPECT_PLAYERS=120 EXPECT_EVENTS=5400 EXPECT_MIGRATIONS=18 \
   bash scripts/verify-backup.sh /var/backups/scout-off/scout-off-20250720T120000Z.db
 ```

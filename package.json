@@ -17,7 +17,10 @@
     "test:watch": "node node_modules/jest/bin/jest.js --watch",
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts' --ext .ts",
     "loadtest": "ts-node --project tsconfig.scripts.json scripts/loadtest.ts",
-    "seed": "ts-node --project tsconfig.scripts.json scripts/seed.ts"
+    "seed": "ts-node --project tsconfig.scripts.json scripts/seed.ts",
+    "backfill": "node scripts/backfill.js",
+    "backup-db": "bash scripts/backup-db.sh",
+    "verify-backup": "bash scripts/verify-backup.sh"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
