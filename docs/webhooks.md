@@ -112,6 +112,14 @@ slow subscriber cannot fail an unrelated request (e.g. player registration).
 
 ## Secret Rotation
 
+### At-rest encryption (#686)
+
+Every subscription's HMAC secret is encrypted at rest in `webhook_subscriptions.secret` using
+`WEBHOOK_SECRET_ENCRYPTION_KEY` (AES-256-GCM, see `src/utils/webhookSecretCipher.ts`) — it is
+decrypted only in memory, at the moment a delivery is signed, and the decrypted value is never
+persisted. See [docs/secrets-rotation.md § 6](secrets-rotation.md#6-webhook-secret-encryption-key-webhook_secret_encryption_key)
+for key rotation and the one-time migration for subscriptions created before this shipped.
+
 ### Current limitation
 
 There is no dedicated API endpoint for rotating a webhook subscription's HMAC signing secret.

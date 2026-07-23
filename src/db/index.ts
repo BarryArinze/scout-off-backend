@@ -5,6 +5,7 @@ import { EventRecord, ContractEventType } from '../types';
 import { runMigrations } from './migrate';
 import { logger } from '../utils/logger';
 import { computeChainHash, auditChainContent, GENESIS_HASH } from '../utils/hashChain';
+import { encryptWebhookSecret, decryptWebhookSecret } from '../utils/webhookSecretCipher';
 import { DbDriver } from './driver';
 import { SqliteDriver } from './sqlite-driver';
 import { PostgresDriver } from './postgres-driver';
@@ -1287,9 +1288,13 @@ export interface WebhookSubscription {
 
 export function createWebhookSubscription(url: string, secret?: string): WebhookSubscription {
   const finalSecret = secret ?? crypto.randomBytes(32).toString('hex');
+  // Encrypted at rest (#686) — only the ciphertext is ever persisted. The
+  // plaintext is returned to the caller here (e.g. for the API response at
+  // issuance time) but is never written back to storage.
+  const encryptedSecret = encryptWebhookSecret(finalSecret);
   const sql = 'INSERT INTO webhook_subscriptions (url, secret) VALUES (?, ?)';
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(url, finalSecret);
+    const info = getDb().prepare(sql).run(url, encryptedSecret);
     return {
       id: Number(info.lastInsertRowid),
       url,
@@ -1301,7 +1306,12 @@ export function createWebhookSubscription(url: string, secret?: string): Webhook
 
 export function listWebhookSubscriptions(): WebhookSubscription[] {
   const sql = 'SELECT * FROM webhook_subscriptions ORDER BY id ASC';
-  return timedQuery(sql, () => getDb().prepare(sql).all() as WebhookSubscription[]);
+  return timedQuery(sql, () => {
+    const rows = getDb().prepare(sql).all() as WebhookSubscription[];
+    // Decrypted only here, in memory, immediately before the caller signs a
+    // delivery with it (src/services/webhooks.ts) — never persisted.
+    return rows.map((row) => ({ ...row, secret: decryptWebhookSecret(row.secret) }));
+  });
 }
 
 /**
