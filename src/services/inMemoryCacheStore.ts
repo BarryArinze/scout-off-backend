@@ -1,4 +1,5 @@
 import { CacheStore } from './cacheStore';
+import { recordCacheEviction } from '../middleware/metrics';
 
 interface Entry {
   value: unknown;
@@ -22,6 +23,7 @@ export class InMemoryCacheStore implements CacheStore {
     if (!entry) return undefined;
     if (this.isExpired(entry)) {
       this.store.delete(key);
+      recordCacheEviction();
       return undefined;
     }
     return entry.value as T;

@@ -57,12 +57,44 @@ The load test is **not** wired into the standard per-PR CI pipeline. It is inten
 
 ## Baseline
 
-A baseline run was conducted on [date] against the `main` branch at commit [sha] with the following results:
+> **Status: baseline not yet recorded — tracked in [issue #720](https://github.com/scout-off/scout-off-backend/issues/720).**
+>
+> The table below has placeholder values.  The first contributor to run a reproducible
+> load-test against `main` should fill in the numbers and open a follow-up PR to lock
+> them in.  Instructions for producing and recording a baseline are in the
+> [Running the Load Test](#running-the-load-test) section above.
 
-| Endpoint | p50 | p95 | p99 | Throughput |
-|---|---|---|---|---|
-| `GET /api/players` | - | - | - | - |
-| `GET /api/players/:playerId` | - | - | - | - |
-| `POST /auth/token` | - | - | - | - |
+A baseline run has not yet been conducted.  To record one:
 
-*Note: Baseline numbers are intentionally blank — the first person to run `npm run loadtest` against their local environment should fill them in along with the date and commit sha, then open a follow-up PR to lock them in.*
+1. Check out the commit you want to baseline:
+   ```bash
+   git checkout main   # or a specific SHA
+   ```
+2. Seed and start the server:
+   ```bash
+   npm run seed
+   npm start
+   ```
+3. Run the load test and capture stdout:
+   ```bash
+   npm run loadtest 2>&1 | tee loadtest-baseline.txt
+   ```
+4. Fill in the table below with the results, the date, and the exact commit SHA.
+5. Open a PR updating this file — include the `loadtest-baseline.txt` output as a PR comment
+   for reproducibility.
+
+| Endpoint | p50 | p95 | p99 | Throughput | Recorded on | Commit |
+|---|---|---|---|---|---|---|
+| `GET /api/players` | — | — | — | — | *(not yet recorded)* | *(not yet recorded)* |
+| `GET /api/players/:playerId` | — | — | — | — | *(not yet recorded)* | *(not yet recorded)* |
+| `POST /auth/token` | — | — | — | — | *(not yet recorded)* | *(not yet recorded)* |
+
+**Command used to produce these results** *(fill in when recording)*:
+```bash
+# Example — replace <SHA> and <DATE> with real values
+# git checkout <SHA>
+# npm run seed && npm start &
+# DATABASE_SSL=false npm run loadtest
+```
+
+*Environment* *(fill in when recording)*: Node vX.Y.Z, SQLite on SSD, single-process, no Redis.

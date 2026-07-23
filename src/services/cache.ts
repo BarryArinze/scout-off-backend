@@ -19,13 +19,23 @@
  */
 import Redis from 'ioredis';
 import config from '../config';
+import { logger } from '../utils/logger';
 import { CacheStore } from './cacheStore';
 import { InMemoryCacheStore } from './inMemoryCacheStore';
 import { RedisCacheStore } from './redisCacheStore';
+import { recordCacheHit, recordCacheMiss } from '../middleware/metrics';
 
 function createStore(): CacheStore {
   if (config.redisUrl) {
-    return new RedisCacheStore(new Redis(config.redisUrl));
+    const client = new Redis(config.redisUrl);
+    // ioredis emits 'error' on connection failures (refused connections,
+    // timeouts, etc.); an EventEmitter 'error' with no listener crashes the
+    // process, so this must be attached even though the cache is meant to
+    // degrade gracefully rather than take the backend down with it.
+    client.on('error', (err) => {
+      logger.error('[cache] Redis client error:', err);
+    });
+    return new RedisCacheStore(client);
   }
   return new InMemoryCacheStore();
 }
@@ -34,7 +44,13 @@ const store: CacheStore = createStore();
 
 /** Fetch a cached value. Returns undefined if missing or expired. */
 export async function cacheGet<T>(key: string): Promise<T | undefined> {
-  return store.get<T>(key);
+  const value = await store.get<T>(key);
+  if (value !== undefined) {
+    recordCacheHit();
+  } else {
+    recordCacheMiss();
+  }
+  return value;
 }
 
 /** Store a value under `key`, expiring after `ttlMs` (default: config.playerCacheTtlMs). */

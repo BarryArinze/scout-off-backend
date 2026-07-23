@@ -110,6 +110,58 @@ instead of being dropped, with:
 This never throws back into the caller that triggered the event — a broken or
 slow subscriber cannot fail an unrelated request (e.g. player registration).
 
+## Secret Rotation
+
+### Current limitation
+
+There is no dedicated API endpoint for rotating a webhook subscription's HMAC signing secret.
+The secret is generated once when the subscription row is created and there is no
+`PATCH /api/admin/webhooks/:id/rotate-secret` (or equivalent) at this time.
+
+This is a known gap — it is explicitly called out in
+[docs/secrets-rotation.md](secrets-rotation.md) under the **Known Gaps and Limitations**
+section.
+
+### Workaround: delete and re-create the subscription
+
+Until a dedicated rotation endpoint ships, the only way to rotate a secret is to:
+
+1. **Identify the subscription** you want to rotate via `GET /api/admin/webhooks/dead-letters`
+   or by inspecting the `webhook_subscriptions` table directly.
+
+2. **Delete the subscription** (or mark it inactive in the database).
+
+3. **Re-create the subscription** — the backend generates a fresh `crypto.randomBytes(32)` secret
+   on creation.  For the legacy single-subscriber flow, clear `WEBHOOK_SECRET` and restart the
+   backend; a new random secret is generated automatically.
+
+4. **Update your receiver** with the new secret so it can re-validate the
+   `X-Webhook-Signature` header.
+
+> ⚠️ **Note on in-flight deliveries**: Any dead-lettered rows that were signed with the old
+> secret can still be replayed via `POST /api/admin/webhooks/:id/replay` — the replay endpoint
+> re-signs the payload with the *current* secret, so the receiver will see the new signature.
+
+### Legacy single-subscriber (WEBHOOK_SECRET env var)
+
+If you are using the legacy `WEBHOOK_URL` / `WEBHOOK_SECRET` environment-variable flow:
+
+1. Generate a new secret:
+   ```bash
+   openssl rand -hex 32
+   ```
+2. Update `WEBHOOK_SECRET` in your environment to the new value.
+3. Restart the backend — the existing legacy subscription row is updated with the new secret
+   on startup.
+4. Update `SCOUTOFF_WEBHOOK_SECRET` (or equivalent) on your receiver side.
+
+### Future improvement
+
+See [docs/secrets-rotation.md](secrets-rotation.md) — once a dedicated rotation endpoint
+(`POST /api/admin/webhooks/:id/rotate-secret`) is added, this section will be updated to
+document zero-downtime rotation using a dual-secret validation window (analogous to the
+`JWT_SECRET_PREVIOUS` pattern used for JWT rotation).
+
 ## Admin endpoints
 
 Both require a Bearer JWT with the `admin` role.
