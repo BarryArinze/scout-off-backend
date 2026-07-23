@@ -59,7 +59,22 @@ require_sqlite3() {
 table_count() {
   local db_path="$1"
   local table="$2"
-  bash "${SCRIPT_DIR}/sqlite-cli.sh" "${db_path}" "SELECT COUNT(*) FROM \"${table}\";" 2>/dev/null || echo "0"
+  local output
+  local status
+
+  # Capture output and exit code separately so we can distinguish
+  # "query succeeded and returned 0" from "query failed" (locked DB,
+  # corrupt file, missing table, etc.).  The previous implementation
+  # used `2>/dev/null || echo "0"`, which silently masked any failure
+  # and returned 0 — indistinguishable from a genuinely empty table.
+  output="$(bash "${SCRIPT_DIR}/sqlite-cli.sh" "${db_path}" "SELECT COUNT(*) FROM \"${table}\";" 2>&1)"
+  status=$?
+
+  if [[ "${status}" -ne 0 ]]; then
+    fail "table_count() query failed for table '${table}' in '${db_path}' (exit ${status}): ${output}"
+  fi
+
+  echo "${output}"
 }
 
 capture_source_counts() {
