@@ -3,6 +3,9 @@
   "version": "1.0.0",
   "description": "Backend API for ScoutOff — decentralized football scouting platform on Stellar",
   "main": "dist/index.js",
+  "engines": {
+    "node": ">=18.0.0 <23.0.0"
+  },
   "scripts": {
     "predev": "node scripts/validate-env.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
