@@ -162,5 +162,15 @@ The connection string for the optional Redis cache, which may contain sensitive 
 ## Known Gaps and Limitations
 
 ### Webhook Signing Secrets
-Currently, the backend's webhook dispatcher does not support signing outgoing payloads. There is no `WEBHOOK_SIGNING_SECRET` environment variable, and the dispatch mechanism does not generate signature headers. 
-* **Follow-up Action**: Implement payload signing (HMAC SHA-256) in a future release. Once implemented, a rotation policy for the signing secret should be documented here, supporting dual-key validation to prevent webhook delivery failures during rotation.
+The backend's webhook dispatcher **does** sign outgoing payloads with an HMAC-SHA256 signature
+sent in the `X-Webhook-Signature` header.  Each subscription row in `webhook_subscriptions` holds
+its own per-subscriber secret generated at creation.
+
+**Current limitation**: There is no dedicated API endpoint to rotate a subscription's secret
+without deleting and re-creating the subscription.  See
+[docs/webhooks.md § Secret Rotation](webhooks.md#secret-rotation) for the current workaround and
+the planned `POST /api/admin/webhooks/:id/rotate-secret` improvement.
+
+* **Follow-up Action**: Once the rotation endpoint ships, update both this document and
+  `docs/webhooks.md` to document zero-downtime dual-secret rotation (analogous to the
+  `JWT_SECRET_PREVIOUS` pattern).
