@@ -22,7 +22,15 @@ export function isMetricsEnabled(): boolean {
  * Express middleware that increments per-route request counts, accumulates latency,
  * and tracks http_errors_total for 4xx and 5xx responses.
  * Disabled when METRICS_ENABLED=false.
+ *
+ * Unmatched routes (no req.route set — 404s, bot scans, arbitrary paths) are
+ * aggregated under a single UNMATCHED_ROUTE_LABEL rather than keyed by the raw
+ * req.path string. Without this bucketing, every distinct URL probed by scanners
+ * or typos would permanently occupy an entry in metricsStore, giving an attacker
+ * trivial unbounded cardinality growth to degrade Prometheus scraping.
  */
+export const UNMATCHED_ROUTE_LABEL = 'unmatched_route';
+
 export function metricsMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (!isMetricsEnabled()) {
     next();
@@ -30,7 +38,11 @@ export function metricsMiddleware(req: Request, res: Response, next: NextFunctio
   }
   const start = Date.now();
   res.on('finish', () => {
-    const key = `${req.method} ${req.route?.path ?? req.path}`;
+    // Use the matched Express route pattern when available; fall back to a
+    // single constant label for all unmatched requests so scanner/bot traffic
+    // cannot grow metricsStore without bound.
+    const routeLabel = req.route?.path ?? UNMATCHED_ROUTE_LABEL;
+    const key = `${req.method} ${routeLabel}`;
     const latency = Date.now() - start;
     if (!metricsStore[key]) {
       metricsStore[key] = { count: 0, totalLatencyMs: 0 };
