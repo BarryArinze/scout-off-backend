@@ -137,4 +137,24 @@ describe('ipAllowlistMiddleware', () => {
 
     delete process.env.TRUSTED_PROXY_COUNT;
   });
+
+  // ------------------------------------------------------------------
+  // Test 6: IPv6 client IP must be rejected explicitly, not silently
+  // miscomputed to 0.
+  // ------------------------------------------------------------------
+  it('rejects an IPv6 client IP explicitly instead of silently coercing it to 0', () => {
+    // 0.0.0.0/0 would match every IPv4 address (and would also have
+    // matched the old NaN|0 -> 0 coercion for an IPv6 client).
+    process.env.ADMIN_IP_ALLOWLIST = '0.0.0.0/0';
+
+    const { req, res, next } = makeReqRes('2001:db8::1');
+    ipAllowlistMiddleware(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({
+      success: false,
+      error: 'Forbidden: IPv6 addresses are not supported by the IP allowlist',
+    });
+  });
 });
