@@ -25,4 +25,13 @@ describe('isValidEvidenceUri', () => {
     expect(isValidEvidenceUri(undefined as unknown as string)).toBe(false);
     expect(isValidEvidenceUri(null as unknown as string)).toBe(false);
   });
+
+  it('rejects bare scheme prefixes with no content', () => {
+    expect(isValidEvidenceUri('https://')).toBe(false);
+    expect(isValidEvidenceUri('ipfs://')).toBe(false);
+  });
+
+  it('rejects scheme prefixes with only whitespace content', () => {
+    expect(isValidEvidenceUri('https://   ')).toBe(false);
+  });
 });
