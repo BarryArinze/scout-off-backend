@@ -53,6 +53,9 @@ jobs:
       - name: Type check
         run: node node_modules/.bin/tsc --noEmit
 
+      - name: Type check (scripts)
+        run: node node_modules/.bin/tsc --noEmit -p tsconfig.scripts.json
+
       - name: Run tests with coverage
         # node_modules/.bin/jest is unreliable here: jest and jest-cli are
         # both hoisted to top-level node_modules and both declare a bin
