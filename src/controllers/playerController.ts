@@ -198,7 +198,10 @@ export async function filterPlayers(
   try {
     const tierResult = validateMinTier(req.query.minTier);
     if (!tierResult.valid) {
-      res.status(400).json({ success: false, error: tierResult.error, code: ErrorCode.VALIDATION_ERROR });
+      // minTier is a valid integer but outside the 0–3 range → semantic error (422).
+      // A non-integer or wrong type is caught by Zod as a format error (400).
+      const isRangeError = typeof tierResult.error === 'string' && tierResult.error.includes('out of range');
+      res.status(isRangeError ? 422 : 400).json({ success: false, error: tierResult.error, code: ErrorCode.VALIDATION_ERROR });
       return;
     }
     const minTier = tierResult.tier;

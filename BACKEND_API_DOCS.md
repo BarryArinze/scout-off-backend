@@ -704,10 +704,20 @@ All error responses follow this shape:
 
 Common HTTP status codes:
 
-| Code | Meaning                       |
-| ---- | ----------------------------- |
-| 400  | Validation error              |
-| 401  | Missing or invalid auth token |
-| 403  | Insufficient permissions      |
-| 404  | Resource not found            |
-| 500  | Internal server error         |
+| Code | Meaning                                                                                                   |
+| ---- | --------------------------------------------------------------------------------------------------------- |
+| 400  | Format/type error — missing required field, wrong data type, or invalid format (e.g. invalid CID, invalid Stellar address) |
+| 401  | Missing or invalid auth token                                                                             |
+| 403  | Insufficient permissions                                                                                  |
+| 404  | Resource not found                                                                                        |
+| 422  | Semantic error — field passes format checks but fails business logic (e.g. `minTier` is a valid integer but outside the 0–3 range) |
+| 500  | Internal server error                                                                                     |
+
+### 400 vs 422
+
+The API distinguishes between two classes of validation failure:
+
+- **400 Bad Request** — the input is malformed: a required field is missing, the value has the wrong data type, or it fails a format check (invalid CID, non-Stellar address, etc.).
+- **422 Unprocessable Entity** — the input is syntactically valid but fails a business-logic constraint. Examples:
+  - `minTier` is a valid integer but outside the accepted 0–3 range.
+  - An amount is a valid number but exceeds the contract balance.
