@@ -141,21 +141,123 @@ export async function isSubscribed(
 }
 
 /**
- * Stub: submit a pay-to-contact micro-fee on Stellar.
- * Replace with real Soroban invocation when ready.
+ * Invoke `pay_to_contact(scout, player_id)` on the Soroban contract to unlock
+ * direct contact with a player by paying the platform's micro-fee.
+ *
+ * Flow mirrors purchaseSubscription() / logTrialOffer():
+ *   getAccount → build tx → simulateTransaction → assembleTransaction
+ *   → sign → sendTransaction → poll getTransaction until final status.
+ *
+ * On success returns the confirmed transaction hash and a 'submitted' status.
+ * Throws PaymentError with code 'INSUFFICIENT_FUNDS' when the contract
+ * reports error #7 (InsufficientFee) — see contracts/subscription/src/lib.rs.
  */
 export async function submitContactPayment(
   scoutWallet: string,
   playerId: string,
 ): Promise<ContactPaymentResult> {
-  if (!scoutWallet || !playerId) {
-    throw new PaymentError('Missing scoutWallet or playerId', 'INVALID_ACCOUNT');
-  }
-  // TODO: build and submit pay_to_contact Soroban transaction
-  return {
-    transactionId: `stub-txid-${Date.now()}`,
-    status: 'submitted',
-  };
+  return tracer.startActiveSpan('stellar.submitContactPayment', async (span): Promise<ContactPaymentResult> => {
+    span.setAttribute('stellar.contract_function', 'pay_to_contact');
+    span.setAttribute('stellar.player_id', playerId);
+    try {
+      if (!scoutWallet || !playerId) {
+        throw new PaymentError('Missing scoutWallet or playerId', 'INVALID_ACCOUNT');
+      }
+
+      const { getPlatformKeypair } = await import('../utils/signer');
+      const keypair = getPlatformKeypair();
+
+      let account;
+      try {
+        account = await server.getAccount(keypair.publicKey());
+      } catch (err) {
+        throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      const contract = new Contract(config.contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: networkPassphrase(),
+      })
+        .addOperation(
+          contract.call(
+            'pay_to_contact',
+            Address.fromString(scoutWallet).toScVal(),
+            nativeToScVal(playerId, { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      let simResult;
+      try {
+        simResult = await server.simulateTransaction(tx);
+      } catch (err) {
+        throw new PaymentError(`Simulation request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        const errMsg = simResult.error ?? '';
+        if (isInsufficientFeeError(errMsg)) {
+          throw new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
+        }
+        throw new PaymentError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
+      }
+
+      const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+      preparedTx.sign(keypair);
+
+      let sendResult;
+      try {
+        sendResult = await server.sendTransaction(preparedTx);
+      } catch (err) {
+        throw new PaymentError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+      if (sendResult.status === 'ERROR') {
+        const errMsg = String(sendResult.errorResult ?? '');
+        if (isInsufficientFeeError(errMsg)) {
+          throw new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
+        }
+        throw new PaymentError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
+      }
+
+      const hash = sendResult.hash;
+      span.setAttribute('stellar.tx_hash', hash);
+
+      let getResult;
+      try {
+        getResult = await server.getTransaction(hash);
+        while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+          await new Promise((r) => setTimeout(r, 1000));
+          getResult = await server.getTransaction(hash);
+        }
+      } catch (err) {
+        throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+        const resultMeta = ((getResult as unknown) as { resultMetaXdr?: string }).resultMetaXdr ?? '';
+        if (isInsufficientFeeError(resultMeta)) {
+          throw new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
+        }
+        throw new PaymentError('pay_to_contact transaction failed on-chain', 'NETWORK_ERROR');
+      }
+
+      span.setAttribute('stellar.status', 'submitted');
+      return {
+        transactionId: hash,
+        status: 'submitted',
+      };
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.setAttribute('error.type', (err as Error).name);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 // ─── Trial offer ──────────────────────────────────────────────────────────────

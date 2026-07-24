@@ -25,11 +25,12 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `LOG_SKIP_PATHS` | — | Comma-separated paths requestLogger silences (default: health + metrics probes) |
 | `LOG_SAMPLE_RATE` | — | Float 0–1 sample rate for non-skipped paths (default: `1` = log all) |
 | `STELLAR_HEALTH_CHECK_ENABLED` | — | Set `false` in staging to skip Stellar RPC check |
-| `TRUSTED_PROXY_COUNT` | — | Number of trusted reverse proxies (default: `1`) |
+| `TRUSTED_PROXY_COUNT` | — | Number of trusted reverse proxies (default: `1`). Set to the exact number of proxy hops between the internet and this server. **Fail-safe**: if the observed `X-Forwarded-For` chain has fewer entries than this value implies, `extractClientIp()` falls back to the raw socket address rather than trusting the attacker-controlled leftmost value. A chain shorter than expected (direct connection bypassing a proxy, or a client crafting a short header) will therefore appear to come from the connecting IP, not a spoofed address. |
 | `ADMIN_WALLET` | — | Single admin wallet address (for backward compatibility) |
 | `ADMIN_WALLETS` | — | Comma-separated list of admin wallet addresses (e.g., `GABC...,GDEF...`) |
 | `ADMIN_THRESHOLD` | — | Number of admin signatures required for high-value operations (default: `1`) |
 | `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS allowed origins (defaults per env: `*` in dev, `https://staging.scoutoff.io` in staging, `https://app.scoutoff.io,https://scoutoff.io` in prod) |
+| `ADMIN_IP_ALLOWLIST` | — | Comma-separated list of **IPv4** addresses/CIDR ranges allowed to reach admin endpoints (e.g. `192.168.1.0/24,10.0.0.1`). Unset/empty disables the check. IPv6 is not supported yet — any IPv6 client IP is rejected with 403 regardless of this setting (fail closed). |
 
 ## Build & Start
 
@@ -72,13 +73,16 @@ It supports local paths, AWS S3, and Google Cloud Storage.
 
 ```bash
 # Local
-DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off npm run backup-db
 
 # AWS S3 (requires aws CLI and credentials in environment)
-DB_PATH=/data/scout-off.db BACKUP_DEST=s3://my-bucket/scout-off-backups bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=s3://my-bucket/scout-off-backups npm run backup-db
 
 # Google Cloud Storage (requires gsutil / gcloud SDK)
-DB_PATH=/data/scout-off.db BACKUP_DEST=gs://my-bucket/scout-off-backups bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=gs://my-bucket/scout-off-backups npm run backup-db
+
+# Equivalent direct invocation
+DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off bash scripts/backup-db.sh
 ```
 
 The script exits with code `1` and prints an error to stderr on any failure (file missing, CLI not found, copy error, or verification failure).
@@ -97,15 +101,20 @@ Run periodic drills against historical backups to confirm they remain restorable
 
 ```bash
 # Local backup + sidecar created at backup time
-bash scripts/backup-db.sh --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
+npm run backup-db -- --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
 
 # S3 (downloads backup and .counts sidecar automatically)
-bash scripts/backup-db.sh --verify-only s3://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
+npm run backup-db -- --verify-only s3://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
 
 # GCS
-bash scripts/backup-db.sh --verify-only gs://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
+npm run backup-db -- --verify-only gs://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
 
 # Direct verifier with explicit expected counts (e.g. if the sidecar was lost)
+EXPECT_PLAYERS=120 EXPECT_EVENTS=5400 EXPECT_MIGRATIONS=18 \
+  npm run verify-backup -- /var/backups/scout-off/scout-off-20250720T120000Z.db
+
+# Equivalent direct invocations
+bash scripts/backup-db.sh --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
 EXPECT_PLAYERS=120 EXPECT_EVENTS=5400 EXPECT_MIGRATIONS=18 \
   bash scripts/verify-backup.sh /var/backups/scout-off/scout-off-20250720T120000Z.db
 ```

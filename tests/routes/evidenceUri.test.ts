@@ -34,6 +34,11 @@ describe('isValidEvidenceUri helper', () => {
   it('rejects empty string', () => {
     expect(isValidEvidenceUri('')).toBe(false);
   });
+
+  it('rejects bare scheme prefixes with no content', () => {
+    expect(isValidEvidenceUri('https://')).toBe(false);
+    expect(isValidEvidenceUri('ipfs://')).toBe(false);
+  });
 });
 
 describe('POST /api/validators/milestone - evidenceUri validation', () => {

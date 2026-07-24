@@ -31,6 +31,7 @@ jobs:
   build:
     name: Build & test
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +79,7 @@ jobs:
     name: Deploy to staging
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: staging
       url: ${{ secrets.STAGING_URL }}
@@ -116,6 +118,7 @@ jobs:
     name: Smoke test
     needs: deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     environment: staging
     steps:
       - name: Verify GET /health
@@ -146,6 +149,7 @@ jobs:
         needs.smoke-test.result == 'failure'
       )
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Send deployment failure notification
         env:

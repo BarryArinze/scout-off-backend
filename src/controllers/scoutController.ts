@@ -409,7 +409,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
     insertContactUnlock({
       scout_wallet: wallet,
       player_id: playerId,
-      tx_hash: (result as { txHash?: string }).txHash ?? '',
+      tx_hash: result.transactionId,
       unlocked_at: Math.floor(Date.now() / 1000),
     });
     res.json({ success: true, data: result });

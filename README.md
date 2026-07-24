@@ -1,6 +1,8 @@
 # ScoutOff
 
-[![Backend CI](https://github.com/scout-off/scout-off-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/scout-off/scout-off-backend/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/scout-off/scout-off-backend/graph/badge.svg)](https://codecov.io/gh/scout-off/scout-off-backend)
+![Backend CI](https://github.com/scout-off/scout-off-backend/actions/workflows/ci.yml/badge.svg)
+
+![codecov](https://codecov.io/gh/scout-off/scout-off-backend/graph/badge.svg)
 
 Decentralized football scouting platform on Stellar — tamper-proof player profiles, on-chain progress verification, and direct scout-to-player connections powered by Soroban smart contracts.
 
@@ -19,7 +21,7 @@ Stellar is the backbone: sub-cent transaction fees mean a scout in Europe can pa
 - **Pay-to-Contact**: Scouts pay micro-fees in XLM or a platform token to unlock premium data or initiate contact
 - **Subscription Model**: Scouts can hold an active subscription for unlimited browsing within a tier
 - **SEP-10 Auth**: Players and scouts log in securely with a Stellar wallet (Freighter, Albedo, or Lobstr)
-- **Auth docs**: See [docs/auth.md](docs/auth.md) for SEP-10 challenge flow, JWT lifecycle, token refresh, and example requests.
+- **Auth docs**: See docs/auth.md for SEP-10 challenge flow, JWT lifecycle, token refresh, and example requests.
 - **Decentralized Storage**: Highlight reels and photos stored on IPFS; content hashes saved on-chain in the player's profile
 
 ## Architecture
@@ -333,6 +335,9 @@ npm run dev
 | `npm test`      | `jest --runInBand`                                        | Run the test suite                          |
 | `npm run lint`  | `eslint 'src/**/*.ts' 'tests/**/*.ts' --ext .ts`          | Run TypeScript linting                      |
 | `npm run seed`  | `ts-node --project tsconfig.scripts.json scripts/seed.ts` | Seed the local DB with sample data          |
+| `npm run backfill` | `node scripts/backfill.js`                             | Reset the indexer's last_ledger to replay events from a given ledger |
+| `npm run backup-db` | `bash scripts/backup-db.sh`                           | Back up the SQLite database (local/S3/GCS)  |
+| `npm run verify-backup` | `bash scripts/verify-backup.sh`                   | Verify a backup is restorable               |
 
 On startup the server will:
 
@@ -500,12 +505,12 @@ Compiles TypeScript to `dist/`. Run the compiled output with `npm start`.
 npm test
 ```
 
-Runs the full backend test suite with Jest. Tests are located in the [`tests/`](tests/) directory, organised by layer:
+Runs the full backend test suite with Jest. Tests are located in the `tests/` directory, organised by layer:
 
-- [`tests/middleware/`](tests/middleware/) — middleware unit tests (auth, correlationId, errorHandler, etc.)
-- [`tests/routes/`](tests/routes/) — route integration tests (health, scout, admin, etc.)
-- [`tests/utils/`](tests/utils/) — utility unit tests (CID validator, tier, logger, etc.)
-- [`tests/services/`](tests/services/) — service unit tests (IPFS, indexer, SEP-10, etc.)
+- `tests/middleware/` — middleware unit tests (auth, correlationId, errorHandler, etc.)
+- `tests/routes/` — route integration tests (health, scout, admin, etc.)
+- `tests/utils/` — utility unit tests (CID validator, tier, logger, etc.)
+- `tests/services/` — service unit tests (IPFS, indexer, SEP-10, etc.)
 
 ### Seed the Database
 
@@ -536,7 +541,7 @@ The seed script is **idempotent** — running it multiple times is safe; existin
 🌱  ScoutOff seed starting…
 
   Players   inserted=5  skipped=0
-    + seed-player-001, seed-player-002, seed-player-003, seed-player-004, seed-player-005
+    - seed-player-001, seed-player-002, seed-player-003, seed-player-004, seed-player-005
   Events    inserted=12  skipped=0
 
 ✅  Seed complete
@@ -669,12 +674,12 @@ Currently checks: **IPFS (Pinata)** storage connectivity and the **SQLite databa
 
 ### Dependencies
 
-| Endpoint | Dependency | Stub / Module |
-|----------|-----------|---------------|
-| `/health` | Stellar RPC (`SOROBAN_RPC_URL`) | `src/services/stellar.ts` — `stellarHealth()` |
-| `/health` | SQLite database | `src/db` — `getDb()` + `SELECT 1` probe with 2 s timeout |
-| `/ready` | IPFS / Pinata (`PINATA_API_KEY`) | `src/services/ipfs.ts` — `checkHealth()` |
-| `/ready` | SQLite database | `src/db` — `getDb()` + heartbeat-row upsert (writability) with 2 s timeout |
+| Endpoint  | Dependency                       | Stub / Module                                                              |
+| --------- | -------------------------------- | -------------------------------------------------------------------------- |
+| `/health` | Stellar RPC (`SOROBAN_RPC_URL`)  | `src/services/stellar.ts` — `stellarHealth()`                              |
+| `/health` | SQLite database                  | `src/db` — `getDb()` + `SELECT 1` probe with 2 s timeout                   |
+| `/ready`  | IPFS / Pinata (`PINATA_API_KEY`) | `src/services/ipfs.ts` — `checkHealth()`                                   |
+| `/ready`  | SQLite database                  | `src/db` — `getDb()` + heartbeat-row upsert (writability) with 2 s timeout |
 
 Both external dependency checks are stubbed in tests — see `tests/routes/health.test.ts`.
 
@@ -697,24 +702,20 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
    - Fill out profile: position, region, age, club
    - Upload highlight reels → stored on IPFS via Pinata
    - Call `register_player` — profile minted on Stellar ledger at Level 0
-
-2. **Milestone Verification**
+1. **Milestone Verification**
    - Coach or academy director submits a milestone (e.g., "Top speed 32 km/h")
    - Approved validator calls `approve_milestone` on-chain
    - Player's progress tier increments — visible immediately on scout dashboard
-
-3. **Scout Discovery**
+1. **Scout Discovery**
    - Scout subscribes or pays per contact in XLM
    - Filters players by region, position, and minimum verified tier
    - Views tamper-proof milestone history before deciding to reach out
    - Calls `pay_to_contact` — micro-fee settles in seconds, contact details unlocked
-
-4. **Trial Offer Logging**
+1. **Trial Offer Logging**
    - Scout submits a trial offer via `log_trial_offer`
    - Contract records the offer on-chain, advancing player to Elite Tier (Level 3)
    - Both parties have an immutable record of the agreement
-
-5. **Admin / Validator Management**
+1. **Admin / Validator Management**
    - Admin registers trusted validators (coaches, academies, certified trainers)
    - Admin monitors platform fees and calls `withdraw_fees` to collect revenue
    - Emergency `pause_contract` available as a circuit breaker
@@ -723,35 +724,59 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
 
 ### Key Environment Variables
 
-| Variable               | Description                                                                               |
-| ---------------------- | ----------------------------------------------------------------------------------------- |
-| `CONTRACT_ID`          | Deployed ScoutOff contract address (**required**)                                         |
-| `JWT_SECRET`           | Secret used to sign SEP-10 JWT tokens (**required**)                                      |
-| `HORIZON_URL`          | Stellar Horizon endpoint                                                                  |
-| `SOROBAN_RPC_URL`      | Soroban RPC endpoint                                                                      |
-| `NETWORK`              | `testnet` or `mainnet`                                                                    |
-| `NETWORK_PASSPHRASE`   | Stellar network passphrase (auto-set by `NETWORK`)                                        |
-| `PINATA_API_KEY`       | Pinata API key for IPFS uploads                                                           |
-| `PINATA_SECRET`        | Pinata secret                                                                             |
-| `PLATFORM_FEE_BPS`     | Platform fee in basis points (default: 500)                                               |
-| `PORT`                 | Backend API port (default: 4000)                                                          |
-| `DB_PATH`              | SQLite database file path (default: `scout-off.db`)                                       |
-| `LOG_LEVEL`            | Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)                         |
-| `ADMIN_WALLET`         | Stellar address of the platform admin; automatically granted admin role on token exchange |
-| `STELLAR_HEALTH_CHECK` | Set to `false` to disable Stellar RPC check in `/health` (default: `true`)                |
-| `JSON_PAYLOAD_LIMIT`   | Maximum JSON request body size (default: `1mb`); requests exceeding limit return HTTP 413 |
-| `RATE_LIMIT_ENABLED`   | Set to `false` to disable rate limiting (default: `true`)                                 |
-| `RATE_LIMIT_WINDOW_MS` | Rate limit window in milliseconds (default: `60000`)                                      |
-| `RATE_LIMIT_MAX`       | Max requests per window (default: `60`)                                                   |
-| `WEBHOOK_ENABLED`      | Set to `true` to enable event webhooks (default: `false`)                                 |
-| `WEBHOOK_URL`          | Endpoint to POST contract events to when `WEBHOOK_ENABLED=true`                           |
-| `WEBHOOK_SECRET`       | HMAC secret for the legacy `WEBHOOK_URL` subscription (see `docs/webhooks.md`); a random secret is generated if unset |
+> **Note:** For complete configuration details and advanced options, see [DEPLOYMENT.md](DEPLOYMENT.md).
+
+| Variable                   | Description                                                                                                           |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `CONTRACT_ID`              | Deployed ScoutOff contract address (**required**)                                                                     |
+| `JWT_SECRET`               | Secret used to sign SEP-10 JWT tokens (**required**)                                                                  |
+| `HORIZON_URL`              | Stellar Horizon endpoint                                                                                              |
+| `SOROBAN_RPC_URL`          | Soroban RPC endpoint                                                                                                  |
+| `NETWORK`                  | `testnet` or `mainnet`                                                                                                |
+| `NETWORK_PASSPHRASE`       | Stellar network passphrase (auto-set by `NETWORK`)                                                                    |
+| `PINATA_API_KEY`           | Pinata API key for IPFS uploads                                                                                       |
+| `PINATA_SECRET`            | Pinata secret                                                                                                         |
+| `PINATA_GATEWAY`           | IPFS gateway used to resolve pinned content (default: `https://gateway.pinata.cloud`)                                 |
+| `PLATFORM_FEE_BPS`         | Platform fee in basis points (default: 500)                                                                           |
+| `PORT`                     | Backend API port (default: 4000)                                                                                      |
+| `DB_DRIVER`                | Database driver to use: `sqlite` (default) or `postgres`                                                              |
+| `DB_PATH`                  | SQLite database file path (default: `scout-off.db`)                                                                   |
+| `DATABASE_URL`             | PostgreSQL connection URL (required when `DB_DRIVER=postgres`)                                                        |
+| `DATABASE_SSL`             | PostgreSQL SSL mode: `true`, `no-verify`, or `false` (default: `false`)                                               |
+| `LOG_LEVEL`                | Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)                                                     |
+| `LOG_SKIP_PATHS`           | Comma-separated paths to skip in request logging (default: health and metrics probes)                                 |
+| `LOG_SAMPLE_RATE`          | Sample rate for non-skipped paths (default: `1` = log all)                                                            |
+| `ADMIN_WALLET`             | Single admin Stellar address (for backward compatibility)                                                             |
+| `ADMIN_WALLETS`            | Comma-separated list of admin Stellar addresses                                                                       |
+| `ADMIN_THRESHOLD`          | Number of admin signatures required for high-value operations (default: `1`)                                          |
+| `STELLAR_HEALTH_CHECK`     | Set to `false` to disable Stellar RPC check in `/health` (default: `true`)                                            |
+| `JSON_PAYLOAD_LIMIT`       | Maximum JSON request body size (default: `1mb`); requests exceeding limit return HTTP 413                             |
+| `RATE_LIMIT_ENABLED`       | Set to `false` to disable rate limiting (default: `true`)                                                             |
+| `RATE_LIMIT_WINDOW_MS`     | Rate limit window in milliseconds (default: `60000`)                                                                  |
+| `RATE_LIMIT_MAX`           | Max requests per window (default: `60`)                                                                               |
+| `AUTH_RATE_LIMIT_WINDOW_MS`| Auth rate limit window in milliseconds (default: `60000`)                                                             |
+| `AUTH_RATE_LIMIT_MAX`      | Max auth requests per window (default: `5`)                                                                           |
+| `CORS_ALLOWED_ORIGINS`     | Comma-separated list of allowed origins (environment-specific defaults)                                               |
+| `TRUSTED_PROXY_COUNT`      | Number of trusted reverse-proxy hops (default: `1`)                                                                   |
+| `WEBHOOK_ENABLED`          | Set to `true` to enable event webhooks (default: `false`)                                                             |
+| `WEBHOOK_URL`              | Endpoint to POST contract events to when `WEBHOOK_ENABLED=true`                                                       |
+| `WEBHOOK_SECRET`           | HMAC secret for the legacy `WEBHOOK_URL` subscription (see `docs/webhooks.md`); a random secret is generated if unset |
+| `REDIS_URL`                | Redis connection URL for distributed caching (falls back to in-memory if unset)                                       |
+| `PLAYER_CACHE_TTL_MS`      | TTL for player list cache entries in milliseconds (default: `60000`)                                                 |
+| `PLAYER_IMPORT_MAX_BATCH`  | Maximum rows per bulk player import request (default: `500`)                                                          |
+| `PIN_JSON_CACHE_TTL_MS`    | TTL for pinJson deduplication cache entries in milliseconds (default: `300000` = 5 min)                              |
+| `ADMIN_ACTION_TTL_MS`      | TTL for pending admin multi-sig actions in milliseconds (default: `3600000` = 1 hour)                                |
+| `SUBSCRIPTION_GRACE_PERIOD_HOURS` | Grace period after subscription expiry during which access is still granted (default: `24`)                           |
+| `REQUEST_TIMEOUT_MS`       | Global request timeout in milliseconds before responding with 503 (default: `30000`)                                  |
+| `ADMIN_IP_ALLOWLIST`       | Comma-separated list of IPv4 addresses/CIDRs allowed on admin routes (unset = allow all)                              |
+| `SSE_KEEPALIVE_INTERVAL_MS`| Interval in milliseconds to send SSE keep-alive comments (default: `15000` = 15 seconds)                              |
+| `SSE_MAX_CONNECTIONS`      | Maximum number of concurrent SSE connections (default: `0` = unlimited)                                                |
 
 ## Testing
 
 ```bash
-# Smart contract tests (contracts/ not yet implemented — see #216)
-# cd contracts && cargo test
+# Smart contract tests (all four Soroban contracts are implemented and tested)
+cd contracts && cargo test
 
 # Backend tests
 npm run test
@@ -851,11 +876,10 @@ Contributions are welcome! This section provides guidance for backend contributo
 
 ### Getting Started
 
-1. **Onboarding via Drips Funding Wave Program**  
+1. **Onboarding via Drips Funding Wave Program**\
    ScoutOff is part of the Drips funding wave program. If you're a contributor interested in joining, visit [drips.network](https://drips.network) to learn about opportunities and register your interest. Funded contributors receive support through the Drips platform.
 
-2. **Fork and Set Up**
-
+1. **Fork and Set Up**
    ```bash
    git clone https://github.com/scout-off/scout-off-backend.git
    cd scout-off-backend
@@ -863,7 +887,7 @@ Contributions are welcome! This section provides guidance for backend contributo
    npm run dev
    ```
 
-3. **Pre-Contribution Checks**
+1. **Pre-Contribution Checks**
    - All contract tests pass: `cargo test`
    - All backend tests pass: `npm run test`
    - New features include tests and updated documentation
@@ -923,7 +947,7 @@ Fixes #456"
 
 ---
 
-**For comprehensive contributing guidelines, including code quality standards, workflow, and issue templates, see [CONTRIBUTING.md](CONTRIBUTING.md).**
+**For comprehensive contributing guidelines, including code quality standards, workflow, and issue templates, see <!---->**[**CONTRIBUTING.md**](CONTRIBUTING.md)**.**
 
 ### Filing Backend Issues
 
@@ -957,15 +981,14 @@ Priority is assigned by maintainers based on impact and timeline:
 
 #### How to File a High-Quality Issue
 
-1. **Check Existing Issues First**  
+1. **Check Existing Issues First**\
    Search [GitHub Issues](https://github.com/scout-off/scout-off-backend/issues) to avoid duplicates.
 
-2. **Use a Clear Title**  
-   ✅ _"Auth token expires before subscription ends"_  
+1. **Use a Clear Title**\
+   ✅ _"Auth token expires before subscription ends"_\
    ❌ _"Bug with tokens"_
 
-3. **Provide Steps to Reproduce** (for bugs)
-
+1. **Provide Steps to Reproduce** (for bugs)
    ```
    1. Create a scout account
    2. Purchase a 30-day subscription via /api/scouts/subscribe
@@ -976,15 +999,14 @@ Priority is assigned by maintainers based on impact and timeline:
    Actual: returns 401 NotSubscribed
    ```
 
-4. **Include Environment Context**
+1. **Include Environment Context**
    - OS and Node version: `node -v && npm -v`
    - Backend service versions: `npm list express @stellar/stellar-sdk`
    - Relevant config (without secrets): `NETWORK=testnet`
-
-5. **Add Labels**  
+1. **Add Labels**\
    Assign the issue category (e.g., `bug`, `feature`, `performance`) and any applicable priority you estimate. Maintainers will confirm priority.
 
-6. **Link Related Issues**  
+1. **Link Related Issues**\
    If fixing this resolves another issue, mention it: _"Fixes #123"_ or _"Related to #456"_.
 
 #### Issue Submission Template
@@ -1016,9 +1038,7 @@ Detailed explanation of what you're reporting or proposing.
 
 1.
 2.
-3.
-
-## Expected vs. Actual (for bugs)
+1. ## Expected vs. Actual (for bugs)
 
 - Expected: …
 - Actual: …
@@ -1034,25 +1054,22 @@ Fixes #XXX / Related to #YYY
 
 ### Contribution Workflow
 
-1. **Claim an Issue**  
+1. **Claim an Issue**\
    Comment on the issue to indicate you're working on it. Maintainers will assign it to you.
 
-2. **Create a Feature Branch**
-
+1. **Create a Feature Branch**
    ```bash
    git checkout -b add-your-feature-description
    ```
 
-3. **Make Changes and Test Locally**
-
+1. **Make Changes and Test Locally**
    ```bash
    npm run test           # Run backend tests
    npm run lint           # Check code style
    npm run dev            # Test manually
    ```
 
-4. **Commit with Clear Messages**
-
+1. **Commit with Clear Messages**
    ```bash
    git commit -m "fix: resolve auth token expiration bug
 
@@ -1063,7 +1080,7 @@ Fixes #XXX / Related to #YYY
    Fixes #123"
    ```
 
-5. **Push and Open a Pull Request**
+1. **Push and Open a Pull Request**
 
    ```bash
    git push origin add-your-feature-description
@@ -1071,7 +1088,7 @@ Fixes #XXX / Related to #YYY
 
    Reference the issue in the PR description: _"Fixes #123"_
 
-6. **Review and Merge**
+1. **Review and Merge**
    - Maintainers review code and tests
    - Address feedback in new commits (don't force-push)
    - Once approved, your PR will be merged to `main`

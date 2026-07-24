@@ -106,7 +106,7 @@ async function startServer() {
       }
 
       try {
-        closeDb();
+        await closeDb();
         logger.info("Database connection closed");
       } catch (dbErr) {
         logger.error("Error closing database:", dbErr);

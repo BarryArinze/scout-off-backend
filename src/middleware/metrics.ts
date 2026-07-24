@@ -22,7 +22,15 @@ export function isMetricsEnabled(): boolean {
  * Express middleware that increments per-route request counts, accumulates latency,
  * and tracks http_errors_total for 4xx and 5xx responses.
  * Disabled when METRICS_ENABLED=false.
+ *
+ * Unmatched routes (no req.route set — 404s, bot scans, arbitrary paths) are
+ * aggregated under a single UNMATCHED_ROUTE_LABEL rather than keyed by the raw
+ * req.path string. Without this bucketing, every distinct URL probed by scanners
+ * or typos would permanently occupy an entry in metricsStore, giving an attacker
+ * trivial unbounded cardinality growth to degrade Prometheus scraping.
  */
+export const UNMATCHED_ROUTE_LABEL = 'unmatched_route';
+
 export function metricsMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (!isMetricsEnabled()) {
     next();
@@ -30,7 +38,11 @@ export function metricsMiddleware(req: Request, res: Response, next: NextFunctio
   }
   const start = Date.now();
   res.on('finish', () => {
-    const key = `${req.method} ${req.route?.path ?? req.path}`;
+    // Use the matched Express route pattern when available; fall back to a
+    // single constant label for all unmatched requests so scanner/bot traffic
+    // cannot grow metricsStore without bound.
+    const routeLabel = req.route?.path ?? UNMATCHED_ROUTE_LABEL;
+    const key = `${req.method} ${routeLabel}`;
     const latency = Date.now() - start;
     if (!metricsStore[key]) {
       metricsStore[key] = { count: 0, totalLatencyMs: 0 };
@@ -103,6 +115,45 @@ export function resetMetrics(): void {
   latencyHistogram.bucketCounts = LATENCY_BUCKETS_MS.map(() => 0);
   latencyHistogram.sum = 0;
   latencyHistogram.count = 0;
+  cacheCountsStore.hits = 0;
+  cacheCountsStore.misses = 0;
+  cacheCountsStore.evictions = 0;
+}
+
+// ─── Cache hit / miss / eviction counters ─────────────────────────────────────
+
+export interface CacheCounts {
+  hits: number;
+  misses: number;
+  /** Incremented when a key is found but has already expired (lazy eviction). */
+  evictions: number;
+}
+
+/** In-memory cache operation counters. */
+export const cacheCountsStore: CacheCounts = { hits: 0, misses: 0, evictions: 0 };
+
+/** Record a cache hit. */
+export function recordCacheHit(): void {
+  cacheCountsStore.hits += 1;
+}
+
+/** Record a cache miss (key was never set or has been invalidated). */
+export function recordCacheMiss(): void {
+  cacheCountsStore.misses += 1;
+}
+
+/**
+ * Record a cache eviction — the key existed but was found to be expired at
+ * read time (lazy expiry in InMemoryCacheStore; TTL handled by Redis itself,
+ * so this is only incremented by the in-memory backend).
+ */
+export function recordCacheEviction(): void {
+  cacheCountsStore.evictions += 1;
+}
+
+/** Returns a snapshot of the cache operation counters. */
+export function getCacheMetrics(): CacheCounts {
+  return { ...cacheCountsStore };
 }
 
 // ─── Prometheus exposition ──────────────────────────────────────────────────────
@@ -130,6 +181,7 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   const routes = getMetrics();
   const errors = getErrorMetrics();
   const hist = getLatencyHistogram();
+  const cache = getCacheMetrics();
   const lines: string[] = [];
 
   // Request count (counter) — one series per route.
@@ -154,6 +206,17 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   lines.push('# TYPE http_errors_total counter');
   lines.push(`http_errors_total{range="4xx"} ${errors['4xx']}`);
   lines.push(`http_errors_total{range="5xx"} ${errors['5xx']}`);
+
+  // Cache hit/miss/eviction counters.
+  lines.push('# HELP cache_hits_total Total number of cache hits');
+  lines.push('# TYPE cache_hits_total counter');
+  lines.push(`cache_hits_total ${cache.hits}`);
+  lines.push('# HELP cache_misses_total Total number of cache misses');
+  lines.push('# TYPE cache_misses_total counter');
+  lines.push(`cache_misses_total ${cache.misses}`);
+  lines.push('# HELP cache_evictions_total Total number of lazy cache evictions (expired key reads)');
+  lines.push('# TYPE cache_evictions_total counter');
+  lines.push(`cache_evictions_total ${cache.evictions}`);
 
   // Indexer lag (gauge) — optional, injected by the caller.
   if (extras.indexerLedgerLag !== undefined) {

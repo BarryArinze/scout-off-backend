@@ -5,9 +5,18 @@ on:
   pull_request:
     paths: ['contracts/**']
 
+# Cancel in-progress runs for the same branch/ref when a new push arrives.
+# Rust/Cargo builds are slow — redundant parallel runs are proportionally
+# costly, so cancelling stale runs as early as possible saves significant
+# CI minutes on rapid iterative pushes.
+concurrency:
+  group: contract-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

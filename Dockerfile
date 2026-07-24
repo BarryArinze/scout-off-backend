@@ -28,6 +28,10 @@ COPY --from=builder --chown=appuser:appgroup /app/dist ./dist
 COPY --from=builder --chown=appuser:appgroup /app/node_modules ./node_modules
 COPY --chown=appuser:appgroup package.json ./
 
+# Copy database migration files — migrate.ts resolves migrations relative to
+# /app/db at runtime, so they must be present in the image
+COPY --chown=appuser:appgroup db ./db
+
 # Create a directory for the SQLite database file and give the app user ownership
 RUN mkdir -p /data && chown appuser:appgroup /data
 

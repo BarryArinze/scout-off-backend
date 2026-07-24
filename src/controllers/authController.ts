@@ -56,13 +56,49 @@ export function postToken(req: Request, res: Response, next: NextFunction): void
       return;
     }
     const { transaction, role } = parsed.data;
-    // Seed admin: if the authenticated wallet matches ADMIN_WALLET or is in ADMIN_WALLETS, always issue admin role
-    const candidate = extractAccount(transaction);
-    const effectiveRole =
-      (config.adminWallet && candidate === config.adminWallet) || (candidate !== null && config.adminWallets.includes(candidate)) ? 'admin' : role;
-    const { token, account } = verifyAndIssueToken(transaction, effectiveRole);
+
+    // Design note: admin-role seeding is intentionally performed AFTER
+    // cryptographic signature verification, not before it.
+    //
+    // Previously the code called extractAccount() on the raw (unverified) XDR
+    // to determine whether to grant admin role, then passed that role into
+    // verifyAndIssueToken().  While verifyAndIssueToken() would still reject
+    // an improperly-signed transaction, the "peek then verify" ordering was a
+    // design smell: role determination was derived from attacker-controlled
+    // input before the payload's authenticity was established.
+    //
+    // The restructured flow:
+    //   1. verifyAndIssueToken() — cryptographically verifies the challenge
+    //      signatures and extracts the authenticated account identity.
+    //   2. Only the verified `account` value is used to check admin membership.
+    //   3. If the account is an admin wallet, a second token is issued with the
+    //      admin role.  Otherwise the caller-supplied role (or 'player' default)
+    //      is used, exactly as before.
+    //
+    // This ensures no admin-role token can ever be derived from an unverified
+    // account identity.
+
+    // Step 1: verify signatures and get the authenticated account.
+    // verifyAndIssueToken() throws on any signature, TTL, or structure failure.
+    const { token: baseToken, account } = verifyAndIssueToken(transaction, role);
+
+    // Step 2: determine the effective role from the cryptographically verified account.
+    const isAdmin =
+      (config.adminWallet && account === config.adminWallet) ||
+      (account !== null && config.adminWallets.includes(account));
+
+    if (!isAdmin) {
+      // Not an admin — the token issued by verifyAndIssueToken() with the
+      // caller-supplied role is the final answer.
+      const expiresAt = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
+      res.json({ token: baseToken, account, expiresAt });
+      return;
+    }
+
+    // Step 3: admin wallet confirmed post-verification — re-issue with admin role.
+    const { token, account: verifiedAccount } = verifyAndIssueToken(transaction, 'admin');
     const expiresAt = Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
-    res.json({ token, account, expiresAt });
+    res.json({ token, account: verifiedAccount, expiresAt });
   } catch (err) {
     if (err instanceof Error) {
       const knownAuthErrors = [
