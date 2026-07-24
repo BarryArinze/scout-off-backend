@@ -2,7 +2,7 @@
 import request from 'supertest';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([
+  queryEvents: jest.fn().mockReturnValue([
     {
       type: 'milestone_approved',
       payload: { player_id: 'player-1', submittedAt: 1000, approvedAt: 3000 },
@@ -37,7 +37,7 @@ jest.mock('../../src/db', () => ({
   getPlayerProfileHistory: jest.fn().mockReturnValue([]),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn().mockReturnValue(1),
-  upsertPlayer: jest.fn(),
+  insertOrUpdatePlayer: jest.fn(),
 }));
 
 jest.mock('../../src/services/indexer', () => ({

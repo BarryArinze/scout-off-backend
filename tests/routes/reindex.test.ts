@@ -76,7 +76,7 @@ describe('POST /api/admin/indexer/reindex', () => {
 
   it('resets last_ledger and returns previous value', async () => {
     // Set a known starting state
-    db.setLastLedger(9_000_000);
+    db.persistLastIndexedLedger(9_000_000);
 
     const res = await request(app)
       .post('/api/admin/indexer/reindex')
@@ -87,11 +87,11 @@ describe('POST /api/admin/indexer/reindex', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.fromLedger).toBe(8_000_000);
     expect(res.body.data.previous).toBe(9_000_000);
-    expect(db.getLastLedger()).toBe(8_000_000);
+    expect(db.fetchLastIndexedLedger()).toBe(8_000_000);
   });
 
   it('is idempotent — calling reindex twice with the same ledger is safe', async () => {
-    db.setLastLedger(7_000_000);
+    db.persistLastIndexedLedger(7_000_000);
 
     await request(app)
       .post('/api/admin/indexer/reindex')
@@ -104,6 +104,6 @@ describe('POST /api/admin/indexer/reindex', () => {
       .send({ fromLedger: 6_000_000 });
 
     expect(res.status).toBe(200);
-    expect(db.getLastLedger()).toBe(6_000_000);
+    expect(db.fetchLastIndexedLedger()).toBe(6_000_000);
   });
 });

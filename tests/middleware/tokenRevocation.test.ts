@@ -16,7 +16,7 @@ const mockIsRevoked = isTokenRevoked as jest.Mock;
 const mockRevoke = revokeToken as jest.Mock;
 
 jest.mock('../../src/services/indexer', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   indexEvents: jest.fn(),
   normalizeEventId: jest.fn(),
 }));

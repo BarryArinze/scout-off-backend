@@ -143,7 +143,7 @@ export async function closeDb(): Promise<void> {
 
 // ─── State helpers ────────────────────────────────────────────────────────────
 
-export function getLastLedger(): number {
+export function fetchLastIndexedLedger(): number {
   const sql = 'SELECT value FROM indexer_state WHERE key = ?';
   const row = timedQuery(sql, () =>
     getDb().prepare(sql).get('last_ledger') as { value: string } | undefined
@@ -151,10 +151,16 @@ export function getLastLedger(): number {
   return row ? parseInt(row.value, 10) : 0;
 }
 
-export function setLastLedger(ledger: number): void {
+/** @deprecated Use fetchLastIndexedLedger instead. Will be removed in next release. */
+export const getLastLedger = fetchLastIndexedLedger;
+
+export function persistLastIndexedLedger(ledger: number): void {
   const sql = 'INSERT INTO indexer_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value';
   timedQuery(sql, () => getDb().prepare(sql).run('last_ledger', String(ledger)));
 }
+
+/** @deprecated Use persistLastIndexedLedger instead. Will be removed in next release. */
+export const setLastLedger = persistLastIndexedLedger;
 
 // ─── Query helpers ────────────────────────────────────────────────────────────
 
@@ -169,7 +175,7 @@ export interface GetEventsOptions {
   offset?: number;
 }
 
-export function getEvents(
+export function queryEvents(
   type?: ContractEventType,
   opts?: GetEventsOptions,
 ): EventRecord[] {
@@ -201,6 +207,9 @@ export function getEvents(
     created_at: r.created_at,
   }));
 }
+
+/** @deprecated Use queryEvents instead. Will be removed in next release. */
+export const getEvents = queryEvents;
 
 export function getEventsCount(type?: ContractEventType): number {
   const db = getDb();
@@ -378,7 +387,7 @@ export function getPlayerProfileHistory(
     .all(playerId) as PlayerProfileHistoryRow[];
 }
 
-export function upsertPlayer(p: {
+export function insertOrUpdatePlayer(p: {
   player_id: string;
   wallet: string;
   position?: string;
@@ -397,6 +406,9 @@ export function upsertPlayer(p: {
     getDb().prepare(sql).run(p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null)
   );
 }
+
+/** @deprecated Use insertOrUpdatePlayer instead. Will be removed in next release. */
+export const upsertPlayer = insertOrUpdatePlayer;
 
 export function updatePlayerProgress(playerId: string, level: number): void {
   const sql = 'UPDATE players SET progress_level = ? WHERE player_id = ?';

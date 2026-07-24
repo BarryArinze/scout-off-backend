@@ -1,4 +1,4 @@
-import { getDb, queryPlayers, countPlayers, upsertPlayer } from '../../src/db';
+import { getDb, queryPlayers, countPlayers, insertOrUpdatePlayer } from '../../src/db';
 
 describe('queryPlayers — SQL LIMIT/OFFSET pagination (#305)', () => {
   beforeEach(() => {
@@ -6,9 +6,9 @@ describe('queryPlayers — SQL LIMIT/OFFSET pagination (#305)', () => {
   });
 
   it('applies SQL-side pagination for filtered players', () => {
-    upsertPlayer({ player_id: 'p1', wallet: 'G'.repeat(56), position: 'striker', region: 'europe', created_at: 100 });
-    upsertPlayer({ player_id: 'p2', wallet: 'G'.repeat(56), position: 'striker', region: 'europe', created_at: 200 });
-    upsertPlayer({ player_id: 'p3', wallet: 'G'.repeat(56), position: 'striker', region: 'asia',   created_at: 300 });
+    insertOrUpdatePlayer({ player_id: 'p1', wallet: 'G'.repeat(56), position: 'striker', region: 'europe', created_at: 100 });
+    insertOrUpdatePlayer({ player_id: 'p2', wallet: 'G'.repeat(56), position: 'striker', region: 'europe', created_at: 200 });
+    insertOrUpdatePlayer({ player_id: 'p3', wallet: 'G'.repeat(56), position: 'striker', region: 'asia',   created_at: 300 });
 
     const rows = queryPlayers({ region: 'europe', limit: 1, offset: 1 });
 
@@ -17,7 +17,7 @@ describe('queryPlayers — SQL LIMIT/OFFSET pagination (#305)', () => {
 
   it('returns first page correctly', () => {
     for (let i = 1; i <= 5; i++) {
-      upsertPlayer({ player_id: `pp${i}`, wallet: 'G'.repeat(56), position: 'striker', region: 'europe', created_at: i * 100 });
+      insertOrUpdatePlayer({ player_id: `pp${i}`, wallet: 'G'.repeat(56), position: 'striker', region: 'europe', created_at: i * 100 });
     }
 
     const page1 = queryPlayers({ region: 'europe', limit: 2, offset: 0 });
@@ -26,7 +26,7 @@ describe('queryPlayers — SQL LIMIT/OFFSET pagination (#305)', () => {
 
   it('returns second page correctly (no overlap with first page)', () => {
     for (let i = 1; i <= 5; i++) {
-      upsertPlayer({ player_id: `pg${i}`, wallet: 'G'.repeat(56), position: 'midfielder', region: 'sa', created_at: i * 10 });
+      insertOrUpdatePlayer({ player_id: `pg${i}`, wallet: 'G'.repeat(56), position: 'midfielder', region: 'sa', created_at: i * 10 });
     }
 
     const page1 = queryPlayers({ region: 'sa', limit: 2, offset: 0 }).map((r) => r.player_id);
@@ -37,7 +37,7 @@ describe('queryPlayers — SQL LIMIT/OFFSET pagination (#305)', () => {
   });
 
   it('returns an empty array when offset exceeds total rows', () => {
-    upsertPlayer({ player_id: 'only1', wallet: 'G'.repeat(56), position: 'goalkeeper', region: 'af', created_at: 1 });
+    insertOrUpdatePlayer({ player_id: 'only1', wallet: 'G'.repeat(56), position: 'goalkeeper', region: 'af', created_at: 1 });
 
     const rows = queryPlayers({ region: 'af', limit: 10, offset: 5 });
     expect(rows).toHaveLength(0);
@@ -45,7 +45,7 @@ describe('queryPlayers — SQL LIMIT/OFFSET pagination (#305)', () => {
 
   it('countPlayers returns the total matching rows independent of limit/offset', () => {
     for (let i = 1; i <= 6; i++) {
-      upsertPlayer({ player_id: `cnt${i}`, wallet: 'G'.repeat(56), position: 'defender', region: 'eu', created_at: i });
+      insertOrUpdatePlayer({ player_id: `cnt${i}`, wallet: 'G'.repeat(56), position: 'defender', region: 'eu', created_at: i });
     }
 
     const total = countPlayers({ region: 'eu' });
@@ -58,7 +58,7 @@ describe('queryPlayers — SQL LIMIT/OFFSET pagination (#305)', () => {
   it('pages metadata is correct: total / pageSize = pages (rounded up)', () => {
     const pageSize = 3;
     for (let i = 1; i <= 7; i++) {
-      upsertPlayer({ player_id: `meta${i}`, wallet: 'G'.repeat(56), position: 'winger', region: 'asia2', created_at: i });
+      insertOrUpdatePlayer({ player_id: `meta${i}`, wallet: 'G'.repeat(56), position: 'winger', region: 'asia2', created_at: i });
     }
 
     const total = countPlayers({ region: 'asia2' });

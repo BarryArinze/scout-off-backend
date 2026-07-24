@@ -2,11 +2,11 @@ import { server } from './stellar';
 import config from '../config';
 import {
   getDb,
-  getLastLedger,
-  setLastLedger,
-  upsertPlayer,
+  fetchLastIndexedLedger,
+  persistLastIndexedLedger,
+  insertOrUpdatePlayer,
   updatePlayerProgress,
-  getEvents,
+  queryEvents,
   insertPendingMilestone,
 } from '../db';
 import { dispatchEventWebhook } from './webhooks';
@@ -77,9 +77,9 @@ export async function indexEvents(): Promise<void> {
     'INSERT OR IGNORE INTO events (type, ledger, tx_hash, payload, created_at) VALUES (?, ?, ?, ?, ?)'
   );
 
-  const fromLedger = getLastLedger();
+  const fromLedger = fetchLastIndexedLedger();
 
-  const response = await server.getEvents({
+  const response = await server.queryEvents({
     startLedger: fromLedger || undefined,
     filters: [{ type: 'contract', contractIds: [config.contractId] }],
   });
@@ -109,7 +109,7 @@ export async function indexEvents(): Promise<void> {
       onAfterInsert(eventId);
 
       if (type === 'player_registered') {
-        upsertPlayer({
+        insertOrUpdatePlayer({
           player_id: payload.player_id as string,
           wallet: payload.wallet as string,
           position: payload.position as string | undefined,
@@ -137,7 +137,7 @@ export async function indexEvents(): Promise<void> {
           // progress_level field on the event payload. The just-inserted event is
           // already part of this count (same transaction), and replays are safe
           // because the events table dedups on tx_hash.
-          const approvedMilestoneCount = getEvents('milestone_approved').filter(
+          const approvedMilestoneCount = queryEvents('milestone_approved').filter(
             (e) => e.payload.player_id === playerId,
           ).length;
           updatePlayerProgress(playerId, tierForApprovedMilestones(approvedMilestoneCount));
@@ -156,7 +156,7 @@ export async function indexEvents(): Promise<void> {
   }
 
   const latest = response.events.at(-1)!;
-  setLastLedger(latest.ledger + 1);
+  persistLastIndexedLedger(latest.ledger + 1);
   indexerLedgerLag = Math.max(0, response.latestLedger - latest.ledger);
 }
 

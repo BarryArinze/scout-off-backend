@@ -65,7 +65,7 @@ jest.mock('../../src/db', () => {
   const actual = jest.requireActual('../../src/db');
   return {
     ...actual,
-    getEvents: jest.fn().mockReturnValue([]),
+    queryEvents: jest.fn().mockReturnValue([]),
     insertPendingAdminAction: jest.fn((p: Record<string, unknown>) => {
       store.pending_admin_actions.push({
         ...p,

@@ -1,9 +1,9 @@
-import { getDb, getEvents, getLastLedger, setLastLedger, upsertPlayer, updatePlayerProgress, getPlayerById, queryPlayers } from '../../src/db';
+import { getDb, queryEvents, fetchLastIndexedLedger, persistLastIndexedLedger, insertOrUpdatePlayer, updatePlayerProgress, getPlayerById, queryPlayers } from '../../src/db';
 import { normalizeEventId, normalizePayload } from '../../src/services/indexer';
 
 describe('indexer', () => {
   it('returns empty array when no events exist for a type', () => {
-    const events = getEvents('player_registered');
+    const events = queryEvents('player_registered');
     expect(Array.isArray(events)).toBe(true);
   });
 
@@ -46,8 +46,8 @@ describe('player table helpers', () => {
   const PLAYER_ID = 'test-player-db-' + Math.random().toString(36).slice(2);
   const WALLET = 'GTEST' + 'A'.repeat(51);
 
-  it('upsertPlayer inserts a new player', () => {
-    upsertPlayer({ player_id: PLAYER_ID, wallet: WALLET, position: 'striker', region: 'EU', metadata_uri: 'QmTest', created_at: 1000 });
+  it('insertOrUpdatePlayer inserts a new player', () => {
+    insertOrUpdatePlayer({ player_id: PLAYER_ID, wallet: WALLET, position: 'striker', region: 'EU', metadata_uri: 'QmTest', created_at: 1000 });
     const row = getPlayerById(PLAYER_ID);
     expect(row).not.toBeNull();
     expect(row!.wallet).toBe(WALLET);
@@ -57,8 +57,8 @@ describe('player table helpers', () => {
     expect(row!.progress_level).toBe(0);
   });
 
-  it('upsertPlayer updates an existing player', () => {
-    upsertPlayer({ player_id: PLAYER_ID, wallet: WALLET, position: 'midfielder', region: 'NA' });
+  it('insertOrUpdatePlayer updates an existing player', () => {
+    insertOrUpdatePlayer({ player_id: PLAYER_ID, wallet: WALLET, position: 'midfielder', region: 'NA' });
     const row = getPlayerById(PLAYER_ID);
     expect(row!.position).toBe('midfielder');
     expect(row!.region).toBe('NA');
@@ -76,7 +76,7 @@ describe('player table helpers', () => {
 
   it('queryPlayers returns players matching region filter', () => {
     const id2 = 'test-player-db2-' + Math.random().toString(36).slice(2);
-    upsertPlayer({ player_id: id2, wallet: WALLET, position: 'goalkeeper', region: 'EU' });
+    insertOrUpdatePlayer({ player_id: id2, wallet: WALLET, position: 'goalkeeper', region: 'EU' });
     const results = queryPlayers({ region: 'EU' });
     expect(results.some((r) => r.player_id === id2)).toBe(true);
   });
@@ -103,22 +103,22 @@ describe('idempotent re-indexing', () => {
 
     // Insert once
     insert.run('player_registered', 100, TX_HASH, '{}');
-    const countAfterFirst = getEvents('player_registered').length;
+    const countAfterFirst = queryEvents('player_registered').length;
 
     // Replay — same tx_hash must be silently ignored
     insert.run('player_registered', 100, TX_HASH, '{}');
-    const countAfterReplay = getEvents('player_registered').length;
+    const countAfterReplay = queryEvents('player_registered').length;
 
     expect(countAfterReplay).toBe(countAfterFirst);
   });
 
-  it('setLastLedger / getLastLedger round-trips correctly', () => {
-    setLastLedger(5_000_000);
-    expect(getLastLedger()).toBe(5_000_000);
+  it('persistLastIndexedLedger / fetchLastIndexedLedger round-trips correctly', () => {
+    persistLastIndexedLedger(5_000_000);
+    expect(fetchLastIndexedLedger()).toBe(5_000_000);
 
     // Simulating a backfill reset
-    setLastLedger(4_999_000);
-    expect(getLastLedger()).toBe(4_999_000);
+    persistLastIndexedLedger(4_999_000);
+    expect(fetchLastIndexedLedger()).toBe(4_999_000);
   });
 
   it('replaying different tx_hashes at the same ledger inserts both', () => {
@@ -129,10 +129,10 @@ describe('idempotent re-indexing', () => {
       'INSERT OR IGNORE INTO events (type, ledger, tx_hash, payload) VALUES (?, ?, ?, ?)'
     );
 
-    const before = getEvents().length;
+    const before = queryEvents().length;
     insert.run('scout_subscribed', 200, hash1, '{}');
     insert.run('scout_subscribed', 200, hash2, '{}');
-    const after = getEvents().length;
+    const after = queryEvents().length;
 
     expect(after).toBe(before + 2);
   });

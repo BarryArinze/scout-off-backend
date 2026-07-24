@@ -31,7 +31,7 @@ jest.mock('../../src/db', () => {
   let nextAuditId = 1;
 
   return {
-    getEvents: jest.fn().mockReturnValue([]),
+    queryEvents: jest.fn().mockReturnValue([]),
     queryPlayers: jest.fn().mockReturnValue([]),
     countPlayers: jest.fn().mockReturnValue(0),
     getPlayerById: jest.fn().mockImplementation((id) => {
@@ -57,7 +57,7 @@ jest.mock('../../src/db', () => {
     renewSubscription: jest.fn(),
     cancelSubscription: jest.fn(),
     getPendingMilestones: jest.fn().mockReturnValue({ data: [], total: 0 }),
-    upsertPlayer: jest.fn(),
+    insertOrUpdatePlayer: jest.fn(),
     insertAuditLog: jest.fn(
       (p: { action: string; adminWallet?: string; queryParams?: Record<string, unknown>; createdAt: string; eventSource?: string }) => {
         const row = {
