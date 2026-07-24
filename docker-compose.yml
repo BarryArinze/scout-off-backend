@@ -88,11 +88,11 @@ services:
       TRUSTED_PROXY_COUNT: "0"
 
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:4000/health/liveness"]
-      interval: 30s
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/health/liveness"]
+      interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 10s
+      start_period: 15s
     depends_on:
       - redis
 
