@@ -21,7 +21,7 @@ import { queryMilestones, updateProfile } from "../services/stellar";
 import { cacheGet, cacheSet, invalidatePlayerCache } from "../services/cache";
 import { ApiResponse } from "../types";
 import { ErrorCode } from "../utils/errorCodes";
-import { getTierMeta } from "../utils/tier";
+import { getTierMeta, tierName } from "../utils/tier";
 import { validateMinTier } from "../utils/minTierValidator";
 import { normalizePosition } from "../utils/positionAliases";
 import { dispatchEventWebhook } from "../services/webhooks";
@@ -144,7 +144,7 @@ export async function getPlayer(
         res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
         return;
       }
-      const { tierName, tierDescription } = getTierMeta(row.progress_level as number);
+      const { tierName: tierNameMeta, tierDescription } = getTierMeta(row.progress_level as number);
       data = {
         player_id: row.player_id,
         wallet: row.wallet,
@@ -154,8 +154,9 @@ export async function getPlayer(
         progress_level: row.progress_level,
         created_at: row.created_at,
         is_active: row.is_active,
-        tierName,
+        tierName: tierNameMeta,
         tierDescription,
+        progress_tier_name: tierName(row.progress_level as number),
       };
       await cacheSet(cacheKey, data);
     }
@@ -248,6 +249,7 @@ export async function filterPlayers(
       metadataUri: row.metadata_uri,
       progress_level: row.progress_level,
       created_at: row.created_at,
+      progress_tier_name: tierName(row.progress_level as number),
       ...enrichPlayerResult(row.progress_level),
     }));
 

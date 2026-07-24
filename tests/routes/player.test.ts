@@ -14,6 +14,9 @@ jest.mock('../../src/db', () => ({
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn().mockReturnValue(1),
   insertOrUpdatePlayer: jest.fn(),
+  insertAuditLog: jest.fn(),
+  deactivatePlayer: jest.fn(),
+  reactivatePlayer: jest.fn(),
 }));
 
 jest.mock('../../src/services/indexer', () => ({
@@ -32,6 +35,8 @@ jest.mock('../../src/services/webhooks', () => ({
 }));
 
 jest.mock('../../src/services/cache', () => ({
+  cacheGet: jest.fn().mockResolvedValue(null),
+  cacheSet: jest.fn().mockResolvedValue(undefined),
   invalidatePlayerCache: jest.fn(),
 }));
 
@@ -195,6 +200,84 @@ describe('PUT /api/players/:playerId — owner-only enforcement', () => {
       .send(VALID_UPDATE);
     expect(res.status).toBe(403);
     expect(res.body.success).toBe(false);
+  });
+});
+
+// ─── GET /api/players/:playerId — progress_tier_name ─────────────────────────
+
+describe('GET /api/players/:playerId — progress_tier_name field', () => {
+  const levels = [
+    { level: 0, name: 'Unverified' },
+    { level: 1, name: 'Verified Identity' },
+    { level: 2, name: 'Performance Milestones' },
+    { level: 3, name: 'Elite Tier' },
+  ];
+
+  it.each(levels)(
+    'includes progress_tier_name "$name" for a level-$level player',
+    async ({ level, name }) => {
+      const { getPlayerById } = require('../../src/db');
+      (getPlayerById as jest.Mock).mockReturnValue({
+        player_id: 'player-test-id',
+        wallet: PLAYER_WALLET,
+        position: 'Midfielder',
+        region: 'West Africa',
+        metadata_uri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+        progress_level: level,
+        created_at: 1700000000,
+        is_active: 1,
+      });
+
+      const res = await request(app).get('/api/players/player-test-id');
+      expect(res.status).toBe(200);
+      expect(res.body.data.progress_tier_name).toBe(name);
+    },
+  );
+
+  it('returns 404 when player does not exist', async () => {
+    const { getPlayerById } = require('../../src/db');
+    (getPlayerById as jest.Mock).mockReturnValue(null);
+
+    const res = await request(app).get('/api/players/nonexistent-id');
+    expect(res.status).toBe(404);
+    expect(res.body.success).toBe(false);
+  });
+});
+
+// ─── GET /api/players — progress_tier_name in list ───────────────────────────
+
+describe('GET /api/players — progress_tier_name field in list', () => {
+  it('includes progress_tier_name for each player in the list response', async () => {
+    const { queryPlayers, countPlayers } = require('../../src/db');
+    (queryPlayers as jest.Mock).mockReturnValue([
+      {
+        player_id: 'player-001',
+        wallet: PLAYER_WALLET,
+        position: 'Forward',
+        region: 'West Africa',
+        metadata_uri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+        progress_level: 1,
+        created_at: 1700000000,
+        is_active: 1,
+      },
+      {
+        player_id: 'player-002',
+        wallet: 'G' + 'C'.repeat(55),
+        position: 'Midfielder',
+        region: 'Europe',
+        metadata_uri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+        progress_level: 3,
+        created_at: 1700000000,
+        is_active: 1,
+      },
+    ]);
+    (countPlayers as jest.Mock).mockReturnValue(2);
+
+    const res = await request(app).get('/api/players');
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data[0].progress_tier_name).toBe('Verified Identity');
+    expect(res.body.data[1].progress_tier_name).toBe('Elite Tier');
   });
 });
 

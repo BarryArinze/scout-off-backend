@@ -28,3 +28,16 @@ const FALLBACK_TIER = {
 export function getTierMeta(level: number): { tierName: string; tierDescription: string } {
   return TIER_META[level as ProgressLevel] ?? FALLBACK_TIER;
 }
+
+/** Human-readable tier names for direct display (non-localized) */
+const TIER_NAMES: Record<number, string> = {
+  0: 'Unverified',
+  1: 'Verified Identity',
+  2: 'Performance Milestones',
+  3: 'Elite Tier',
+};
+
+/** Returns the human-readable display name for a progress tier level. */
+export function tierName(level: number): string {
+  return TIER_NAMES[level] ?? 'Unknown';
+}
