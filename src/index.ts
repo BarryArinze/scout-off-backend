@@ -8,7 +8,7 @@ import { initDb, closeDb } from "./db";
 import { stellarHealth } from "./services/stellar";
 import { checkHealth } from "./services/ipfs";
 import { indexEvents } from "./services/indexer";
-import { getLastLedger, setLastLedger } from "./db";
+import { fetchLastIndexedLedger, persistLastIndexedLedger } from "./db";
 
 // Database initialization is now async - must be awaited
 async function start() {
@@ -22,9 +22,9 @@ async function start() {
   // If INDEXER_BACKFILL_FROM_LEDGER is set and is less than the stored last_ledger,
   // reset last_ledger so the next poll replays from that point.
   if (config.backfillFromLedger !== null) {
-    const stored = getLastLedger();
+    const stored = fetchLastIndexedLedger();
     if (config.backfillFromLedger < stored) {
-      setLastLedger(config.backfillFromLedger);
+      persistLastIndexedLedger(config.backfillFromLedger);
       logger.info(
         `Backfill: reset last_ledger from ${stored} to ${config.backfillFromLedger}`,
       );

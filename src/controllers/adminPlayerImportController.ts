@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { createId } from '@paralleldrive/cuid2';
 import { sanitizeInput } from '../utils/sanitizer';
 import { pinJson } from '../services/ipfs';
-import { upsertPlayer } from '../db';
+import { insertOrUpdatePlayer } from '../db';
 import { dispatchEventWebhook } from '../services/webhooks';
 import { invalidatePlayerCache } from '../services/cache';
 import { registerSchema } from './playerController';
@@ -94,7 +94,7 @@ export async function processPlayerImportBatch(
             });
 
       const playerId = createId();
-      upsertPlayer({
+      insertOrUpdatePlayer({
         player_id: playerId,
         wallet,
         position: sanitizedPosition,

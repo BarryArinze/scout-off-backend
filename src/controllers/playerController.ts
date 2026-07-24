@@ -7,12 +7,12 @@ import { CID_REGEX } from "../utils/cidValidator";
 import { pinJson } from "../services/ipfs";
 import { serializeIpfsResult } from "../utils/ipfsSerializer";
 import {
-  getEvents,
+  queryEvents,
   getPlayerById,
   insertPlayerProfileHistory,
   queryPlayers,
   countPlayers,
-  upsertPlayer,
+  insertOrUpdatePlayer,
   deactivatePlayer,
   reactivatePlayer,
 } from "../db";
@@ -89,7 +89,7 @@ export async function registerPlayer(
     // Write to DB immediately so GET /players/:playerId returns 200 without
     // waiting for the indexer to process the blockchain event (#282).
     const playerId = createId();
-    upsertPlayer({
+    insertOrUpdatePlayer({
       player_id: playerId,
       wallet: parsed.wallet,
       position: sanitizedPosition,
@@ -356,7 +356,7 @@ export async function getPlayerMilestones(
       return;
     }
     const { sortBy, order } = parsed.data;
-    const indexedMilestones = getEvents("milestone_approved")
+    const indexedMilestones = queryEvents("milestone_approved")
       .filter((e) => e.payload.player_id === playerId)
       .map((e) => ({ ...e.payload }));
     const onChainMilestones = await queryMilestones(playerId);

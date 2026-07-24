@@ -1,8 +1,8 @@
 import {
-  getDb, closeDb, getLastLedger, setLastLedger,
-  queryPlayers, countPlayers, getPlayerById, upsertPlayer,
+  getDb, closeDb, fetchLastIndexedLedger, persistLastIndexedLedger,
+  queryPlayers, countPlayers, getPlayerById, insertOrUpdatePlayer,
   updatePlayerProgress,
-  getEvents, getEventsCount,
+  queryEvents, getEventsCount,
   insertPlayerProfileHistory, getPlayerProfileHistory,
   incrementValidatorApproved, incrementValidatorRejected, getValidatorStats,
   insertPendingMilestone, removePendingMilestone, getPendingMilestones,
@@ -34,8 +34,8 @@ const INJECTION_PAYLOADS = [
   "1; SELECT * FROM users WHERE '1' = '1",
 ];
 
-function seedPlayer(id: string, extra?: Partial<Parameters<typeof upsertPlayer>[0]>): void {
-  upsertPlayer({
+function seedPlayer(id: string, extra?: Partial<Parameters<typeof insertOrUpdatePlayer>[0]>): void {
+  insertOrUpdatePlayer({
     player_id: id,
     wallet: 'G' + 'A'.repeat(55),
     position: 'midfielder',
@@ -160,27 +160,27 @@ describe('getPendingMilestones - SQL injection resistance', () => {
   });
 });
 
-describe('getEvents - SQL injection resistance', () => {
+describe('queryEvents - SQL injection resistance', () => {
   // Seed a real event row
   beforeEach(() => {
     getDb().prepare('INSERT OR IGNORE INTO events (type, ledger, tx_hash, payload, created_at) VALUES (?, ?, ?, ?, ?)').run('player_registered', 1, 'abc123', '{}', 1000);
   });
 
   INJECTION_PAYLOADS.forEach((payload) => {
-    it(`getEvents treats injection type as literal: ${payload.slice(0, 40)}...`, () => {
-      const rows = getEvents(payload as unknown as ContractEventType);
+    it(`queryEvents treats injection type as literal: ${payload.slice(0, 40)}...`, () => {
+      const rows = queryEvents(payload as unknown as ContractEventType);
       expect(Array.isArray(rows)).toBe(true);
       // Should match nothing, not throw
     });
 
-    it(`getEvents with pagination treats injection safely: ${payload.slice(0, 40)}...`, () => {
-      const rows = getEvents(payload as unknown as ContractEventType, { limit: 10, offset: 0 });
+    it(`queryEvents with pagination treats injection safely: ${payload.slice(0, 40)}...`, () => {
+      const rows = queryEvents(payload as unknown as ContractEventType, { limit: 10, offset: 0 });
       expect(Array.isArray(rows)).toBe(true);
     });
   });
 
   it('events table still exists after injection attempts', () => {
-    expect(getEvents()).toHaveLength(1);
+    expect(queryEvents()).toHaveLength(1);
   });
 });
 
@@ -225,12 +225,12 @@ describe('getValidatorStats - SQL injection resistance', () => {
 describe('all DB functions - SQL injection resistance (comprehensive)', () => {
   const inj = INJECTION_PAYLOADS[0];
 
-  it('getLastLedger is safe', () => {
-    expect(typeof getLastLedger()).toBe('number');
+  it('fetchLastIndexedLedger is safe', () => {
+    expect(typeof fetchLastIndexedLedger()).toBe('number');
   });
 
-  it('setLastLedger with injection payload', () => {
-    expect(typeof setLastLedger(0)).toBe('undefined');
+  it('persistLastIndexedLedger with injection payload', () => {
+    expect(typeof persistLastIndexedLedger(0)).toBe('undefined');
   });
 
   it('getEventsCount with injection payload', () => {
@@ -247,8 +247,8 @@ describe('all DB functions - SQL injection resistance (comprehensive)', () => {
     expect(Array.isArray(rows)).toBe(true);
   });
 
-  it('upsertPlayer with injection payloads', () => {
-    upsertPlayer({ player_id: inj, wallet: inj, position: inj, region: inj, metadata_uri: inj });
+  it('insertOrUpdatePlayer with injection payloads', () => {
+    insertOrUpdatePlayer({ player_id: inj, wallet: inj, position: inj, region: inj, metadata_uri: inj });
   });
 
   it('updatePlayerProgress with injection payload', () => {

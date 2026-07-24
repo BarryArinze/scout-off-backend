@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
-import { getEvents, getEventsCount, getLastLedger, setLastLedger, getValidatorStats, getAuditLogs, getAuditLogsCount } from '../db';
+import { queryEvents, getEventsCount, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount } from '../db';
 import { getAllValidators, insertValidator, revokeValidatorRow, getValidatorByWallet } from '../services/indexer';
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { logAuditEvent } from '../services/audit';
@@ -22,10 +22,10 @@ export async function getStats(req: Request, res: Response, next: NextFunction) 
     res.json({
       success: true,
       data: {
-        players: getEvents('player_registered').length,
-        milestones: getEvents('milestone_approved').length,
-        subscriptions: getEvents('scout_subscribed').length,
-        events: getEvents().length,
+        players: queryEvents('player_registered').length,
+        milestones: queryEvents('milestone_approved').length,
+        subscriptions: queryEvents('scout_subscribed').length,
+        events: queryEvents().length,
       },
     });
   } catch (err) {
@@ -123,7 +123,7 @@ export async function getAllEvents(req: Request, res: Response, next: NextFuncti
     const offset = requestedOffset ?? ((page ?? 1) - 1) * limit;
 
     const eventTypeFilter = eventType as ContractEventType | undefined;
-    let events = getEvents(eventTypeFilter, { limit, offset }) as unknown as EventRecord[];
+    let events = queryEvents(eventTypeFilter, { limit, offset }) as unknown as EventRecord[];
     if (startDate) events = events.filter((e) => new Date(e.created_at ?? 0) >= startDate!);
     if (endDate) events = events.filter((e) => new Date(e.created_at ?? 0) <= endDate!);
 
@@ -149,7 +149,7 @@ export async function getFeeSummary(req: Request, res: Response, next: NextFunct
       queryParams: req.query as Record<string, unknown>,
       timestamp: new Date().toISOString(),
     });
-    const withdrawals = getEvents('fees_withdrawn').map((e) => e.payload as Record<string, unknown>);
+    const withdrawals = queryEvents('fees_withdrawn').map((e) => e.payload as Record<string, unknown>);
     const body: ApiResponse<Record<string, unknown>[]> = { success: true, data: withdrawals };
     res.json(body);
   } catch (err) {
@@ -719,8 +719,8 @@ export async function reindex(req: Request, res: Response, next: NextFunction) {
       return;
     }
     const { fromLedger } = parsed.data;
-    const previous = getLastLedger();
-    setLastLedger(fromLedger);
+    const previous = fetchLastIndexedLedger();
+    persistLastIndexedLedger(fromLedger);
     res.json({ success: true, data: { fromLedger, previous } });
   } catch (err) {
     next(err);

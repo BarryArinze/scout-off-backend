@@ -15,7 +15,7 @@ const WALLET = 'GAEW6VQNHJ45XOB5IBZVI2HLJGXPEM5JEKB5XR3CVAUGDNVATCW36GU4';
 const PLAYER_ID = 'player-unlock-303';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   getPlayerById: jest.fn().mockReturnValue(null),
   queryPlayers: jest.fn().mockReturnValue([]),
   countPlayers: jest.fn().mockReturnValue(0),

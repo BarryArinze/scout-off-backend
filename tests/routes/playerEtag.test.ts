@@ -3,11 +3,11 @@ import app from '../../src/app';
 import { invalidatePlayerCache } from '../../src/services/cache';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   getPlayerById: jest.fn(),
   queryPlayers: jest.fn().mockReturnValue([]),
   countPlayers: jest.fn().mockReturnValue(0),
-  upsertPlayer: jest.fn(),
+  insertOrUpdatePlayer: jest.fn(),
   insertPlayerProfileHistory: jest.fn(),
   getPlayerProfileHistory: jest.fn().mockReturnValue([]),
 }));

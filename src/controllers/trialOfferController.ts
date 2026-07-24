@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { getTrialOfferById, respondToTrialOffer, insertTrialOffer } from '../db';
-import { getEvents } from '../db';
+import { queryEvents } from '../db';
 import { logger } from '../utils/logger';
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
@@ -17,7 +17,7 @@ export const rejectOfferSchema = z.object({
  * We look up the player_registered event for their wallet address.
  */
 function getPlayerWallet(playerId: string): string | null {
-  const event = getEvents('player_registered').find(
+  const event = queryEvents('player_registered').find(
     (e) => e.payload.player_id === playerId,
   );
   return event ? (event.payload.wallet as string) : null;
@@ -55,7 +55,7 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
 
     if (!offer) {
       // Try to seed from on-chain indexed events (backward compatibility)
-      const event = getEvents('trial_offer_logged').find(
+      const event = queryEvents('trial_offer_logged').find(
         (e) => e.payload.offer_id === offerId || e.payload.player_id === playerId,
       );
       if (!event) {
@@ -153,7 +153,7 @@ export async function rejectTrialOffer(req: Request, res: Response, next: NextFu
 
     if (!offer) {
       // Try to seed from on-chain indexed events (backward compatibility)
-      const event = getEvents('trial_offer_logged').find(
+      const event = queryEvents('trial_offer_logged').find(
         (e) => e.payload.offer_id === offerId || e.payload.player_id === playerId,
       );
       if (!event) {

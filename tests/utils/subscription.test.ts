@@ -1,17 +1,17 @@
 import { getActiveSubscription } from '../../src/utils/subscription';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn(),
+  queryEvents: jest.fn(),
 }));
 
 jest.mock('../../src/services/stellar', () => ({
   isSubscribed: jest.fn(),
 }));
 
-import { getEvents } from '../../src/db';
+import { queryEvents } from '../../src/db';
 import { isSubscribed } from '../../src/services/stellar';
 
-const mockGetEvents = getEvents as jest.Mock;
+const mockGetEvents = queryEvents as jest.Mock;
 const mockIsSubscribed = isSubscribed as jest.Mock;
 
 const WALLET = 'GSCOUTWALLET1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';

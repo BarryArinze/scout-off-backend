@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { z } from "zod";
-import { getEvents, queryPlayers } from "../db";
+import { queryEvents, queryPlayers } from "../db";
 import { ProgressLevel } from "../types";
 
 const recQuerySchema = z.object({
@@ -49,7 +49,7 @@ export async function getScoutRecommendations(
     const minTier = parsed.data.minTier as ProgressLevel | undefined;
 
     // Unlock history is derived from indexed on-chain events.
-    const unlockedEvents = getEvents("contact_unlocked").filter(
+    const unlockedEvents = queryEvents("contact_unlocked").filter(
       (e) => e.payload.scout === wallet,
     );
     const unlockedPlayerIds = new Set<string>(

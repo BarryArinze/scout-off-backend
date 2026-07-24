@@ -11,14 +11,14 @@ import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
 import app from '../../src/app';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   getPlayerById: jest.fn().mockReturnValue(null),
   queryPlayers: jest.fn().mockReturnValue([]),
   countPlayers: jest.fn().mockReturnValue(0),
   getEventsCount: jest.fn().mockReturnValue(0),
-  getLastLedger: jest.fn().mockReturnValue(0),
-  setLastLedger: jest.fn(),
-  upsertPlayer: jest.fn(),
+  fetchLastIndexedLedger: jest.fn().mockReturnValue(0),
+  persistLastIndexedLedger: jest.fn(),
+  insertOrUpdatePlayer: jest.fn(),
   insertPlayerProfileHistory: jest.fn(),
   getPlayerProfileHistory: jest.fn().mockReturnValue([]),
   getLatestSubscription: jest.fn().mockReturnValue(null),

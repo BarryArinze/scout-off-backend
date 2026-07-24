@@ -3,7 +3,7 @@ import { dispatchEventWebhook } from '../../src/services/webhooks';
 
 jest.mock('../../src/services/stellar', () => ({
   server: {
-    getEvents: jest.fn(),
+    queryEvents: jest.fn(),
   },
 }));
 
@@ -12,7 +12,7 @@ jest.mock('../../src/services/webhooks', () => ({
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { server } = require('../../src/services/stellar') as { server: { getEvents: jest.Mock } };
+const { server } = require('../../src/services/stellar') as { server: { queryEvents: jest.Mock } };
 const mockedDispatch = dispatchEventWebhook as jest.MockedFunction<typeof dispatchEventWebhook>;
 
 function makeEvent(type: string, payload: Record<string, unknown>, txHash: string, ledger = 100) {
@@ -31,7 +31,7 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
 
   it('dispatches a webhook when a milestone_approved event is indexed', async () => {
     const payload = { player_id: 'P1', milestone_type: 'identity' };
-    server.getEvents.mockResolvedValue({
+    server.queryEvents.mockResolvedValue({
       events: [makeEvent('milestone_approved', payload, 'hash-001')],
     });
 
@@ -42,7 +42,7 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
   });
 
   it('dispatches a webhook for each milestone_approved event in a batch', async () => {
-    server.getEvents.mockResolvedValue({
+    server.queryEvents.mockResolvedValue({
       events: [
         makeEvent('milestone_approved', { player_id: 'P1' }, 'hash-002', 100),
         makeEvent('player_registered', { player_id: 'P2', wallet: 'GWALLETP2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }, 'hash-003', 101),
@@ -58,7 +58,7 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
   });
 
   it('does not dispatch a webhook for non-milestone_approved events', async () => {
-    server.getEvents.mockResolvedValue({
+    server.queryEvents.mockResolvedValue({
       events: [makeEvent('player_registered', { player_id: 'P1', wallet: 'GWALLETP1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }, 'hash-005')],
     });
 
@@ -68,7 +68,7 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
   });
 
   it('does not dispatch any webhooks when the event stream is empty', async () => {
-    server.getEvents.mockResolvedValue({ events: [] });
+    server.queryEvents.mockResolvedValue({ events: [] });
 
     await indexEvents();
 
@@ -80,7 +80,7 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
     const warnSpy = jest.spyOn(require('../../src/utils/logger').logger, 'warn').mockImplementation(() => {});
     mockedDispatch.mockRejectedValueOnce(new Error('endpoint unreachable'));
 
-    server.getEvents.mockResolvedValue({
+    server.queryEvents.mockResolvedValue({
       events: [makeEvent('milestone_approved', { player_id: 'P1' }, 'hash-006')],
     });
 

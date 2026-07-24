@@ -5,7 +5,7 @@ import { tierForApprovedMilestones, TIER_THRESHOLDS } from '../../src/services/t
 // The indexer reaches out to the chain and to the webhook dispatcher; stub both
 // so the test exercises only the DB-backed tier-promotion path.
 jest.mock('../../src/services/stellar', () => ({
-  server: { getEvents: jest.fn() },
+  server: { queryEvents: jest.fn() },
 }));
 jest.mock('../../src/services/webhooks', () => ({
   dispatchEventWebhook: jest.fn().mockResolvedValue(undefined),
@@ -13,7 +13,7 @@ jest.mock('../../src/services/webhooks', () => ({
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { server } = require('../../src/services/stellar') as {
-  server: { getEvents: jest.Mock };
+  server: { queryEvents: jest.Mock };
 };
 
 function rawEvent(type: string, payload: Record<string, unknown>, txHash: string, ledger: number) {
@@ -75,7 +75,7 @@ describe('indexEvents — player tier in DB matches approved-milestone count (#3
     const nextHash = () => `tx-${player}-${seq++}`;
 
     // Register the player — starts at tier 0.
-    server.getEvents.mockResolvedValue({
+    server.queryEvents.mockResolvedValue({
       latestLedger: ledger,
       events: [
         rawEvent('player_registered', { player_id: player, wallet: 'GWALLET' }, nextHash(), ledger++),
@@ -90,7 +90,7 @@ describe('indexEvents — player tier in DB matches approved-milestone count (#3
       for (let i = 0; i < n; i++) {
         events.push(rawEvent('milestone_approved', { player_id: player }, nextHash(), ledger++));
       }
-      server.getEvents.mockResolvedValue({ latestLedger: ledger, events });
+      server.queryEvents.mockResolvedValue({ latestLedger: ledger, events });
       await indexEvents();
     };
 
@@ -111,7 +111,7 @@ describe('indexEvents — player tier in DB matches approved-milestone count (#3
     let seq = 0;
     const nextHash = () => `tx-multi-${seq++}`;
 
-    server.getEvents.mockResolvedValue({
+    server.queryEvents.mockResolvedValue({
       latestLedger: ledger,
       events: [
         rawEvent('player_registered', { player_id: alice, wallet: 'GA' }, nextHash(), ledger++),

@@ -5,7 +5,7 @@ import app from '../../src/app';
 const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   queryPlayers: jest.fn().mockReturnValue([]),
   countPlayers: jest.fn().mockReturnValue(0),
   getPlayerById: jest.fn().mockReturnValue(null),
@@ -13,7 +13,7 @@ jest.mock('../../src/db', () => ({
   getPlayerProfileHistory: jest.fn().mockReturnValue([]),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn().mockReturnValue(1),
-  upsertPlayer: jest.fn(),
+  insertOrUpdatePlayer: jest.fn(),
 }));
 
 jest.mock('../../src/services/indexer', () => ({
@@ -201,10 +201,10 @@ describe('PUT /api/players/:playerId — owner-only enforcement', () => {
 // ─── POST /api/players/register — DB write (#282) ────────────────────────────
 
 describe('POST /api/players/register — immediate DB write (#282)', () => {
-  it('calls upsertPlayer with correct fields after successful registration', async () => {
+  it('calls insertOrUpdatePlayer with correct fields after successful registration', async () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { upsertPlayer } = require('../../src/db');
-    (upsertPlayer as jest.Mock).mockClear();
+    const { insertOrUpdatePlayer } = require('../../src/db');
+    (insertOrUpdatePlayer as jest.Mock).mockClear();
 
     const token = makeToken(PLAYER_WALLET, 'player');
     const res = await request(app)
@@ -213,8 +213,8 @@ describe('POST /api/players/register — immediate DB write (#282)', () => {
       .send(validPayload);
 
     expect(res.status).toBe(201);
-    expect(upsertPlayer).toHaveBeenCalledTimes(1);
-    const call = (upsertPlayer as jest.Mock).mock.calls[0][0];
+    expect(insertOrUpdatePlayer).toHaveBeenCalledTimes(1);
+    const call = (insertOrUpdatePlayer as jest.Mock).mock.calls[0][0];
     expect(call.wallet).toBe(PLAYER_WALLET);
     expect(call.position).toBe('striker');
     expect(call.region).toBe('europe');
