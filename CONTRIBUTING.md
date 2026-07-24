@@ -170,9 +170,18 @@ npx lint-staged
 
 ### Coverage Goals
 
-- Target ≥ 80% code coverage for new code
-- Focus on critical paths: auth, payments, data validation
-- See `tests/` directory for examples
+Jest enforces minimum coverage thresholds automatically when running `npm run test:coverage`. The thresholds are configured in the `jest.coverageThreshold` block in `package.json`:
+
+| Metric     | Minimum |
+| ---------- | ------- |
+| Branches   | 70%     |
+| Functions  | 75%     |
+| Lines      | 80%     |
+| Statements | 80%     |
+
+Running `npm run test:coverage` below these thresholds will fail the suite. CI enforces coverage on every pull request via the `test` job in `.github/workflows/ci.yml`, which calls `npm run test:coverage` and uploads the `lcov` report to Codecov. The default `npm test` command does **not** collect coverage and will not fail on threshold violations — use `npm run test:coverage` locally when you want threshold enforcement.
+
+Focus coverage on critical paths: auth, payments, and data validation.
 
 ### Naming Conventions
 
