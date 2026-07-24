@@ -704,20 +704,43 @@ All error responses follow this shape:
 
 Common HTTP status codes:
 
-| Code | Meaning                                                                                                   |
-| ---- | --------------------------------------------------------------------------------------------------------- |
-| 400  | Format/type error — missing required field, wrong data type, or invalid format (e.g. invalid CID, invalid Stellar address) |
-| 401  | Missing or invalid auth token                                                                             |
-| 403  | Insufficient permissions                                                                                  |
-| 404  | Resource not found                                                                                        |
-| 422  | Semantic error — field passes format checks but fails business logic (e.g. `minTier` is a valid integer but outside the 0–3 range) |
-| 500  | Internal server error                                                                                     |
+| Code | Meaning                       |
+| ---- | ----------------------------- |
+| 400  | Validation error              |
+| 401  | Missing or invalid auth token |
+| 403  | Insufficient permissions      |
+| 404  | Resource not found            |
+| 500  | Internal server error         |
 
-### 400 vs 422
+---
 
-The API distinguishes between two classes of validation failure:
+## Error Codes
 
-- **400 Bad Request** — the input is malformed: a required field is missing, the value has the wrong data type, or it fails a format check (invalid CID, non-Stellar address, etc.).
-- **422 Unprocessable Entity** — the input is syntactically valid but fails a business-logic constraint. Examples:
-  - `minTier` is a valid integer but outside the accepted 0–3 range.
-  - An amount is a valid number but exceeds the contract balance.
+When a request triggers a Soroban contract error, the API translates the on-chain error code into an appropriate HTTP status and returns a human-readable message. The `code` field in the response body will contain the snake_case `ErrorCode` constant (e.g. `PLAYER_NOT_FOUND`).
+
+| Code | Error              | HTTP Status              | Description                                    | Resolution                                                      |
+| ---- | ------------------ | ------------------------ | ---------------------------------------------- | --------------------------------------------------------------- |
+| 1    | AlreadyInitialized | 409 Conflict             | Contract already initialized                   | No action needed; contract is ready                             |
+| 2    | NotInitialized     | 503 Service Unavailable  | Contract not initialized                       | Admin must call `initialize` first                              |
+| 3    | PlayerNotFound     | 404 Not Found            | Player ID does not exist                       | Verify `player_id` from the registration transaction            |
+| 4    | InvalidValidator   | 403 Forbidden            | Caller is not a registered validator           | Admin must register the validator address first                 |
+| 5    | MilestoneNotFound  | 404 Not Found            | Milestone ID does not exist                    | Refresh the milestone list and verify the ID                    |
+| 6    | AlreadyVerified    | 409 Conflict             | Milestone already approved                     | No duplicate approvals needed; check milestone status           |
+| 7    | InsufficientFee    | 402 Payment Required     | Payment is below the required contact fee      | Fetch the current fee via `get_contact_fee()` and retry         |
+| 8    | NotSubscribed      | 402 Payment Required     | Scout has no active subscription               | Call `subscribe` before browsing premium data                   |
+| 9    | Unauthorized       | 401 Unauthorized         | Caller is not authorized for this action       | Confirm you are signing with the correct Stellar account        |
+| 10   | ContractPaused     | 503 Service Unavailable  | Contract is paused by the admin                | Wait for admin to call `unpause_contract()`                     |
+| 11   | Overflow           | 500 Internal Server Error| Arithmetic overflow in fee calculation         | Use amounts within the safe u128 range                          |
+
+### Endpoint Error Code Cross-Reference
+
+| Endpoint | Possible Error Codes |
+| -------- | -------------------- |
+| `POST /api/players/register` | 2 (NotInitialized), 10 (ContractPaused) |
+| `GET /api/players/:playerId` | 3 (PlayerNotFound) |
+| `GET /api/players/:playerId/milestones` | 3 (PlayerNotFound), 5 (MilestoneNotFound) |
+| `POST /api/validators/milestone` | 2 (NotInitialized), 4 (InvalidValidator), 10 (ContractPaused) |
+| `POST /api/scouts/:wallet/contacts/:playerId/unlock` | 7 (InsufficientFee), 8 (NotSubscribed), 9 (Unauthorized), 10 (ContractPaused) |
+| `GET /api/scouts/:wallet/subscription` | 8 (NotSubscribed) |
+| `POST /api/admin/contract/pause` | 9 (Unauthorized), 1 (AlreadyInitialized) |
+| `POST /api/admin/contract/unpause` | 9 (Unauthorized), 10 (ContractPaused) |
