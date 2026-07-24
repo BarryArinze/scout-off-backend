@@ -120,6 +120,36 @@ Fixes #123
 
 ## Code Quality Standards
 
+### Pre-commit Hook
+
+A [Husky](https://typicode.com/husky/) pre-commit hook runs
+[lint-staged](https://github.com/lint-staged/lint-staged) automatically on
+every `git commit`. It applies ESLint (with `--fix`) to all staged `.ts` files
+under `src/` and `tests/`, so you catch and auto-fix lint violations before
+they reach CI.
+
+The configuration lives in the `"lint-staged"` key in `package.json`:
+
+```json
+"lint-staged": {
+  "src/**/*.ts": ["eslint --fix --ext .ts"],
+  "tests/**/*.ts": ["eslint --fix --ext .ts"]
+}
+```
+
+Husky is set up automatically when you run `npm install` (via the `prepare`
+lifecycle hook). If the hook does not run after cloning, enable it manually:
+
+```bash
+npx husky install
+```
+
+You can also run lint-staged on your current staged files at any time:
+
+```bash
+npx lint-staged
+```
+
 ### Required Checks
 
 - **Tests**: New features must include unit or integration tests
