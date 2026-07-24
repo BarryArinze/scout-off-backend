@@ -275,6 +275,54 @@ export function getEventsPage(filter: EventsPageFilter, limit: number, offset: n
   }));
 }
 
+/**
+ * Generator that lazily yields one event row at a time using
+ * better-sqlite3's `Statement.iterate()` cursor, filtered by type and/or
+ * created_at range, ordered by ledger ascending (ties broken by id).
+ *
+ * Unlike LIMIT/OFFSET pagination this uses a single prepared statement
+ * cursor, so the result is a stable snapshot that does not drift when the
+ * indexer inserts rows concurrently — no duplicates or skipped rows.
+ */
+export function* getEventsIterable(filter: EventsPageFilter): Generator<EventExportRow, void, void> {
+  const db = getDb();
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (filter.type) {
+    clauses.push('type = ?');
+    params.push(filter.type);
+  }
+  if (filter.startDate) {
+    clauses.push('created_at >= ?');
+    params.push(filter.startDate.getTime());
+  }
+  if (filter.endDate) {
+    clauses.push('created_at <= ?');
+    params.push(filter.endDate.getTime());
+  }
+
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const sql = `SELECT type, ledger, payload, created_at FROM events ${where} ORDER BY ledger ASC, id ASC`;
+
+  const stmt = db.prepare(sql);
+  const iterator = stmt.iterate(...(params as unknown[])) as IterableIterator<{
+    type: string;
+    ledger: number;
+    payload: string;
+    created_at: number | null;
+  }>;
+
+  for (const row of iterator) {
+    yield {
+      type: row.type as ContractEventType,
+      ledger: row.ledger,
+      createdAt: row.created_at,
+      payload: JSON.parse(row.payload),
+    };
+  }
+}
+
 // ─── Player table helpers ─────────────────────────────────────────────────────
 
 export interface PlayerRow {
