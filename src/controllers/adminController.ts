@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
-import { queryEvents, getEventsCount, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount } from '../db';
+import { queryEvents, getEventsCount, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow } from '../db';
 import { getAllValidators, insertValidator, revokeValidatorRow, getValidatorByWallet } from '../services/indexer';
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { logAuditEvent } from '../services/audit';
@@ -13,6 +13,80 @@ import { logger } from '../utils/logger';
 import { ErrorCode } from '../utils/errorCodes';
 import { proposeAction, approveAction, listPendingActions, getActionDetails } from '../services/adminMultiSig';
 import type { ApiResponse, EventRecord, ContractEventType } from '../types';
+
+// ─── Audit trail types & constants (#832) ─────────────────────────────────────
+
+/**
+ * The exhaustive set of audit event types that the platform can emit.
+ * Used for validation of the ?eventType query parameter.
+ */
+export const KNOWN_AUDIT_EVENT_TYPES = [
+  // Admin action events (event_source = 'admin_action')
+  'fee_history_query',
+  'contract_state_change',
+  'validator_registration',
+  'validator_revocation',
+  'fee_withdrawal_attempt',
+  'platform_fee_update_attempt',
+  'bulk_validator_import',
+  // App-level events (event_source = 'app_event')
+  'player_registered',
+  'profile_updated',
+  'milestone_submitted',
+  'milestone_approved',
+  'player_search',
+  'pending_milestones_viewed',
+  // Auth events
+  'auth_failed',
+  'auth_forbidden',
+] as const;
+
+export type AuditEventType = (typeof KNOWN_AUDIT_EVENT_TYPES)[number];
+
+/**
+ * Canonical response shape for a single audit log entry (#832).
+ * Maps the internal `audit_log` column names to the public API contract.
+ */
+export interface AuditEntryResponse {
+  id: number;
+  event_type: string;
+  actor_wallet: string;
+  target_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  hash: string;
+}
+
+/**
+ * Convert a raw DB row to the public AuditEntry response shape.
+ * `target_id` is extracted from query_params if present there.
+ */
+function rowToAuditEntry(row: AuditLogRow): AuditEntryResponse {
+  let params: Record<string, unknown> = {};
+  try {
+    params = JSON.parse(row.query_params) as Record<string, unknown>;
+  } catch {
+    // Leave params empty — malformed JSON should not crash the endpoint.
+  }
+  const { target_id, targetId, validatorWallet, player_id, playerId, ...rest } = params;
+  // Prefer explicit target_id / targetId keys; fall back to common domain keys.
+  const resolvedTargetId =
+    (target_id as string | undefined) ??
+    (targetId as string | undefined) ??
+    (validatorWallet as string | undefined) ??
+    (player_id as string | undefined) ??
+    (playerId as string | undefined) ??
+    null;
+  return {
+    id: row.id,
+    event_type: row.action,
+    actor_wallet: row.admin_wallet,
+    target_id: resolvedTargetId,
+    metadata: { ...rest },
+    created_at: row.created_at,
+    hash: row.hash,
+  };
+}
 
 // Use shared validator for Stellar public keys
 
@@ -46,7 +120,7 @@ const auditQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
-/** GET /api/admin/audit */
+/** GET /api/admin/audit (legacy #345 endpoint — backward-compatible) */
 export async function getAuditLog(req: Request, res: Response, next: NextFunction) {
   try {
     const parsed = auditQuerySchema.safeParse(req.query);
@@ -63,6 +137,92 @@ export async function getAuditLog(req: Request, res: Response, next: NextFunctio
       total,
       limit,
       offset,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Audit trail endpoint (#832) ──────────────────────────────────────────────
+
+const auditTrailQuerySchema = z.object({
+  /** Filter by audit event type. Must be one of the known event types. */
+  eventType: z
+    .string()
+    .refine(
+      (v) => (KNOWN_AUDIT_EVENT_TYPES as readonly string[]).includes(v),
+      (v) => ({ message: `Invalid eventType "${v}". Must be one of: ${KNOWN_AUDIT_EVENT_TYPES.join(', ')}` })
+    )
+    .optional(),
+  /** ISO 8601 start of date range (inclusive). */
+  from: z
+    .string()
+    .refine((v) => !isNaN(Date.parse(v)), { message: 'from must be a valid ISO 8601 date string' })
+    .optional(),
+  /** ISO 8601 end of date range (inclusive). */
+  to: z
+    .string()
+    .refine((v) => !isNaN(Date.parse(v)), { message: 'to must be a valid ISO 8601 date string' })
+    .optional(),
+  /** 1-based page number (default: 1). */
+  page: z.coerce.number().int().min(1).default(1),
+  /** Number of entries per page, max 100 (default: 50). */
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+}).refine(
+  (d) => {
+    if (d.from && d.to) {
+      return new Date(d.from) <= new Date(d.to);
+    }
+    return true;
+  },
+  { message: 'from must not be after to' }
+);
+
+/**
+ * GET /api/admin/audit/trail
+ *
+ * Returns paginated, filterable audit trail entries in a structured AuditEntry
+ * shape. Accepts ?eventType=, ?from=, ?to= (ISO 8601), ?page=, ?pageSize=.
+ *
+ * @response 200 { success: true, data: AuditEntry[], total, page, pageSize }
+ * @response 400 { success: false, error: string } - Invalid query parameters
+ * @auth Bearer (admin role required)
+ */
+export async function getAuditTrail(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = auditTrailQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    const { eventType, from, to, page, pageSize } = parsed.data;
+    const offset = (page - 1) * pageSize;
+
+    const rows = getAuditLogs({
+      action: eventType,
+      startDate: from,
+      endDate: to,
+      limit: pageSize,
+      offset,
+    });
+
+    const total = getAuditLogsCount({
+      action: eventType,
+      startDate: from,
+      endDate: to,
+    });
+
+    res.json({
+      success: true,
+      data: rows.map(rowToAuditEntry),
+      total,
+      page,
+      pageSize,
     });
   } catch (err) {
     next(err);
