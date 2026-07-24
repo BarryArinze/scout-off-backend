@@ -15,7 +15,11 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `SOROBAN_RPC_URL` | ✅ | e.g. `https://soroban-testnet.stellar.org` |
 | `NETWORK` | ✅ | `testnet` or `mainnet` |
 | `PINATA_API_KEY` / `PINATA_SECRET` | ✅ | IPFS upload credentials |
-| `DB_PATH` | — | SQLite file path (default: `scout-off.db`) |
+| `DB_DRIVER` | — | Database driver: `sqlite` (default) or `postgres` |
+| `DB_PATH` | — | SQLite file path (default: `scout-off.db`); only used when `DB_DRIVER=sqlite` |
+| `DATABASE_URL` | — (required when `DB_DRIVER=postgres`) | PostgreSQL connection string, e.g. `postgresql://user:pass@host:5432/db` |
+| `SSE_KEEPALIVE_INTERVAL_MS` | — | Keep-alive ping interval for SSE connections, in ms (default: `15000`) |
+| `SSE_MAX_CONNECTIONS` | — | Max concurrent SSE connections; `0` = unlimited (default: `0`) |
 | `PORT` | — | API port (default: `4000`) |
 | `LOG_LEVEL` | — | `debug` / `info` / `warn` / `error` |
 | `LOG_SKIP_PATHS` | — | Comma-separated paths requestLogger silences (default: health + metrics probes) |
