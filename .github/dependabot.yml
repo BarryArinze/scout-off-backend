@@ -20,6 +20,9 @@ updates:
     target-branch: main
     open-pull-requests-limit: 5
     labels:
-      - dependencies
-      - infrastructure
-      - rust
+      - infra
+      - easy
+    groups:
+      soroban-deps:
+        patterns:
+          - "soroban-*"

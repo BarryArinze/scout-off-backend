@@ -291,6 +291,28 @@ The following dependencies require extra scrutiny during updates due to their se
 - Test integration points manually
 - Verify no secrets are logged
 
+### Automated Dependency Updates
+
+Dependabot is configured in `.github/dependabot.yml` to open pull requests for outdated dependencies automatically, once per week on Mondays.
+
+**npm (Node.js backend)**
+
+- Directory: `/` (project root)
+- Label: `dependencies`, `infrastructure`, `javascript`
+- Limit: 5 open PRs at a time
+
+**Cargo (Rust smart contracts)**
+
+- Directory: `/contracts`
+- Label: `infra`, `easy`
+- Limit: 5 open PRs at a time
+- Grouped: all `soroban-*` crates are bundled into a single PR via the `soroban-deps` group, reducing noise from Soroban SDK patch releases.
+
+When Dependabot opens a Cargo PR, verify:
+1. Review the Cargo.lock diff and the crate's CHANGELOG for breaking changes.
+2. Run `cd contracts && cargo test --target x86_64-unknown-linux-gnu` locally to confirm the contracts still build and pass tests.
+3. Merge or close the PR — do **not** leave stale Dependabot PRs open longer than one sprint.
+
 ### Supply Chain Security
 
 - ✅ Use `npm ci` in CI/CD (reproducible installs)
