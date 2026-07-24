@@ -202,6 +202,21 @@ Recommended metrics to track:
 - Event indexer lag (gap between latest on-chain event and last indexed event)
 - SQLite file size growth
 
+### Docker Compose Healthcheck
+
+The `docker-compose.yml` configures a healthcheck on the backend service that polls `/health/liveness` every 10 seconds:
+
+```yaml
+healthcheck:
+  test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/health/liveness"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 15s
+```
+
+Docker marks the container `(healthy)` once the first probe succeeds. The `start_period` of 15 seconds gives the Express server time to initialise before probes are counted as failures. The `--spider` flag tells `wget` to perform a HEAD-only request without downloading the response body, keeping healthcheck logs quiet. Run `docker compose ps` to confirm the container status shows `(healthy)` after startup.
+
 ## Multi-Sig Admin Operations
 
 High-value admin operations (withdraw fees, pause/unpause contract) require M-of-N multi-signature approval:
