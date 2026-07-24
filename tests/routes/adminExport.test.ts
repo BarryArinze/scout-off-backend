@@ -1,22 +1,23 @@
+import { EventEmitter } from 'events';
 import { Request, Response, NextFunction } from 'express';
 import { exportEvents } from '../../src/controllers/exportController';
 
 function makeRes() {
+  const ee = new EventEmitter();
   const headers: Record<string, string> = {};
   const chunks: string[] = [];
-  let ended = false;
   let statusCode = 200;
-  const res = {
+  let ended = false;
+  const res = Object.assign(ee, {
     setHeader: (name: string, value: string) => { headers[name.toLowerCase()] = value; },
-    status: jest.fn().mockReturnThis(),
+    status: jest.fn((code: number) => { statusCode = code; return res; }),
     send: jest.fn((data: string) => { chunks.push(data); return res; }),
     write: jest.fn((chunk: string) => { chunks.push(chunk); return true; }),
     end: jest.fn(() => { ended = true; return res; }),
     json: jest.fn((data: unknown) => { chunks.push(JSON.stringify(data)); return res; }),
     _headers: headers,
     _body: () => chunks.join(''),
-  } as unknown as Response & { _headers: Record<string, string>; _body: () => string };
-  (res.status as jest.Mock).mockImplementation((code: number) => { statusCode = code; return res; });
+  });
   return { res, headers, getBody: () => chunks.join(''), getStatus: () => statusCode, isEnded: () => ended };
 }
 

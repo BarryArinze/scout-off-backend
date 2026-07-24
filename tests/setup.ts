@@ -24,9 +24,5 @@ process.env.WEBHOOK_SECRET_ENCRYPTION_KEY =
   "0".repeat(63) + "1";
 
 import { initDb } from "../src/db";
-import { runMigrations } from "../src/db/migrate";
 
 initDb();
-// Ensure migrations are applied in tests (initDb() only creates base tables)
-// eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-var-requires
-runMigrations((global as any).__db ?? require("../src/db").getDb());
