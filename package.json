@@ -14,6 +14,7 @@
     "prestart": "node scripts/validate-env.js",
     "start": "node dist/index.js",
     "test": "node node_modules/jest/bin/jest.js --runInBand",
+    "test:coverage": "node node_modules/jest/bin/jest.js --runInBand --coverage",
     "test:watch": "node node_modules/jest/bin/jest.js --watch",
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts' 'scripts/*.ts' --ext .ts",
     "loadtest": "ts-node --project tsconfig.scripts.json scripts/loadtest.ts",
@@ -99,9 +100,9 @@
         "coverageThreshold": {
           "global": {
             "branches": 70,
-            "functions": 70,
-            "lines": 70,
-            "statements": 70
+            "functions": 75,
+            "lines": 80,
+            "statements": 80
           }
         }
       },
