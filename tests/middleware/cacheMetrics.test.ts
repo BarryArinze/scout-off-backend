@@ -19,6 +19,7 @@ import {
   serializeMetrics,
 } from '../../src/middleware/metrics';
 import { InMemoryCacheStore } from '../../src/services/inMemoryCacheStore';
+import * as cacheModule from '../../src/services/cache';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -65,33 +66,28 @@ describe('cache metric counter primitives', () => {
 // ---------------------------------------------------------------------------
 
 describe('cacheGet() increments hit/miss counters', () => {
-  let cache: typeof import('../../src/services/cache');
-
   beforeEach(() => {
-    jest.resetModules();
     resetMetrics();
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    cache = require('../../src/services/cache');
   });
 
   it('increments hit counter when the key exists', async () => {
-    await cache.cacheSet('players:1', { name: 'Alice' });
-    await cache.cacheGet('players:1');
+    await cacheModule.cacheSet('players:1', { name: 'Alice' });
+    await cacheModule.cacheGet('players:1');
     expect(getCacheMetrics().hits).toBe(1);
     expect(getCacheMetrics().misses).toBe(0);
   });
 
   it('increments miss counter when the key does not exist', async () => {
-    await cache.cacheGet('players:nonexistent');
+    await cacheModule.cacheGet('players:nonexistent');
     expect(getCacheMetrics().misses).toBe(1);
     expect(getCacheMetrics().hits).toBe(0);
   });
 
   it('increments counters independently across multiple calls', async () => {
-    await cache.cacheSet('players:hit', { name: 'Bob' });
-    await cache.cacheGet('players:hit');   // hit
-    await cache.cacheGet('players:hit');   // hit
-    await cache.cacheGet('players:miss');  // miss
+    await cacheModule.cacheSet('players:hit', { name: 'Bob' });
+    await cacheModule.cacheGet('players:hit');   // hit
+    await cacheModule.cacheGet('players:hit');   // hit
+    await cacheModule.cacheGet('players:miss');  // miss
     expect(getCacheMetrics().hits).toBe(2);
     expect(getCacheMetrics().misses).toBe(1);
   });
