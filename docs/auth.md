@@ -93,7 +93,14 @@ The backend supports these token roles:
 - `validator`
 - `admin`
 
-The `role` may be assigned from the request or automatically elevated to `admin` if the authenticated account matches the configured `ADMIN_WALLET`.
+The `role` may be assigned from the request or automatically elevated to `admin` if the authenticated account matches either of two configurable admin-wallet environment variables:
+
+- **`ADMIN_WALLET`** (singular) — a single Stellar address. This is the original, backward-compatible variable. It's **required in production** (the process refuses to start without it) and produces a startup warning in staging if unset.
+- **`ADMIN_WALLETS`** (plural, comma-separated) — one or more Stellar addresses, added to support the multi-sig admin-action feature (see below). If `ADMIN_WALLETS` is not set, it falls back to the value of `ADMIN_WALLET`, so a single-admin setup using only `ADMIN_WALLET` still works without extra configuration.
+
+**How they combine:** these are not a fallback pair where one overrides the other — an authenticating account is elevated to `admin` if it matches *either* `ADMIN_WALLET` **or** is present in the `ADMIN_WALLETS` list. If you configure both with different values, both are honored simultaneously.
+
+**Multi-sig admin actions:** `ADMIN_WALLETS` and `ADMIN_THRESHOLD` (default `1`) work together to gate high-value admin actions (contract pause/unpause, fee withdrawal). If `ADMIN_THRESHOLD` is `1`, an action from any wallet in `ADMIN_WALLETS` executes immediately. If it's greater than `1`, the action is proposed and held pending until enough distinct wallets from `ADMIN_WALLETS` co-sign it. See `src/services/adminMultiSig.ts` for the signing/approval logic.
 
 ## Token Refresh
 
