@@ -94,8 +94,7 @@ services:
       retries: 3
       start_period: 10s
     depends_on:
-      redis:
-        condition: service_healthy
+      - redis
 
   # Optional: only needed so `backend` can use the Redis-backed cache store
   # locally. The backend falls back to an in-memory cache automatically if
