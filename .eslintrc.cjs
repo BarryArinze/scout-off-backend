@@ -31,5 +31,16 @@ module.exports = {
         '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }]
       }
     }
+    ,
+    {
+      // scripts/*.ts are standalone CLI tools meant to print directly to the
+      // terminal for a human operator (banners, progress, summaries). The
+      // shared logger prepends level tags and is gated by config.logLevel,
+      // which would mangle formatted output and can suppress it entirely —
+      // neither is appropriate for a script whose job is to report its own
+      // progress. console is intentional here, not an oversight.
+      files: ['scripts/*.ts'],
+      rules: { 'no-console': 'off' }
+    }
   ]
 };
