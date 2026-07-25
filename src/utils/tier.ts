@@ -25,6 +25,7 @@ const FALLBACK_TIER = {
   tierDescription: 'tier.unknown.description',
 };
 
+/** Returns the i18n key pair (tierName, tierDescription) for a progress tier level, or a fallback for unknown levels. */
 export function getTierMeta(level: number): { tierName: string; tierDescription: string } {
   return TIER_META[level as ProgressLevel] ?? FALLBACK_TIER;
 }

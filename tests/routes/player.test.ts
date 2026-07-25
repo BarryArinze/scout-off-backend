@@ -17,6 +17,7 @@ jest.mock('../../src/db', () => ({
   insertAuditLog: jest.fn(),
   deactivatePlayer: jest.fn(),
   reactivatePlayer: jest.fn(),
+  countTrialOffersByPlayer: jest.fn().mockReturnValue(0),
 }));
 
 jest.mock('../../src/services/indexer', () => ({
@@ -314,5 +315,142 @@ describe('POST /api/players/register — immediate DB write (#282)', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.data.playerId).toBeDefined();
+  });
+});
+
+// ─── GET /api/players/:playerId — offerCount field ────────────────────────────
+
+describe('GET /api/players/:playerId — offerCount field', () => {
+  const mockPlayer = {
+    player_id: 'player-offer-test',
+    wallet: PLAYER_WALLET,
+    position: 'Midfielder',
+    region: 'Europe',
+    metadata_uri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+    progress_level: 1,
+    created_at: 1700000000,
+    is_active: 1,
+  };
+
+  it('includes offerCount: 0 when no offers exist', async () => {
+    const { getPlayerById, countTrialOffersByPlayer } = require('../../src/db');
+    (getPlayerById as jest.Mock).mockReturnValue(mockPlayer);
+    (countTrialOffersByPlayer as jest.Mock).mockReturnValue(0);
+
+    const res = await request(app).get('/api/players/player-offer-test');
+    expect(res.status).toBe(200);
+    expect(res.body.data.offerCount).toBe(0);
+  });
+
+  it('includes offerCount reflecting the number of offers', async () => {
+    const { getPlayerById, countTrialOffersByPlayer } = require('../../src/db');
+    (getPlayerById as jest.Mock).mockReturnValue(mockPlayer);
+    (countTrialOffersByPlayer as jest.Mock).mockReturnValue(3);
+
+    const res = await request(app).get('/api/players/player-offer-test');
+    expect(res.status).toBe(200);
+    expect(res.body.data.offerCount).toBe(3);
+  });
+});
+
+// ─── GET /api/players — ?fields= projection ───────────────────────────────────
+
+describe('GET /api/players — ?fields= query parameter', () => {
+  beforeEach(() => {
+    const { queryPlayers, countPlayers } = require('../../src/db');
+    (queryPlayers as jest.Mock).mockReturnValue([
+      {
+        player_id: 'player-fields-001',
+        wallet: PLAYER_WALLET,
+        position: 'Forward',
+        region: 'West Africa',
+        metadata_uri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+        progress_level: 1,
+        created_at: 1700000000,
+        is_active: 1,
+      },
+    ]);
+    (countPlayers as jest.Mock).mockReturnValue(1);
+  });
+
+  it('returns only the requested fields when ?fields= is provided', async () => {
+    const res = await request(app).get('/api/players?fields=player_id,position');
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data[0]).toHaveProperty('player_id', 'player-fields-001');
+    expect(res.body.data[0]).toHaveProperty('position', 'Forward');
+    // Non-requested fields should be absent
+    expect(res.body.data[0]).not.toHaveProperty('wallet');
+    expect(res.body.data[0]).not.toHaveProperty('region');
+    expect(res.body.data[0]).not.toHaveProperty('progress_level');
+  });
+
+  it('returns all fields when no ?fields= param is given (backwards compatible)', async () => {
+    const res = await request(app).get('/api/players');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0]).toHaveProperty('player_id');
+    expect(res.body.data[0]).toHaveProperty('wallet');
+    expect(res.body.data[0]).toHaveProperty('position');
+    expect(res.body.data[0]).toHaveProperty('region');
+  });
+
+  it('silently ignores unknown field names in ?fields=', async () => {
+    const res = await request(app).get('/api/players?fields=player_id,nonexistent_field');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0]).toHaveProperty('player_id');
+    // The unknown field is simply absent — not a 400
+    expect(res.body.data[0]).not.toHaveProperty('nonexistent_field');
+  });
+
+  it('returns an empty object per player when all requested fields are unknown', async () => {
+    const res = await request(app).get('/api/players?fields=totally_unknown');
+    expect(res.status).toBe(200);
+    // No keys from the unknown field
+    expect(Object.keys(res.body.data[0])).not.toContain('totally_unknown');
+  });
+});
+
+// ─── X-API-Version header ─────────────────────────────────────────────────────
+
+describe('X-API-Version response header', () => {
+  it('is present on GET /api/players', async () => {
+    const res = await request(app).get('/api/players');
+    expect(res.headers['x-api-version']).toBeDefined();
+    expect(res.headers['x-api-version']).toMatch(/^\d+$/);
+  });
+
+  it('is present on GET /api/players/:playerId 404', async () => {
+    const { getPlayerById } = require('../../src/db');
+    (getPlayerById as jest.Mock).mockReturnValue(null);
+    const res = await request(app).get('/api/players/nonexistent');
+    expect(res.headers['x-api-version']).toBeDefined();
+  });
+});
+
+// ─── GET /api/docs — OpenAPI spec ─────────────────────────────────────────────
+
+describe('GET /api/docs', () => {
+  it('returns 200 with a valid OpenAPI 3.x spec', async () => {
+    const res = await request(app).get('/api/docs');
+    expect(res.status).toBe(200);
+    expect(res.body.openapi).toMatch(/^3\./);
+    expect(res.body.info).toBeDefined();
+    expect(res.body.paths).toBeDefined();
+  });
+
+  it('spec includes a /players path entry', async () => {
+    const res = await request(app).get('/api/docs');
+    expect(res.status).toBe(200);
+    expect(res.body.paths['/players']).toBeDefined();
+  });
+
+  it('spec includes a /players/{playerId} path entry', async () => {
+    const res = await request(app).get('/api/docs');
+    expect(res.body.paths['/players/{playerId}']).toBeDefined();
+  });
+
+  it('returns X-API-Version header', async () => {
+    const res = await request(app).get('/api/docs');
+    expect(res.headers['x-api-version']).toBeDefined();
   });
 });

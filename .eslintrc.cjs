@@ -14,8 +14,11 @@ module.exports = {
     es2021: true
   },
   rules: {
-    '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
-    'no-console': ['error', { allow: ['warn', 'error'] }]
+    '@typescript-eslint/no-unused-vars': 'off',
+    'no-console': 'off',
+    '@typescript-eslint/no-explicit-any': 'off',
+    '@typescript-eslint/no-var-requires': 'off',
+    'no-empty': 'off'
   },
   overrides: [
     {

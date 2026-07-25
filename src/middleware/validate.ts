@@ -2,6 +2,7 @@ import { Request, RequestHandler } from 'express';
 import { ZodSchema } from 'zod';
 import { logger } from '../utils/logger';
 import { ErrorCode } from '../utils/errorCodes';
+import { sanitizeObject } from '../utils/sanitizer';
 
 interface ValidationOptions {
   context?: string;
@@ -78,7 +79,7 @@ export function validateBody<T>(schema: ZodSchema<T>, options?: ValidationOption
       });
       return;
     }
-    req.body = result.data;
+    req.body = sanitizeObject(result.data);
     next();
   };
 }
@@ -111,7 +112,7 @@ export function validateQuery<T>(schema: ZodSchema<T>, options?: ValidationOptio
     }
     // Cast so the controller can read coerced + defaulted values via req.query
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (req as any).query = result.data;
+    (req as any).query = sanitizeObject(result.data);
     next();
   };
 }
@@ -140,7 +141,7 @@ export function validateParams<T>(schema: ZodSchema<T>, options?: ValidationOpti
       });
       return;
     }
-    req.params = { ...req.params, ...(result.data as unknown as Record<string, string>) };
+    req.params = { ...req.params, ...(sanitizeObject(result.data) as Record<string, string>) };
     next();
   };
 }

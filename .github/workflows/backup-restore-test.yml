@@ -1,0 +1,177 @@
+name: Backup Restore Smoke Test
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run nightly at 2 AM UTC
+    - cron: '0 2 * * *'
+
+concurrency:
+  group: backup-restore-test-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backup-restore-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install sqlite3 CLI
+        run: sudo apt-get update && sudo apt-get install -y sqlite3 curl
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Run backup-restore smoke test
+        run: bash scripts/backup-restore-smoke-test.sh
+        env:
+          DATABASE_PATH: /tmp/scout-off-test.db
+          BACKUP_DEST: /tmp/backups
+          NODE_ENV: test
+          LOG_LEVEL: error
+          STELLAR_HEALTH_CHECK_ENABLED: false
+          IPFS_ENABLED: false
+
+      - name: Run backup verification tests
+        run: npm run test -- tests/scripts/backup-verify.test.ts --forceExit
+        env:
+          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+
+      - name: Run verify-backup sidecar tests
+        run: npm run test -- tests/scripts/verify-backup-sidecar.test.ts --forceExit
+        env:
+          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+
+  s3-restore-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'schedule' || github.event_name == 'push'
+    # Only run if S3 credentials are configured
+    if: ${{ secrets.BACKUP_S3_BUCKET != '' && secrets.AWS_ACCESS_KEY_ID != '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install sqlite3 CLI and AWS CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 curl awscli
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Download and verify latest S3 backup
+        run: |
+          # Get the most recent backup from S3
+          LATEST_BACKUP=$(aws s3 ls s3://${{ secrets.BACKUP_S3_BUCKET }}/scout-off-backups/ \
+            | grep '\.db$' \
+            | sort -r \
+            | head -1 \
+            | awk '{print $4}')
+          
+          if [[ -z "${LATEST_BACKUP}" ]]; then
+            echo "No backups found in S3 bucket"
+            exit 1
+          fi
+          
+          echo "Found latest backup: ${LATEST_BACKUP}"
+          
+          # Download the backup
+          mkdir -p /tmp/s3-restore
+          aws s3 cp "s3://${{ secrets.BACKUP_S3_BUCKET }}/scout-off-backups/${LATEST_BACKUP}" /tmp/s3-restore/backup.db
+          
+          # Download the counts sidecar if it exists
+          aws s3 cp "s3://${{ secrets.BACKUP_S3_BUCKET }}/scout-off-backups/${LATEST_BACKUP}.counts" /tmp/s3-restore/backup.counts || true
+          
+          # Verify the backup
+          bash scripts/verify-backup.sh /tmp/s3-restore/backup.db \
+            COUNTS_FILE=/tmp/s3-restore/backup.counts \
+            || exit 1
+          
+          echo "S3 backup verification passed"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+
+  gcs-restore-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.event_name == 'schedule' || github.event_name == 'push'
+    # Only run if GCS credentials are configured
+    if: ${{ secrets.BACKUP_GCS_BUCKET != '' && secrets.GCS_CREDENTIALS != '' }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install sqlite3 CLI and Google Cloud SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 curl
+          echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | sudo tee -a /etc/apt/sources.list.d/google-cloud-sdk.list
+          curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key --keyring /usr/share/keyrings/cloud.google.gpg add -
+          sudo apt-get update && sudo apt-get install -y google-cloud-sdk
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Authenticate with GCS
+        run: |
+          echo '${{ secrets.GCS_CREDENTIALS }}' > /tmp/gcs-credentials.json
+          gcloud auth activate-service-account --key-file=/tmp/gcs-credentials.json
+          gcloud config set project ${{ secrets.GCS_PROJECT_ID }}
+
+      - name: Download and verify latest GCS backup
+        run: |
+          # Get the most recent backup from GCS
+          LATEST_BACKUP=$(gsutil ls gs://${{ secrets.BACKUP_GCS_BUCKET }}/scout-off-backups/*.db 2>/dev/null | sort -r | head -1)
+          
+          if [[ -z "${LATEST_BACKUP}" ]]; then
+            echo "No backups found in GCS bucket"
+            exit 1
+          fi
+          
+          echo "Found latest backup: ${LATEST_BACKUP}"
+          
+          # Download the backup
+          mkdir -p /tmp/gcs-restore
+          gsutil cp "${LATEST_BACKUP}" /tmp/gcs-restore/backup.db
+          
+          # Download the counts sidecar if it exists
+          gsutil cp "${LATEST_BACKUP}.counts" /tmp/gcs-restore/backup.counts 2>/dev/null || true
+          
+          # Verify the backup
+          bash scripts/verify-backup.sh /tmp/gcs-restore/backup.db \
+            COUNTS_FILE=/tmp/gcs-restore/backup.counts \
+            || exit 1
+          
+          echo "GCS backup verification passed"

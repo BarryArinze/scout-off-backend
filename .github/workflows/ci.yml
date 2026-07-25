@@ -58,6 +58,9 @@ jobs:
       - name: Validate env example
         run: node scripts/validate-env.js
 
+      - name: Validate OpenAPI spec
+        run: npm run validate:openapi
+
       - name: Type check (src)
         run: node node_modules/.bin/tsc --noEmit
 

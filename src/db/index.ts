@@ -9,6 +9,7 @@ import { encryptWebhookSecret, decryptWebhookSecret } from '../utils/webhookSecr
 import { DbDriver } from './driver';
 import { SqliteDriver } from './sqlite-driver';
 import { PostgresDriver } from './postgres-driver';
+import { observeDbQueryDuration } from '../middleware/metrics';
 
 function slowQueryThresholdMs(): number {
   return parseInt(process.env.SLOW_QUERY_THRESHOLD_MS ?? '50', 10);
@@ -62,10 +63,12 @@ export async function initDb(): Promise<void> {
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         type       TEXT NOT NULL,
         ledger     INTEGER NOT NULL,
+        ledger_hash TEXT,
         tx_hash    TEXT NOT NULL UNIQUE,
         payload    TEXT NOT NULL,
         created_at INTEGER
       );
+      CREATE INDEX IF NOT EXISTS idx_events_ledger ON events (ledger);
       CREATE INDEX IF NOT EXISTS idx_events_type_ledger ON events (type, ledger);
       CREATE TABLE IF NOT EXISTS indexer_state (
         key   TEXT PRIMARY KEY,
@@ -168,6 +171,7 @@ interface EventRow {
   type: string;
   payload: string;
   created_at: number | null;
+  ledger_hash: string | null;
 }
 
 export interface GetEventsOptions {
@@ -210,6 +214,14 @@ export function queryEvents(
 
 /** @deprecated Use queryEvents instead. Will be removed in next release. */
 export const getEvents = queryEvents;
+
+export function rollbackEventsFromLedger(ledger: number): void {
+  const db = getDb();
+  // Delete pending milestones associated with these events (since they might be re-indexed)
+  // Actually, wait, it's safer to just let the indexer re-insert, but pending_milestones has a unique milestone_id so INSERT OR IGNORE will handle it.
+  // We'll delete events from the specified ledger forwards.
+  db.prepare('DELETE FROM events WHERE ledger >= ?').run(ledger);
+}
 
 export function getEventsCount(type?: ContractEventType): number {
   const db = getDb();
@@ -265,8 +277,8 @@ export function getEventsPage(filter: EventsPageFilter, limit: number, offset: n
     params.push(filter.endDate.getTime());
   }
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const sql = `SELECT type, ledger, payload, created_at FROM events ${where} ORDER BY ledger ASC, id ASC LIMIT ? OFFSET ?`;
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const sql = 'SELECT type, ledger, payload, created_at FROM events ' + where + ' ORDER BY ledger ASC, id ASC LIMIT ? OFFSET ?';
   params.push(limit, offset);
 
   const rows = timedQuery(sql, () => db.prepare(sql).all(...(params as unknown[]))) as Array<{
@@ -311,8 +323,8 @@ export function* getEventsIterable(filter: EventsPageFilter): Generator<EventExp
     params.push(filter.endDate.getTime());
   }
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const sql = `SELECT type, ledger, payload, created_at FROM events ${where} ORDER BY ledger ASC, id ASC`;
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const sql = 'SELECT type, ledger, payload, created_at FROM events ' + where + ' ORDER BY ledger ASC, id ASC';
 
   const stmt = db.prepare(sql);
   const iterator = stmt.iterate(...(params as unknown[])) as IterableIterator<{
@@ -502,12 +514,12 @@ export function getPendingMilestones(options: GetPendingMilestonesOptions): { da
     params.push(options.playerId);
   }
 
-  const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+  const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
 
   // Get total count
-  const countSql = `SELECT COUNT(*) AS total FROM pending_milestones pm 
-                    LEFT JOIN players p ON pm.player_id = p.player_id 
-                    ${whereClause}`;
+  const countSql = 'SELECT COUNT(*) AS total FROM pending_milestones pm ' + 
+                   'LEFT JOIN players p ON pm.player_id = p.player_id ' + 
+                   whereClause;
   const countRow = timedQuery(countSql, () => db.prepare(countSql).get(...params) as { total: number });
   const total = countRow.total;
 
@@ -515,11 +527,11 @@ export function getPendingMilestones(options: GetPendingMilestonesOptions): { da
   const page = options.page || 1;
   const pageSize = options.pageSize || 20;
   const offset = (page - 1) * pageSize;
-  const dataSql = `SELECT pm.* FROM pending_milestones pm 
-                   LEFT JOIN players p ON pm.player_id = p.player_id 
-                   ${whereClause}
-                   ORDER BY pm.submitted_at DESC
-                   LIMIT ? OFFSET ?`;
+  const dataSql = 'SELECT pm.* FROM pending_milestones pm ' + 
+                  'LEFT JOIN players p ON pm.player_id = p.player_id ' + 
+                  whereClause + 
+                  ' ORDER BY pm.submitted_at DESC ' + 
+                  'LIMIT ? OFFSET ?';
   const data = timedQuery(dataSql, () => db.prepare(dataSql).all(...params, pageSize, offset) as PendingMilestoneRow[]);
 
   return { data, total };
@@ -562,7 +574,7 @@ function buildPlayerWhereClause(opts: QueryPlayersOptions): { where: string; par
     conditions.push("is_active = 1");
   }
 
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   return { where, params };
 }
 
@@ -570,7 +582,7 @@ export function queryPlayers(opts: QueryPlayersOptions): PlayerRow[] {
   const { where, params } = buildPlayerWhereClause(opts);
   const limit = opts.limit ?? 20;
   const offset = opts.offset ?? 0;
-  const sql = `SELECT * FROM players ${where} ORDER BY created_at ASC LIMIT ? OFFSET ?`;
+  const sql = 'SELECT * FROM players ' + where + ' ORDER BY created_at ASC LIMIT ? OFFSET ?';
   return timedQuery(sql, () =>
     getDb().prepare(sql).all(...params, limit, offset) as PlayerRow[]
   );
@@ -578,7 +590,7 @@ export function queryPlayers(opts: QueryPlayersOptions): PlayerRow[] {
 
 export function countPlayers(opts: Omit<QueryPlayersOptions, 'limit' | 'offset'>): number {
   const { where, params } = buildPlayerWhereClause(opts);
-  const sql = `SELECT COUNT(*) as count FROM players ${where}`;
+  const sql = 'SELECT COUNT(*) as count FROM players ' + where;
   return timedQuery(sql, () => {
     const row = getDb().prepare(sql).get(...params) as { count: number };
     return row.count;
@@ -805,10 +817,10 @@ export function getAuditLogs(filters: {
   if (filters.endDate) { conditions.push('created_at <= ?'); params.push(filters.endDate); }
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const limit = filters.limit ?? 50;
   const offset = filters.offset ?? 0;
-  const sql = `SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  const sql = 'SELECT * FROM audit_log ' + where + ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
   return timedQuery(sql, () => getDb().prepare(sql).all(...params, limit, offset) as AuditLogRow[]);
 }
 
@@ -826,8 +838,8 @@ export function getAuditLogsCount(filters: {
   if (filters.endDate) { conditions.push('created_at <= ?'); params.push(filters.endDate); }
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const sql = `SELECT COUNT(*) AS count FROM audit_log ${where}`;
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  const sql = 'SELECT COUNT(*) AS count FROM audit_log ' + where;
   return timedQuery(sql, () => {
     const row = getDb().prepare(sql).get(...params) as { count: number };
     return row.count;
@@ -851,8 +863,8 @@ export function getAllAuditLogRows(filters: {
   if (filters.action) { conditions.push('action = ?'); params.push(filters.action); }
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const sql = `SELECT * FROM audit_log ${where} ORDER BY id ASC`;
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  const sql = 'SELECT * FROM audit_log ' + where + ' ORDER BY id ASC';
   return timedQuery(sql, () => getDb().prepare(sql).all(...params) as AuditLogRow[]);
 }
 
@@ -896,6 +908,23 @@ export function respondToTrialOffer(p: {
 }): void {
   const sql = `UPDATE trial_offers SET status = ?, reject_reason = ?, responded_at = ? WHERE offer_id = ?`;
   timedQuery(sql, () => getDb().prepare(sql).run(p.status, p.reject_reason ?? null, p.responded_at, p.offer_id));
+}
+
+/**
+ * Count the number of trial offers submitted for a given player.
+ * Returns 0 when the trial_offers table does not exist yet (pre-migration).
+ */
+export function countTrialOffersByPlayer(playerId: string): number {
+  try {
+    const sql = 'SELECT COUNT(*) AS cnt FROM trial_offers WHERE player_id = ?';
+    const row = timedQuery(sql, () =>
+      getDb().prepare(sql).get(playerId) as { cnt: number } | undefined,
+    );
+    return row?.cnt ?? 0;
+  } catch {
+    // Table may not exist in very early migration states
+    return 0;
+  }
 }
 
 // ─── Pending pin helpers ──────────────────────────────────────────────────────
@@ -1167,6 +1196,27 @@ export interface SavedSearchRow {
   name: string;
   filters: string; // JSON string
   created_at: number;
+  notify_enabled: number;
+}
+
+export function getAllActiveSavedSearches(): SavedSearchRow[] {
+  const sql = 'SELECT * FROM scout_saved_searches WHERE notify_enabled = 1';
+  return timedQuery(sql, () => getDb().prepare(sql).all() as SavedSearchRow[]);
+}
+
+export function getSavedSearchNotification(scoutWallet: string, playerId: string): number | null {
+  const sql = 'SELECT notified_at FROM saved_search_notifications WHERE scout_wallet = ? AND player_id = ?';
+  return timedQuery(sql, () => {
+    const row = getDb().prepare(sql).get(scoutWallet, playerId) as { notified_at: number } | undefined;
+    return row ? row.notified_at : null;
+  });
+}
+
+export function recordSavedSearchNotification(scoutWallet: string, playerId: string, notifiedAt: number): void {
+  const sql = 'INSERT INTO saved_search_notifications (scout_wallet, player_id, notified_at) ' +
+              'VALUES (?, ?, ?) ' +
+              'ON CONFLICT(scout_wallet, player_id) DO UPDATE SET notified_at = excluded.notified_at';
+  timedQuery(sql, () => getDb().prepare(sql).run(scoutWallet, playerId, notifiedAt));
 }
 
 /**
@@ -1178,13 +1228,11 @@ export function insertSavedSearch(p: {
   name: string;
   filters: string; // pre-serialised JSON
   created_at: number;
+  notify_enabled?: number;
 }): number {
-  const sql = `
-    INSERT INTO scout_saved_searches (scout_wallet, name, filters, created_at)
-    VALUES (?, ?, ?, ?)
-  `;
+  const sql = 'INSERT INTO scout_saved_searches (scout_wallet, name, filters, created_at, notify_enabled) VALUES (?, ?, ?, ?, ?)';
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.scout_wallet, p.name, p.filters, p.created_at);
+    const info = getDb().prepare(sql).run(p.scout_wallet, p.name, p.filters, p.created_at, p.notify_enabled ?? 1);
     return info.lastInsertRowid as number;
   });
 }
