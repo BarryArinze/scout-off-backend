@@ -62,10 +62,12 @@ export async function initDb(): Promise<void> {
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         type       TEXT NOT NULL,
         ledger     INTEGER NOT NULL,
+        ledger_hash TEXT,
         tx_hash    TEXT NOT NULL UNIQUE,
         payload    TEXT NOT NULL,
         created_at INTEGER
       );
+      CREATE INDEX IF NOT EXISTS idx_events_ledger ON events (ledger);
       CREATE INDEX IF NOT EXISTS idx_events_type_ledger ON events (type, ledger);
       CREATE TABLE IF NOT EXISTS indexer_state (
         key   TEXT PRIMARY KEY,
@@ -168,6 +170,7 @@ interface EventRow {
   type: string;
   payload: string;
   created_at: number | null;
+  ledger_hash: string | null;
 }
 
 export interface GetEventsOptions {
@@ -210,6 +213,14 @@ export function queryEvents(
 
 /** @deprecated Use queryEvents instead. Will be removed in next release. */
 export const getEvents = queryEvents;
+
+export function rollbackEventsFromLedger(ledger: number): void {
+  const db = getDb();
+  // Delete pending milestones associated with these events (since they might be re-indexed)
+  // Actually, wait, it's safer to just let the indexer re-insert, but pending_milestones has a unique milestone_id so INSERT OR IGNORE will handle it.
+  // We'll delete events from the specified ledger forwards.
+  db.prepare('DELETE FROM events WHERE ledger >= ?').run(ledger);
+}
 
 export function getEventsCount(type?: ContractEventType): number {
   const db = getDb();
