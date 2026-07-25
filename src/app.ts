@@ -65,6 +65,9 @@ async function probeDbWritable(timeoutMs = 2_000): Promise<'ok' | 'error'> {
 }
 
 const app = express();
+// Disable Express's default X-Powered-By header. helmet() also does this, but
+// being explicit here ensures it is suppressed regardless of middleware order.
+app.disable('x-powered-by');
 // Disable Express's automatic ETag on every response — it would also tag
 // error bodies (e.g. 404s). ETags are set explicitly where conditional GET
 // support is actually implemented (see getPlayer).
