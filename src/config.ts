@@ -29,7 +29,6 @@ if (!adminWalletValue) {
     throw new Error('ADMIN_WALLET is required in production but is not set. Set the ADMIN_WALLET environment variable to the platform admin Stellar address.');
   }
   if (nodeEnv === 'staging') {
-    // eslint-disable-next-line no-console
     console.warn('[config] WARNING: ADMIN_WALLET is not set in staging. Admin-seeding will be disabled. Set ADMIN_WALLET to suppress this warning.');
   }
 }
@@ -193,6 +192,9 @@ const config = {
 
   /** TTL for pinJson deduplication cache entries in milliseconds (default: 5 min). */
   pinJsonCacheTtlMs: parseInt(process.env.PIN_JSON_CACHE_TTL_MS ?? '300000', 10),
+
+  /** Maximum evidence file size in bytes (default: 50 MB). */
+  evidenceMaxBytes: parseInt(process.env.EVIDENCE_MAX_BYTES ?? String(50 * 1024 * 1024), 10),
 
   /** TTL for multi-admin action proposals in milliseconds (default: 1 hour). */
   adminActionTtlMs: parseInt(process.env.ADMIN_ACTION_TTL_MS ?? '3600000', 10),

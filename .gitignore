@@ -6,6 +6,5 @@ contracts/target/
 contracts/**/test_snapshots/
 coverage/
 BUILD_COMMIT
-.kiro/
-pr-*.md
+.husky/_
 

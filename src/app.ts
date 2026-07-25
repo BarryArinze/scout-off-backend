@@ -14,14 +14,18 @@ import { securityHeaders } from './middleware/securityHeaders';
 import { correlationId } from './middleware/correlationId';
 import { traceId } from './middleware/traceId';
 import { responseTime } from './middleware/responseTime';
-import { stellarHealth } from './services/stellar';
+import { stellarHealth, stellarBreaker } from './services/stellar';
 import { checkHealth } from './services/ipfs';
 import { API_PREFIX, API_V1_PREFIX } from './config';
+import { mountGraphQL } from './graphql';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
+import { ipReputationMiddleware } from './middleware/ipReputation';
 import { requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
 import { getDb } from './db';
 import { getVersionInfo } from './version';
+import { apiVersion } from './middleware/apiVersion';
+import docsRouter from './routes/docs';
 
 /** Probe the SQLite database with a lightweight SELECT 1.
  *  Resolves 'ok' or 'error'; never rejects.
@@ -87,12 +91,17 @@ app.use(traceId);
 app.use(helmet());
 app.use(securityHeaders);
 app.use(responseTime);
+// Set X-API-Version on every response before route handlers run
+app.use(apiVersion);
 // Configure Express body parser with JSON payload size limit
 // Returns 413 Payload Too Large if exceeded
 app.use(express.json({ limit: config.bodyLimit.json }));
 app.use(requestLogger);
 // Collect per-route request counts, latency, and error counts for /metrics.
 app.use(metricsMiddleware);
+// IP reputation layer — runs after metrics so the finish hook in
+// metricsMiddleware is registered first, keeping score increments in order.
+app.use(ipReputationMiddleware);
 
 app.get('/version', (_req, res) => {
   res.json(getVersionInfo());
@@ -126,11 +135,15 @@ async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | '
   }
 
   if (config.stellarHealthCheckEnabled) {
-    try {
-      const stellarOk = await stellarHealth();
-      services.stellar = stellarOk ? 'ok' : 'unavailable';
-    } catch {
+    if (stellarBreaker.state === 'OPEN') {
       services.stellar = 'unavailable';
+    } else {
+      try {
+        const stellarOk = await stellarHealth();
+        services.stellar = stellarOk ? 'ok' : 'unavailable';
+      } catch {
+        services.stellar = 'unavailable';
+      }
     }
   } else {
     services.stellar = 'disabled';
@@ -174,11 +187,16 @@ app.use('/auth', authRoutes);
 // Mount API routes under both /api (backwards-compatible alias) and /api/v1
 const prefixes = [API_PREFIX, API_V1_PREFIX];
 for (const prefix of prefixes) {
+  app.use(`${prefix}/docs`, docsRouter);
   app.use(`${prefix}/players`, playerRoutes);
   app.use(`${prefix}/scouts`, scoutRoutes);
   app.use(`${prefix}/validators`, validatorRoutes);
   app.use(`${prefix}/admin`, adminRoutes);
 }
+
+// Mount the GraphQL endpoint alongside the REST API.
+// Must be registered before the 404 catch-all.
+mountGraphQL(app);
 
 // Catch-all 404 handler for unmatched routes
 app.use((_req, res) => {

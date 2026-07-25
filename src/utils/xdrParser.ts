@@ -1,6 +1,7 @@
 import { xdr, scValToNative } from '@stellar/stellar-sdk';
 import { OnChainMilestone } from '../services/stellar';
 
+/** Decodes an `xdr.ScVal` of type `scvBool` to a native boolean; throws if the type doesn't match. */
 export function parseBoolean(val: xdr.ScVal): boolean {
   if (val.switch() !== xdr.ScValType.scvBool()) {
     throw new Error(`Expected scvBool, got ${val.switch().name}`);
@@ -8,6 +9,7 @@ export function parseBoolean(val: xdr.ScVal): boolean {
   return scValToNative(val) as boolean;
 }
 
+/** Decodes an `xdr.ScVal` of type `scvU128` or `scvI128` to a native bigint; throws if the type doesn't match. */
 export function parseU128(val: xdr.ScVal): bigint {
   const type = val.switch();
   if (type !== xdr.ScValType.scvU128() && type !== xdr.ScValType.scvI128()) {
@@ -16,6 +18,7 @@ export function parseU128(val: xdr.ScVal): bigint {
   return BigInt(scValToNative(val) as string | number);
 }
 
+/** Decodes an `xdr.ScVal` vector of milestone map entries into `OnChainMilestone[]`; throws if the shape doesn't match. */
 export function parseMilestones(val: xdr.ScVal): OnChainMilestone[] {
   if (val.switch() !== xdr.ScValType.scvVec()) {
     throw new Error(`Expected scvVec, got ${val.switch().name}`);
@@ -43,6 +46,7 @@ export function parseMilestones(val: xdr.ScVal): OnChainMilestone[] {
   });
 }
 
+/** Decodes an `xdr.ScVal` of type `scvMap` into a subscription's active/expiresAt fields; throws if the type doesn't match. */
 export function parseSubscription(val: xdr.ScVal): { active: boolean; expiresAt: string | null } {
   if (val.switch() !== xdr.ScValType.scvMap()) {
     throw new Error(`Expected scvMap, got ${val.switch().name}`);
