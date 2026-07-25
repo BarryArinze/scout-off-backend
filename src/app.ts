@@ -17,6 +17,7 @@ import { responseTime } from './middleware/responseTime';
 import { stellarHealth } from './services/stellar';
 import { checkHealth } from './services/ipfs';
 import { API_PREFIX, API_V1_PREFIX } from './config';
+import { mountGraphQL } from './graphql';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
 import { requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
@@ -176,6 +177,10 @@ for (const prefix of prefixes) {
   app.use(`${prefix}/validators`, validatorRoutes);
   app.use(`${prefix}/admin`, adminRoutes);
 }
+
+// Mount the GraphQL endpoint alongside the REST API.
+// Must be registered before the 404 catch-all.
+mountGraphQL(app);
 
 // Catch-all 404 handler for unmatched routes
 app.use((_req, res) => {
