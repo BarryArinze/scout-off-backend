@@ -18,6 +18,7 @@ import { stellarHealth } from './services/stellar';
 import { checkHealth } from './services/ipfs';
 import { API_PREFIX, API_V1_PREFIX } from './config';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
+import { ipReputationMiddleware } from './middleware/ipReputation';
 import { requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
 import { getDb } from './db';
@@ -90,6 +91,9 @@ app.use(express.json({ limit: config.bodyLimit.json }));
 app.use(requestLogger);
 // Collect per-route request counts, latency, and error counts for /metrics.
 app.use(metricsMiddleware);
+// IP reputation layer — runs after metrics so the finish hook in
+// metricsMiddleware is registered first, keeping score increments in order.
+app.use(ipReputationMiddleware);
 
 app.get('/version', (_req, res) => {
   res.json(getVersionInfo());

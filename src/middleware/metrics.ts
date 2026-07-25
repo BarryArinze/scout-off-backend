@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ipReputationCounters, resetIpReputationCounters } from '../services/ipReputation';
 
 export interface RouteMetric {
   count: number;
@@ -118,6 +119,7 @@ export function resetMetrics(): void {
   cacheCountsStore.hits = 0;
   cacheCountsStore.misses = 0;
   cacheCountsStore.evictions = 0;
+  resetIpReputationCounters();
 }
 
 // ─── Cache hit / miss / eviction counters ─────────────────────────────────────
@@ -224,6 +226,14 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
     lines.push('# TYPE indexer_ledger_lag gauge');
     lines.push(`indexer_ledger_lag ${extras.indexerLedgerLag}`);
   }
+
+  // IP reputation counters.
+  lines.push('# HELP ip_reputation_blocked_total Total number of requests blocked by IP reputation scoring');
+  lines.push('# TYPE ip_reputation_blocked_total counter');
+  lines.push(`ip_reputation_blocked_total ${ipReputationCounters.blocked}`);
+  lines.push('# HELP ip_reputation_penalised_total Total number of requests that received a reputation penalty (delay or rate restriction)');
+  lines.push('# TYPE ip_reputation_penalised_total counter');
+  lines.push(`ip_reputation_penalised_total ${ipReputationCounters.penalised}`);
 
   return lines.join('\n') + '\n';
 }
