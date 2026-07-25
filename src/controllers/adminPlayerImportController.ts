@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { z } from 'zod';
 import { createId } from '@paralleldrive/cuid2';
 import { sanitizeInput } from '../utils/sanitizer';
 import { pinJson } from '../services/ipfs';
@@ -11,6 +12,24 @@ import { logAuditEvent } from '../services/audit';
 import { ErrorCode } from '../utils/errorCodes';
 import { isValidCid } from '../utils/cidValidator';
 import config from '../config';
+
+/**
+ * Envelope schema for the JSON body variant of POST /api/admin/players/import.
+ *
+ * Only validates the outer shape and batch size — each entry is deliberately
+ * left as `unknown` here and validated individually (against `registerSchema`)
+ * in processPlayerImportBatch, so one malformed row is reported per-row rather
+ * than rejecting the whole batch.
+ */
+export const importPlayersBodySchema = z.object({
+  players: z
+    .array(z.unknown())
+    .min(1, 'players array must contain at least one entry')
+    .max(
+      config.playerImport.maxBatchSize,
+      `players array exceeds maximum size of ${config.playerImport.maxBatchSize}`,
+    ),
+});
 
 export type ImportPlayerResultStatus = 'success' | 'error';
 
@@ -267,12 +286,24 @@ export async function importPlayers(req: Request, res: Response, next: NextFunct
         return;
       }
       entries = parsePlayerCsvBody(rawBody);
-    } else {
-      const jsonBody = req.body as { players?: unknown };
-      if (!jsonBody || !Array.isArray(jsonBody.players)) {
+      if (entries.length === 0) {
+        res.status(400).json({ success: false, error: 'No player entries found in request', code: ErrorCode.VALIDATION_ERROR });
+        return;
+      }
+      if (entries.length > config.playerImport.maxBatchSize) {
         res.status(400).json({
           success: false,
-          error: 'Request body must contain a "players" array or use Content-Type: text/csv',
+          error: `Batch exceeds maximum size of ${config.playerImport.maxBatchSize} entries`,
+          code: ErrorCode.VALIDATION_ERROR,
+        });
+        return;
+      }
+    } else {
+      const parsed = importPlayersBodySchema.safeParse(req.body);
+      if (!parsed.success) {
+        res.status(400).json({
+          success: false,
+          error: parsed.error.errors[0]?.message ?? 'Request body must contain a "players" array or use Content-Type: text/csv',
           code: ErrorCode.VALIDATION_ERROR,
         });
         return;
