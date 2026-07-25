@@ -17,12 +17,10 @@
 import { createHash } from 'crypto';
 import axios from 'axios';
 import FormData from 'form-data';
-import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { logger } from '../utils/logger';
 import { insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts } from '../db';
-
-const tracer = trace.getTracer('scout-off-backend');
+import { observeIpfsLatency } from '../middleware/metrics';
 
 const PINATA_PIN_JSON_URL = 'https://api.pinata.cloud/pinning/pinJSONToIPFS';
 const PINATA_PIN_FILE_URL = 'https://api.pinata.cloud/pinning/pinFileToIPFS';
@@ -105,35 +103,27 @@ export function clearPinJsonCache(): void {
  * so concurrent identical requests resolve to exactly one Pinata API call.
  */
 export async function pinJson(body: object): Promise<string> {
-  return tracer.startActiveSpan('ipfs.pinJson', async (span) => {
-    try {
+  const start = Date.now();
+  try {
+    return await (async () => {
       const hash = hashMetadata(body);
-      span.setAttribute('ipfs.hash', hash);
 
       const ttlMs = config.pinJsonCacheTtlMs;
       const cached = pinJsonCache.get(hash);
       if (cached && Date.now() - cached.timestamp < ttlMs) {
         logger.debug(`[ipfs] pinJson cache hit — returning cached CID (hash=${hash.slice(0, 8)}…)`);
-        span.setAttribute('ipfs.cache_hit', true);
-        span.setAttribute('ipfs.cid', cached.cid);
         return cached.cid;
       }
 
       if (inflightPins.has(hash)) {
         logger.debug(`[ipfs] pinJson inflight hit — waiting for in-flight request (hash=${hash.slice(0, 8)}…)`);
-        span.setAttribute('ipfs.inflight_hit', true);
-        const cid = await inflightPins.get(hash)!;
-        span.setAttribute('ipfs.cid', cid);
-        return cid;
+        return await inflightPins.get(hash)!;
       }
 
       if (!isPinataConfigured()) {
         if (process.env.NODE_ENV === 'production') assertPinataConfigured();
         logger.warn('[ipfs] Pinata not configured — returning dev stub CID for pinJson');
-        const cid = devStubCid(JSON.stringify(body));
-        span.setAttribute('ipfs.stub', true);
-        span.setAttribute('ipfs.cid', cid);
-        return cid;
+        return devStubCid(JSON.stringify(body));
       }
 
       const now = new Date().toISOString();
@@ -146,24 +136,19 @@ export async function pinJson(body: object): Promise<string> {
 
       if (acquiredLock === false) {
         logger.debug(`[ipfs] pinJson lock contended — polling for completion (hash=${hash.slice(0, 8)}…)`);
-        const start = Date.now();
         const MAX_POLL_MS = 30000;
         while (Date.now() - start < MAX_POLL_MS) {
           await new Promise((resolve) => setTimeout(resolve, 50));
           const pollCached = pinJsonCache.get(hash);
           if (pollCached && Date.now() - pollCached.timestamp < ttlMs) {
-            span.setAttribute('ipfs.cid', pollCached.cid);
             return pollCached.cid;
           }
           if (inflightPins.has(hash)) {
-            const cid = await inflightPins.get(hash)!;
-            span.setAttribute('ipfs.cid', cid);
-            return cid;
+            return await inflightPins.get(hash)!;
           }
           if (!isPendingPinByHash(hash)) {
             const finalCached = pinJsonCache.get(hash);
             if (finalCached && Date.now() - finalCached.timestamp < ttlMs) {
-              span.setAttribute('ipfs.cid', finalCached.cid);
               return finalCached.cid;
             }
             break;
@@ -171,13 +156,10 @@ export async function pinJson(body: object): Promise<string> {
         }
       }
 
-      const pinPromise = (async () => {
+      const cid = await (async () => {
         try {
           const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
-          const cid = res.data.IpfsHash as string;
-
-          pinJsonCache.set(hash, { cid, timestamp: Date.now() });
-          return cid;
+          return res.data.IpfsHash as string;
         } catch (err) {
           logger.critical('[ipfs] Pinata unavailable — queueing payload for retry', (err as Error).message);
           const failTime = new Date().toISOString();
@@ -189,53 +171,32 @@ export async function pinJson(body: object): Promise<string> {
         }
       })();
 
-      inflightPins.set(hash, pinPromise);
-      const cid = await pinPromise;
-      span.setAttribute('ipfs.cid', cid);
+      pinJsonCache.set(hash, { cid, timestamp: Date.now() });
       return cid;
-    } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
-      span.setAttribute('error.type', (err as Error).name);
-      throw err;
-    } finally {
-      span.end();
-    }
-  });
+    })();
+  } finally {
+    observeIpfsLatency('pinJson', Date.now() - start);
+  }
 }
 
-/** Pin a file buffer to IPFS via Pinata. Returns the CID. */
 export async function pinFile(buffer: Buffer, filename: string, mimeType: string): Promise<string> {
-  return tracer.startActiveSpan('ipfs.pinFile', async (span) => {
-    span.setAttribute('ipfs.filename', filename);
-    span.setAttribute('ipfs.mime_type', mimeType);
-    try {
-      if (!isPinataConfigured()) {
-        if (process.env.NODE_ENV === 'production') assertPinataConfigured();
-        logger.warn('[ipfs] Pinata not configured — returning dev stub CID for pinFile');
-        const cid = devStubCid(filename);
-        span.setAttribute('ipfs.stub', true);
-        span.setAttribute('ipfs.cid', cid);
-        return cid;
-      }
-      const form = new FormData();
-      form.append('file', buffer, { filename, contentType: mimeType });
-      const res = await axios.post(PINATA_PIN_FILE_URL, form, {
-        headers: { ...pinataHeaders(), ...form.getHeaders() },
-        maxBodyLength: Infinity,
-      });
-      const cid = res.data.IpfsHash as string;
-      span.setAttribute('ipfs.cid', cid);
-      return cid;
-    } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
-      span.setAttribute('error.type', (err as Error).name);
-      throw err;
-    } finally {
-      span.end();
+  const start = Date.now();
+  try {
+    if (!isPinataConfigured()) {
+      if (process.env.NODE_ENV === 'production') assertPinataConfigured();
+      logger.warn('[ipfs] Pinata not configured — returning dev stub CID for pinFile');
+      return devStubCid(filename);
     }
-  });
+    const form = new FormData();
+    form.append('file', buffer, { filename, contentType: mimeType });
+    const res = await axios.post(PINATA_PIN_FILE_URL, form, {
+      headers: { ...pinataHeaders(), ...form.getHeaders() },
+      maxBodyLength: Infinity,
+    });
+    return res.data.IpfsHash as string;
+  } finally {
+    observeIpfsLatency('pinFile', Date.now() - start);
+  }
 }
 
 /** Build a public gateway URL for a CID. */
@@ -259,25 +220,17 @@ export async function getCid(uriOrCid: string): Promise<string> {
  * Rejects with a clear error in production without credentials.
  */
 export async function checkHealth(): Promise<void> {
-  return tracer.startActiveSpan('ipfs.checkHealth', async (span) => {
-    try {
-      if (!isPinataConfigured()) {
-        if (process.env.NODE_ENV === 'production') assertPinataConfigured();
-        logger.warn('[ipfs] Pinata not configured — skipping IPFS health check in dev');
-        span.setAttribute('ipfs.configured', false);
-        return;
-      }
-      span.setAttribute('ipfs.configured', true);
-      await axios.get(PINATA_TEST_URL, { headers: pinataHeaders() });
-    } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
-      span.setAttribute('error.type', (err as Error).name);
-      throw err;
-    } finally {
-      span.end();
+  const start = Date.now();
+  try {
+    if (!isPinataConfigured()) {
+      if (process.env.NODE_ENV === 'production') assertPinataConfigured();
+      logger.warn('[ipfs] Pinata not configured — skipping IPFS health check in dev');
+      return;
     }
-  });
+    await axios.get(PINATA_TEST_URL, { headers: pinataHeaders() });
+  } finally {
+    observeIpfsLatency('checkHealth', Date.now() - start);
+  }
 }
 
 /**
