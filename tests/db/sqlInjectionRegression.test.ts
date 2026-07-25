@@ -9,7 +9,7 @@ import {
   getIdempotencyRecord, saveIdempotencyRecord, purgeExpiredIdempotencyKeys,
   getLatestSubscription, insertSubscription, dbRenewSubscription, dbCancelSubscription,
   insertContactUnlock, getContactUnlocksByScout, hasContactUnlock,
-  insertAuditLog, getAuditLogs, getAuditLogsCount,
+  insertAuditLog, getAuditLogs, getAuditLogsCount, getAllAuditLogRows,
   getTrialOfferById, insertTrialOffer, respondToTrialOffer,
   insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts,
   upsertScoutNote, getScoutNote, getScoutNotes,
@@ -209,6 +209,11 @@ describe('getAuditLogs - SQL injection resistance', () => {
     it(`getAuditLogsCount treats injection date range as literal: ${payload.slice(0, 40)}...`, () => {
       const count = getAuditLogsCount({ startDate: payload, endDate: payload });
       expect(typeof count).toBe('number');
+    });
+
+    it(`getAllAuditLogRows treats injection action as literal: ${payload.slice(0, 40)}...`, () => {
+      const rows = getAllAuditLogRows({ action: payload });
+      expect(Array.isArray(rows)).toBe(true);
     });
   });
 });
