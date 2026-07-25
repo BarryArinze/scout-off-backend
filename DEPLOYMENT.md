@@ -248,6 +248,46 @@ If any check fails, roll back to the previous build immediately.
 2. Tag the release: `git tag v<semver> && git push --tags`
 3. Build the Docker image (or run `npm run build` on the target server)
 4. Apply any pending DB migrations
-5. Restart the server process / redeploy the container
-6. Run smoke tests (see above)
+5. The deploy script handles starting the new process and flipping traffic automatically.
+6. Run smoke tests (see above) - this happens automatically in the staging pipeline.
 7. Monitor logs for 10 minutes post-deploy
+
+## Blue-Green Deployment Topology
+
+Staging uses a local blue-green deployment strategy to eliminate restart downtime.
+
+### Topology
+- **Process Manager**: PM2 manages two identical Node.js services named `scout-off-backend-blue` (port 4000) and `scout-off-backend-green` (port 4001).
+- **Reverse Proxy**: Nginx routes traffic to the active slot.
+- **State**: The currently active slot is stored in a `.active-slot` file in the deployment root.
+
+### Nginx Configuration Requirement
+To support dynamic traffic flipping, Nginx must be configured to use a dedicated upstream config block located at `/etc/nginx/conf.d/scout-off-upstream.conf`.
+
+1. Create the upstream config file:
+   ```bash
+   sudo touch /etc/nginx/conf.d/scout-off-upstream.conf
+   sudo chmod 666 /etc/nginx/conf.d/scout-off-upstream.conf
+   echo "upstream scout_off_backend { server 127.0.0.1:4000; }" > /etc/nginx/conf.d/scout-off-upstream.conf
+   ```
+2. In your main Nginx site config (e.g., `/etc/nginx/sites-available/scout-off`), use the upstream:
+   ```nginx
+   location / {
+       proxy_pass http://scout_off_backend;
+       # ... other proxy headers ...
+   }
+   ```
+
+### Manual Override & Rollback
+If you need to manually rollback traffic to the previously active slot:
+```bash
+# From the deployment root path:
+bash scripts/deploy-staging.sh . rollback
+```
+
+To manually view the PM2 processes:
+```bash
+pm2 status
+pm2 logs scout-off-backend-blue
+pm2 logs scout-off-backend-green
+```

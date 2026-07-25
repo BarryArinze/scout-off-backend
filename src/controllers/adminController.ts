@@ -695,12 +695,10 @@ export async function introspectToken(req: Request, res: Response, next: NextFun
   }
 }
 
-const STELLAR_ADDRESS_RE_PUBLIC = /^G[A-Z2-7]{55}$/;
-
 export const withdrawFeesSchema = z.object({
   recipient: z
     .string()
-    .regex(STELLAR_ADDRESS_RE_PUBLIC, 'recipient must be a valid Stellar public key'),
+    .refine(isValidStellarAddress, 'recipient must be a valid Stellar public key'),
 });
 
 /**

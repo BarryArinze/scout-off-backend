@@ -87,7 +87,7 @@ export async function indexEvents(): Promise<void> {
   const margin = getFinalityMargin();
   const fromLedger = Math.max(0, lastIndexed > margin ? lastIndexed - margin : 0);
 
-  const response = await server.queryEvents({
+  const response = await server.getEvents({
     startLedger: fromLedger || undefined,
     filters: [{ type: 'contract', contractIds: [config.contractId] }],
   });
