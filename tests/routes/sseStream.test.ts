@@ -9,8 +9,13 @@
  *   - Event delivery: a connected client receives a broadcast event
  *   - Filtering: a client only receives events relevant to their own wallet
  *   - No cross-tenant leakage: events for wallet A are not sent to wallet B
+ *   - Server-side filtering by eventType query parameter
+ *   - Server-side filtering by playerId query parameter
+ *   - Combined eventType + playerId filtering
+ *   - Clients with no filters receive all wallet-relevant events (wildcard)
  *   - Keep-alive: the interval timer writes ": ping" frames
  *   - Disconnect cleanup: unsubscribe is called when the client closes
+ *   - SSE_MAX_CONNECTIONS enforced with 503
  *   - /api/v1/events/stream mirrors /api/events/stream
  */
 
@@ -361,6 +366,226 @@ describe('GET /api/events/stream — filtering (no cross-tenant leakage)', () =>
 
     expect(connA.chunks.join('')).toContain('event: trial_offer_logged');
     expect(connB.chunks.join('')).toContain('event: trial_offer_logged');
+  });
+});
+
+// ─── Server-side filtering by eventType ──────────────────────────────────────
+
+describe('GET /api/events/stream — server-side eventType filter', () => {
+  it('delivers only the subscribed event type when eventType param is set', async () => {
+    const { conn } = await openSseConnection(
+      server,
+      `/api/events/stream?eventType=milestone_approved`,
+      makeToken(WALLET_A),
+    );
+
+    await conn.waitForChunks(1, 500).catch(() => {});
+
+    // Broadcast both an approved and a registered event relevant to WALLET_A
+    broadcaster.broadcast({
+      type: 'player_registered',
+      payload: { wallet: WALLET_A },
+    });
+    broadcaster.broadcast({
+      type: 'milestone_approved',
+      payload: { player_id: WALLET_A, milestone_type: 'performance' },
+    });
+
+    await conn.waitForChunks(2, 1000).catch(() => {});
+    conn.destroy();
+
+    const all = conn.chunks.join('');
+    // Should receive milestone_approved
+    expect(all).toContain('event: milestone_approved');
+    // Should NOT receive player_registered (filtered out)
+    expect(all).not.toContain('event: player_registered');
+  });
+
+  it('does NOT deliver events of a different type when eventType filter is active', async () => {
+    const { conn } = await openSseConnection(
+      server,
+      `/api/events/stream?eventType=scout_subscribed`,
+      makeToken(WALLET_A, 'scout'),
+    );
+
+    await conn.waitForChunks(1, 500).catch(() => {});
+
+    broadcaster.broadcast({
+      type: 'contact_unlocked',
+      payload: { scout: WALLET_A, player_id: 'player-xyz' },
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    conn.destroy();
+
+    const all = conn.chunks.join('');
+    expect(all).not.toContain('event: contact_unlocked');
+  });
+
+  it('receives all event types when no eventType filter is provided (wildcard)', async () => {
+    const { conn } = await openSseConnection(
+      server,
+      '/api/events/stream',
+      makeToken(WALLET_A, 'scout'),
+    );
+
+    await conn.waitForChunks(1, 500).catch(() => {});
+
+    broadcaster.broadcast({
+      type: 'scout_subscribed',
+      payload: { scout: WALLET_A, tier: 'basic' },
+    });
+    broadcaster.broadcast({
+      type: 'contact_unlocked',
+      payload: { scout: WALLET_A, player_id: 'player-xyz' },
+    });
+
+    await conn.waitForChunks(3, 1000).catch(() => {});
+    conn.destroy();
+
+    const all = conn.chunks.join('');
+    expect(all).toContain('event: scout_subscribed');
+    expect(all).toContain('event: contact_unlocked');
+  });
+});
+
+// ─── Server-side filtering by playerId ───────────────────────────────────────
+
+describe('GET /api/events/stream — server-side playerId filter', () => {
+  const PLAYER_42 = 'GPLAYER42AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  const PLAYER_99 = 'GPLAYER99AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
+  it('delivers only events whose payload contains the specified playerId', async () => {
+    const { conn } = await openSseConnection(
+      server,
+      `/api/events/stream?playerId=${PLAYER_42}`,
+      makeToken(WALLET_A),
+    );
+
+    await conn.waitForChunks(1, 500).catch(() => {});
+
+    // Relevant event — player_id matches
+    broadcaster.broadcast({
+      type: 'milestone_approved',
+      payload: { player_id: PLAYER_42, wallet: WALLET_A },
+    });
+    // Irrelevant event — different player_id
+    broadcaster.broadcast({
+      type: 'milestone_approved',
+      payload: { player_id: PLAYER_99, wallet: WALLET_A },
+    });
+
+    await conn.waitForChunks(2, 1000).catch(() => {});
+    conn.destroy();
+
+    const all = conn.chunks.join('');
+    expect(all).toContain(`"player_id":"${PLAYER_42}"`);
+    expect(all).not.toContain(`"player_id":"${PLAYER_99}"`);
+  });
+
+  it('does not receive events for a different playerId', async () => {
+    const { conn } = await openSseConnection(
+      server,
+      `/api/events/stream?playerId=${PLAYER_42}`,
+      makeToken(WALLET_A),
+    );
+
+    await conn.waitForChunks(1, 500).catch(() => {});
+
+    broadcaster.broadcast({
+      type: 'milestone_approved',
+      payload: { player_id: PLAYER_99, wallet: WALLET_A },
+    });
+
+    await new Promise((r) => setTimeout(r, 100));
+    conn.destroy();
+
+    const all = conn.chunks.join('');
+    expect(all).not.toContain('event: milestone_approved');
+  });
+});
+
+// ─── Combined eventType + playerId filtering ──────────────────────────────────
+
+describe('GET /api/events/stream — combined eventType + playerId filter', () => {
+  const PLAYER_42 = 'GPLAYER42AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
+  it('delivers only events matching both filters simultaneously', async () => {
+    const { conn } = await openSseConnection(
+      server,
+      `/api/events/stream?eventType=milestone_approved&playerId=${PLAYER_42}`,
+      makeToken(WALLET_A),
+    );
+
+    await conn.waitForChunks(1, 500).catch(() => {});
+
+    // Matches both filters
+    broadcaster.broadcast({
+      type: 'milestone_approved',
+      payload: { player_id: PLAYER_42, wallet: WALLET_A },
+    });
+    // Wrong event type
+    broadcaster.broadcast({
+      type: 'player_registered',
+      payload: { player_id: PLAYER_42, wallet: WALLET_A },
+    });
+    // Wrong playerId
+    broadcaster.broadcast({
+      type: 'milestone_approved',
+      payload: { player_id: WALLET_A, wallet: WALLET_A },
+    });
+
+    await conn.waitForChunks(2, 1000).catch(() => {});
+    conn.destroy();
+
+    const all = conn.chunks.join('');
+    // The one fully-matching event must arrive
+    expect(all).toContain('event: milestone_approved');
+    expect(all).toContain(`"player_id":"${PLAYER_42}"`);
+    // The wrong-type event must not arrive
+    expect(all).not.toContain('event: player_registered');
+  });
+});
+
+// ─── SSE_MAX_CONNECTIONS ──────────────────────────────────────────────────────
+
+describe('GET /api/events/stream — SSE_MAX_CONNECTIONS', () => {
+  it('returns 503 when the connection limit is reached', async () => {
+    // Temporarily cap connections to 1 by replacing the subscriber count getter
+    const originalEnv = process.env.SSE_MAX_CONNECTIONS;
+
+    // Inject a fake subscriber to make the broadcaster report count=1, then
+    // reload the route with MAX=1.  Since the route reads the env at module
+    // load time we need a separate server instance.
+    const testServer = http.createServer(app);
+    await new Promise<void>((res) => testServer.listen(0, '127.0.0.1', res));
+
+    try {
+      process.env.SSE_MAX_CONNECTIONS = '1';
+
+      // Manually reach the limit by forcing broadcaster.subscriberCount >= 1
+      const fakeSub = {
+        wallet: 'GFAKE',
+        send: () => {},
+      };
+      broadcaster.subscribe(fakeSub);
+
+      // Now a second connection should get 503.
+      // We use supertest-style direct HTTP call with the test server but
+      // open as an SSE connection to get the status code.
+      const { statusCode, conn } = await openSseConnection(
+        testServer,
+        '/api/events/stream',
+        makeToken(WALLET_A),
+      );
+      conn.destroy();
+
+      broadcaster.unsubscribe(fakeSub);
+      expect(statusCode).toBe(503);
+    } finally {
+      process.env.SSE_MAX_CONNECTIONS = originalEnv ?? '0';
+      await new Promise<void>((res) => testServer.close(res));
+    }
   });
 });
 
