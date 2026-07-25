@@ -97,25 +97,121 @@ The `role` may be assigned from the request or automatically elevated to `admin`
 
 ## Token Refresh
 
-There is no separate refresh endpoint.
-A new JWT is obtained by repeating the SEP-10 flow:
-request a challenge, sign it, and call `POST /auth/token` again.
+`POST /auth/token` now returns **both** a short-lived access token and a
+long-lived refresh token. Mobile clients and any client that needs to stay
+authenticated across the access token's TTL should store the refresh token
+securely (device keychain / secure storage — **never** `localStorage`) and
+use it to obtain a new token pair silently.
 
-### Example refresh flow
+### Access token TTL
 
-1. `GET /auth/challenge?account=GABC123...`
-2. Sign the returned challenge transaction
-3. `POST /auth/token` with the signed transaction
+The access token expires after `JWT_ACCESS_TTL_SECONDS` (default **15 minutes**,
+configurable via environment variable). The `expiresAt` field in every token
+response is the Unix timestamp when the access token expires.
 
-The backend issues a new JWT each time, and the returned `expiresAt` indicates the next expiration.
+### Refresh token TTL
+
+The refresh token expires after **7 days**. After expiry the full SEP-10
+challenge flow must be repeated.
+
+### Token response shape (POST /auth/token)
+
+```json
+{
+  "token": "eyJ...",
+  "accessToken": "eyJ...",
+  "refreshToken": "eyJ...",
+  "account": "GABC123...",
+  "expiresAt": 1710000900
+}
+```
+
+Both `token` and `accessToken` carry the same value. `token` is retained for
+backwards compatibility with existing clients.
+
+### POST /auth/refresh — silent re-authentication
+
+Exchange a valid refresh token for a new access + refresh token pair.
+**Refresh token rotation** is enforced: the submitted refresh token is revoked
+immediately and a fresh one is returned. Using the same refresh token a second
+time returns `401`.
+
+Request:
+
+```bash
+curl -X POST "http://localhost:4000/auth/refresh" \
+  -H "Content-Type: application/json" \
+  -d '{ "refreshToken": "<your-refresh-token>" }'
+```
+
+Successful response (`200`):
+
+```json
+{
+  "success": true,
+  "accessToken": "eyJ...",
+  "refreshToken": "eyJ...",
+  "expiresAt": 1710000900
+}
+```
+
+Error responses:
+
+| Status | Reason |
+|--------|--------|
+| `400` | `refreshToken` field missing from body |
+| `401` | Token is expired, has an invalid signature, is not a refresh token, or has been revoked (used twice) |
+
+### Refresh token lifecycle
+
+```
+POST /auth/token
+  └─► { accessToken (15 min), refreshToken (7 days) }
+          │
+          │  (access token expires)
+          ▼
+POST /auth/refresh  { refreshToken: <old> }
+  └─► { accessToken (new, 15 min), refreshToken (new, 7 days) }
+          │  old refresh token is NOW REVOKED
+          │
+          │  (repeat as needed, up to 7 days from last full SEP-10 auth)
+          ▼
+POST /auth/logout   (revokes access + refresh tokens)
+  └─► { success: true }
+```
+
+Key properties:
+
+- Each refresh token can only be used **once** (rotation). Reuse returns `401`.
+- Refresh tokens carry `type: 'refresh'` in their JWT payload so they cannot
+  be used as bearer tokens on API routes.
+- The server never persists refresh tokens — only revoked `jti` values are
+  stored (in `revoked_tokens`), keeping server state minimal.
+- All revoked `jti` entries are pruned once their `expires_at` passes.
 
 ## Logout
 
-The backend does not expose a dedicated logout endpoint.
-Logout is handled on the client side by discarding the stored JWT.
-After logout, do not send the token in `Authorization` headers anymore.
+`POST /auth/logout` revokes both the caller's access token and (optionally) its
+paired refresh token so neither can be reused after logout.
 
-If the token expires, the backend will reject protected requests with `401 Invalid or expired token`.
+```bash
+curl -X POST "http://localhost:4000/auth/logout" \
+  -H "Authorization: Bearer <access-token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "refreshToken": "<your-refresh-token>" }'
+```
+
+- The `Authorization: Bearer` header is required (any valid role).
+- The `refreshToken` body field is optional — omitting it only revokes the
+  access token.
+- After logout, any further use of the access token or the submitted refresh
+  token returns `401`.
+
+Successful response (`200`):
+
+```json
+{ "success": true, "message": "Logged out successfully" }
+```
 
 ## Using the JWT for authenticated API requests
 
@@ -142,12 +238,32 @@ curl "http://localhost:3000/api/admin/events" \
 
 ### `POST /auth/token`
 
-- Purpose: submit the signed SEP-10 challenge and receive a JWT.
+- Purpose: submit the signed SEP-10 challenge and receive a JWT access token
+  and a refresh token.
 - Authentication: none.
 - Request body:
   - `transaction` (string): signed challenge XDR
   - `role` (optional string): requested role hint
-- Returns: JWT, authenticated account, and expiration timestamp.
+- Returns: `accessToken`, `refreshToken`, authenticated `account`, and `expiresAt` timestamp.
+  The legacy `token` field mirrors `accessToken` for backwards compatibility.
+
+### `POST /auth/refresh`
+
+- Purpose: exchange a valid refresh token for a new access + refresh token pair
+  (rotation — the submitted token is revoked on success).
+- Authentication: none (refresh token in request body).
+- Request body:
+  - `refreshToken` (string): a non-expired, non-revoked refresh token
+- Returns: `accessToken`, `refreshToken`, `expiresAt`.
+- Errors: `400` missing field; `401` invalid/expired/revoked token.
+
+### `POST /auth/logout`
+
+- Purpose: revoke the caller's access token and optionally their refresh token.
+- Authentication: Bearer access token (any role).
+- Request body (optional):
+  - `refreshToken` (string): if provided, this refresh token is also revoked.
+- Returns: `{ success: true }`.
 
 ### `POST /api/admin/introspect`
 

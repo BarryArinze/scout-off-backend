@@ -9,6 +9,7 @@ import { stellarHealth } from "./services/stellar";
 import { checkHealth } from "./services/ipfs";
 import { indexEvents } from "./services/indexer";
 import { fetchLastIndexedLedger, persistLastIndexedLedger } from "./db";
+import { startDeadLetterRetryJob, stopDeadLetterRetryJob } from "./services/webhookDeadLetterJob";
 
 // Database initialization is now async - must be awaited
 async function start() {
@@ -80,6 +81,9 @@ async function startServer() {
   poll();
   const pollInterval = setInterval(poll, 5_000);
 
+  // Start the webhook dead-letter background retry job (every 5 min).
+  startDeadLetterRetryJob();
+
   const SHUTDOWN_TIMEOUT_MS = 10_000;
   let isShuttingDown = false;
 
@@ -97,6 +101,7 @@ async function startServer() {
     forceExitTimer.unref();
 
     clearInterval(pollInterval);
+    stopDeadLetterRetryJob();
 
     server.close(async (err) => {
       if (err) {

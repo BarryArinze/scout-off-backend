@@ -470,6 +470,18 @@ export function removePendingMilestone(milestoneId: string): void {
   timedQuery(sql, () => getDb().prepare(sql).run(milestoneId));
 }
 
+/**
+ * Cancel (delete) all pending milestones for a given player.
+ * Returns the number of rows removed.
+ */
+export function cancelPendingMilestonesForPlayer(playerId: string): number {
+  const sql = 'DELETE FROM pending_milestones WHERE player_id = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(playerId);
+    return info.changes;
+  });
+}
+
 export interface GetPendingMilestonesOptions {
   validatorWallet?: string;
   position?: string;
@@ -537,8 +549,20 @@ export function deactivatePlayer(playerId: string): void {
   timedQuery(sql, () => getDb().prepare(sql).run(playerId));
 }
 
+/** Deactivate a player and persist a human-readable reason. */
+export function deactivatePlayerWithReason(playerId: string, reason: string): void {
+  const sql = 'UPDATE players SET is_active = 0, deactivation_reason = ? WHERE player_id = ?';
+  timedQuery(sql, () => getDb().prepare(sql).run(reason, playerId));
+}
+
 export function reactivatePlayer(playerId: string): void {
   const sql = 'UPDATE players SET is_active = 1 WHERE player_id = ?';
+  timedQuery(sql, () => getDb().prepare(sql).run(playerId));
+}
+
+/** Clear deactivation state and reason on reactivation. */
+export function reactivatePlayerWithReason(playerId: string): void {
+  const sql = "UPDATE players SET is_active = 1, deactivation_reason = NULL WHERE player_id = ?";
   timedQuery(sql, () => getDb().prepare(sql).run(playerId));
 }
 
@@ -708,6 +732,16 @@ export function insertContactUnlock(p: {
 export function getContactUnlocksByScout(scoutWallet: string): ContactUnlockRow[] {
   const sql = `SELECT * FROM contact_unlocks WHERE scout_wallet = ? ORDER BY unlocked_at DESC`;
   return timedQuery(sql, () => getDb().prepare(sql).all(scoutWallet) as ContactUnlockRow[]);
+}
+
+/**
+ * Return all contact-unlock rows for a given player (i.e. every scout who has
+ * unlocked that player's contact details). Used to fan out SSE notifications
+ * when a player is deactivated.
+ */
+export function getContactUnlocksByPlayer(playerId: string): ContactUnlockRow[] {
+  const sql = `SELECT * FROM contact_unlocks WHERE player_id = ? ORDER BY unlocked_at DESC`;
+  return timedQuery(sql, () => getDb().prepare(sql).all(playerId) as ContactUnlockRow[]);
 }
 
 export function hasContactUnlock(scoutWallet: string, playerId: string): boolean {
@@ -1486,4 +1520,24 @@ export function updateWebhookDeadLetterAttempt(
 ): void {
   const sql = 'UPDATE webhook_dead_letters SET attempts = ?, failure_reason = ? WHERE id = ?';
   timedQuery(sql, () => getDb().prepare(sql).run(attempts, failureReason, id));
+}
+
+/** Delete a specific dead-letter row by id. Returns true when a row was deleted. */
+export function deleteWebhookDeadLetter(id: number): boolean {
+  const sql = 'DELETE FROM webhook_dead_letters WHERE id = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(id);
+    return info.changes > 0;
+  });
+}
+
+/** Delete all dead-letter rows older than cutoffDays days. Returns the count deleted. */
+export function purgeOldWebhookDeadLetters(cutoffDays: number): number {
+  // created_at is stored as ISO text ("2024-01-01T00:00:00.000Z")
+  const cutoff = new Date(Date.now() - cutoffDays * 24 * 60 * 60 * 1000).toISOString();
+  const sql = "DELETE FROM webhook_dead_letters WHERE created_at < ?";
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(cutoff);
+    return info.changes;
+  });
 }

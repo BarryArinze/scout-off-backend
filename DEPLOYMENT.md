@@ -32,6 +32,115 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS allowed origins (defaults per env: `*` in dev, `https://staging.scoutoff.io` in staging, `https://app.scoutoff.io,https://scoutoff.io` in prod) |
 | `ADMIN_IP_ALLOWLIST` | — | Comma-separated list of **IPv4** addresses/CIDR ranges allowed to reach admin endpoints (e.g. `192.168.1.0/24,10.0.0.1`). Unset/empty disables the check. IPv6 is not supported yet — any IPv6 client IP is rejected with 403 regardless of this setting (fail closed). |
 
+## Kubernetes / Helm Deployment
+
+The `helm/scout-off-backend/` directory contains a production-grade Helm 3 chart
+(API version `v2`) for deploying the backend to Kubernetes.
+
+### Prerequisites
+
+- Helm 3.x installed (`helm version`)
+- A Kubernetes cluster with `kubectl` configured
+- The `scout-off-secrets` Kubernetes Secret created in the target namespace
+  **before** the first `helm install` (see below)
+
+### 1. Create the Kubernetes Secret
+
+Sensitive env vars (`CONTRACT_ID`, `JWT_SECRET`) are sourced exclusively from a
+Kubernetes Secret — they are never stored in the ConfigMap or committed to source
+control.
+
+```bash
+kubectl create secret generic scout-off-secrets \
+  --from-literal=CONTRACT_ID=<your-soroban-contract-id> \
+  --from-literal=JWT_SECRET=<min-32-char-random-string> \
+  --namespace <your-namespace>
+```
+
+Rotate values by deleting and re-creating the Secret, then triggering a rollout:
+
+```bash
+kubectl delete secret scout-off-secrets --namespace <your-namespace>
+kubectl create secret generic scout-off-secrets \
+  --from-literal=CONTRACT_ID=<new-value> \
+  --from-literal=JWT_SECRET=<new-value> \
+  --namespace <your-namespace>
+kubectl rollout restart deployment/scout-off-backend --namespace <your-namespace>
+```
+
+### 2. Install the chart
+
+```bash
+helm install scout-off-backend ./helm/scout-off-backend \
+  --namespace <your-namespace> \
+  --create-namespace \
+  --set image.tag=<git-sha-or-semver>
+```
+
+### 3. Upgrade
+
+```bash
+helm upgrade scout-off-backend ./helm/scout-off-backend \
+  --namespace <your-namespace> \
+  --set image.tag=<new-tag>
+```
+
+### 4. Override values
+
+Create a `my-values.yaml` file with any overrides and pass it with `-f`:
+
+```bash
+helm upgrade --install scout-off-backend ./helm/scout-off-backend \
+  --namespace production \
+  -f my-values.yaml \
+  --set image.tag=v1.2.3
+```
+
+Common overrides:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `image.tag` | chart appVersion | Docker image tag to deploy |
+| `replicaCount` | `2` | Minimum pod count (HPA floor) |
+| `hpa.maxReplicas` | `10` | Maximum pods under autoscaling |
+| `hpa.targetCPUUtilizationPercentage` | `70` | CPU threshold to trigger scale-up |
+| `hpa.targetMemoryUtilizationPercentage` | `80` | Memory threshold to trigger scale-up |
+| `ingress.enabled` | `false` | Expose the service via an Ingress |
+| `ingress.hosts[0].host` | `api.scoutoff.io` | Public hostname |
+| `ingress.tls[0].secretName` | `scout-off-tls` | TLS certificate Secret name |
+| `resources.requests.cpu` | `100m` | CPU request |
+| `resources.limits.cpu` | `500m` | CPU limit |
+| `resources.requests.memory` | `256Mi` | Memory request |
+| `resources.limits.memory` | `512Mi` | Memory limit |
+| `secretName` | `scout-off-secrets` | Name of the Kubernetes Secret |
+| `env.NODE_ENV` | `production` | Node environment |
+| `env.DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
+
+### 5. Lint the chart
+
+```bash
+helm lint helm/scout-off-backend
+```
+
+### 6. Render templates locally (dry-run)
+
+```bash
+helm template scout-off-backend ./helm/scout-off-backend \
+  --set image.tag=local-test
+```
+
+This produces a Deployment, HPA, PodDisruptionBudget, Service, ConfigMap, and
+(when `ingress.enabled=true`) an Ingress resource.
+
+### 7. Uninstall
+
+```bash
+helm uninstall scout-off-backend --namespace <your-namespace>
+```
+
+> **Note:** Uninstalling the chart does **not** delete the `scout-off-secrets`
+> Secret. Delete it manually if you are tearing down the environment entirely.
+
 ## Build & Start
 
 ```bash

@@ -6,6 +6,7 @@ import {
   WebhookSubscription,
 } from '../db';
 import { logger } from '../utils/logger';
+import { incrementWebhookDeadLettersTotal } from '../middleware/metrics';
 
 type WebhookRetryOptions = {
   retries?: number;
@@ -125,5 +126,6 @@ async function deliverToSubscription(
       failureReason,
       attempts: RETRY_OPTIONS.retries,
     });
+    incrementWebhookDeadLettersTotal();
   }
 }

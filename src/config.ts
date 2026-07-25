@@ -179,6 +179,12 @@ const config = {
   /** TTL for player list cache entries in milliseconds. */
   playerCacheTtlMs: parseInt(process.env.PLAYER_CACHE_TTL_MS ?? '60000', 10),
 
+  /** Access token TTL in seconds (default: 15 minutes). Configurable via JWT_ACCESS_TTL_SECONDS. */
+  jwtAccessTtlSeconds: parseInt(process.env.JWT_ACCESS_TTL_SECONDS ?? '900', 10),
+
+  /** Refresh token TTL in seconds (default: 7 days). */
+  jwtRefreshTtlSeconds: 7 * 24 * 60 * 60,
+
   playerImport: {
     /** Maximum number of rows accepted per bulk player import request. */
     maxBatchSize: parseInt(process.env.PLAYER_IMPORT_MAX_BATCH ?? '500', 10),

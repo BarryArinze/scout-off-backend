@@ -118,6 +118,8 @@ export function resetMetrics(): void {
   cacheCountsStore.hits = 0;
   cacheCountsStore.misses = 0;
   cacheCountsStore.evictions = 0;
+  webhookCountersStore.deadLettersTotal = 0;
+  webhookCountersStore.retrySuccessTotal = 0;
 }
 
 // ─── Cache hit / miss / eviction counters ─────────────────────────────────────
@@ -156,6 +158,33 @@ export function getCacheMetrics(): CacheCounts {
   return { ...cacheCountsStore };
 }
 
+// ─── Webhook dead-letter counters ─────────────────────────────────────────────
+
+export interface WebhookCounters {
+  deadLettersTotal: number;
+  retrySuccessTotal: number;
+}
+
+export const webhookCountersStore: WebhookCounters = {
+  deadLettersTotal: 0,
+  retrySuccessTotal: 0,
+};
+
+/** Increment webhook_dead_letters_total counter. */
+export function incrementWebhookDeadLettersTotal(): void {
+  webhookCountersStore.deadLettersTotal += 1;
+}
+
+/** Increment webhook_retry_success_total counter. */
+export function incrementWebhookRetrySuccessTotal(): void {
+  webhookCountersStore.retrySuccessTotal += 1;
+}
+
+/** Returns a snapshot of webhook counters. */
+export function getWebhookCounters(): WebhookCounters {
+  return { ...webhookCountersStore };
+}
+
 // ─── Prometheus exposition ──────────────────────────────────────────────────────
 
 /** Content-Type for the Prometheus text exposition format (v0.0.4). */
@@ -182,6 +211,7 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   const errors = getErrorMetrics();
   const hist = getLatencyHistogram();
   const cache = getCacheMetrics();
+  const webhook = getWebhookCounters();
   const lines: string[] = [];
 
   // Request count (counter) — one series per route.
@@ -224,6 +254,14 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
     lines.push('# TYPE indexer_ledger_lag gauge');
     lines.push(`indexer_ledger_lag ${extras.indexerLedgerLag}`);
   }
+
+  // Webhook dead-letter counters.
+  lines.push('# HELP webhook_dead_letters_total Total number of webhook deliveries moved to the dead-letter queue');
+  lines.push('# TYPE webhook_dead_letters_total counter');
+  lines.push(`webhook_dead_letters_total ${webhook.deadLettersTotal}`);
+  lines.push('# HELP webhook_retry_success_total Total number of successful dead-letter retries');
+  lines.push('# TYPE webhook_retry_success_total counter');
+  lines.push(`webhook_retry_success_total ${webhook.retrySuccessTotal}`);
 
   return lines.join('\n') + '\n';
 }
