@@ -5,10 +5,14 @@ import { importPlayers } from '../controllers/adminPlayerImportController';
 import { getFeatureFlags, updateFeatureFlag } from '../controllers/featureFlagsController';
 import { exportEvents } from '../controllers/exportController';
 import { listDeadLetters, replayDeadLetter } from '../controllers/webhookAdminController';
-import { triggerReindex, reindexStatusHandler } from '../controllers/reindexController';
+import { setIpReputationController, getIpReputationController } from '../controllers/ipReputationController';
 import { requireRole } from '../middleware/auth';
 import { ipAllowlistMiddleware } from '../middleware/ipAllowlist';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
+import { rateLimit } from '../middleware/rateLimit';
+
+/** Stricter rate limit for bulk import — 5 requests per minute per IP. */
+const importRateLimit = rateLimit({ windowMs: 60_000, max: 5 });
 
 const router = Router();
 
@@ -227,6 +231,7 @@ router.post(
  */
 router.post(
   '/players/import',
+  importRateLimit,
   requireRole('admin'),
   express.text({ type: ['text/csv', 'text/plain'], limit: '1mb' }),
   importPlayers,
@@ -440,5 +445,34 @@ router.route('/webhooks/dead-letters')
 router.route('/webhooks/:id/replay')
   .post(requireRole('admin'), replayDeadLetter)
   .all(methodNotAllowed(['POST']));
+
+/**
+ * POST /api/admin/ip-allowlist
+ *
+ * Manually set an IP's reputation score.
+ * - body { ip, score: 0 }   → whitelist the IP (score pinned at 0, immune to decay)
+ * - body { ip, score: 100 } → blacklist the IP (immediate 429 for all requests)
+ * - body { ip, score: N }   → any 0–100 value (admin override)
+ *
+ * @body { ip: string, score: number }
+ * @response 200 { success: true, data: { ip, score } }
+ * @response 400 { success: false, error: string } - Validation error
+ * @auth Bearer (admin role required)
+ */
+router.route('/ip-allowlist')
+  .post(requireRole('admin'), setIpReputationController)
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * GET /api/admin/ip-reputation/:ip
+ *
+ * Returns the current reputation record (score, lastSeen, pinned) for a given IP.
+ *
+ * @response 200 { success: true, data: IpReputation | null }
+ * @auth Bearer (admin role required)
+ */
+router.route('/ip-reputation/:ip')
+  .get(requireRole('admin'), getIpReputationController)
+  .all(methodNotAllowed(['GET', 'HEAD']));
 
 export default router;
