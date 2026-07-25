@@ -11,12 +11,29 @@ export interface BroadcastEvent {
 }
 
 /**
+ * Optional server-side filter criteria attached to each SSE connection.
+ * - `eventTypes`: if non-empty, only events whose `type` is in this set are delivered.
+ * - `playerId`  : if provided, only events whose payload contains that player ID are delivered.
+ *
+ * A subscriber with neither filter set (both defaults) receives every event that
+ * passes the wallet-relevance check — preserving the existing wildcard behaviour.
+ */
+export interface SseFilterCriteria {
+  /** Set of event types to receive. Empty set = no type filter (receive all types). */
+  eventTypes: ReadonlySet<ContractEventType>;
+  /** If set, only events whose payload contains this player ID are delivered. */
+  playerId?: string;
+}
+
+/**
  * A connected SSE subscriber.
  * The `wallet` is the authenticated Stellar address; `send` pushes a serialised
  * SSE frame to the underlying HTTP response stream.
  */
 export interface SseSubscriber {
   wallet: string;
+  /** Optional server-side filter criteria for this connection. */
+  filter?: SseFilterCriteria;
   send: (event: BroadcastEvent) => void;
 }
 
@@ -85,6 +102,42 @@ export function isEventRelevantToWallet(
   }
 }
 
+/**
+ * Returns true if the event passes the subscriber's optional filter criteria.
+ *
+ * Rules:
+ *  - No filter (undefined) → passes (wildcard / backward-compatible).
+ *  - eventTypes set and non-empty → event.type must be in the set.
+ *  - playerId set → a payload field that carries the player identity
+ *    (player_id, wallet, scout — depending on event type) must match.
+ */
+export function isEventMatchingFilter(
+  event: BroadcastEvent,
+  filter: SseFilterCriteria | undefined,
+): boolean {
+  if (!filter) return true;
+
+  // Type filter
+  if (filter.eventTypes.size > 0 && !filter.eventTypes.has(event.type)) {
+    return false;
+  }
+
+  // Player ID filter — look for the player identity in the payload
+  if (filter.playerId !== undefined) {
+    const p = event.payload;
+    const playerInPayload =
+      p.player_id === filter.playerId ||
+      p.wallet === filter.playerId ||
+      p.scout === filter.playerId ||
+      p.recipient === filter.playerId ||
+      p.validator === filter.playerId;
+
+    if (!playerInPayload) return false;
+  }
+
+  return true;
+}
+
 // ─── EventBroadcaster ────────────────────────────────────────────────────────
 
 /**
@@ -138,14 +191,19 @@ export class EventBroadcaster extends EventEmitter {
 
   /**
    * Register an SSE subscriber. The subscriber's `send` callback will be
-   * invoked for every event that `isEventRelevantToWallet` returns true for.
+   * invoked for every event that passes:
+   *   1. `isEventRelevantToWallet` — wallet-level tenant isolation (always applied)
+   *   2. `isEventMatchingFilter`   — optional subscriber-level type/player filter
    */
   subscribe(subscriber: SseSubscriber): void {
     this._subscribers.add(subscriber);
 
     const listener = (event: BroadcastEvent) => {
       try {
-        if (isEventRelevantToWallet(event, subscriber.wallet)) {
+        if (
+          isEventRelevantToWallet(event, subscriber.wallet) &&
+          isEventMatchingFilter(event, subscriber.filter)
+        ) {
           subscriber.send(event);
         }
       } catch (err) {
