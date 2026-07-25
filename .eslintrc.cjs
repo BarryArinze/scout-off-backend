@@ -15,10 +15,12 @@ module.exports = {
   },
   rules: {
     '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
-    'no-console': 'error'
+    'no-console': ['error', { allow: ['warn', 'error'] }]
   },
   overrides: [
     {
+      // logger.ts also uses console.debug/console.info, which the base
+      // allowlist (warn/error only) doesn't cover.
       files: ['src/utils/logger.ts'],
       rules: { 'no-console': 'off' }
     }
