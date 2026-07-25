@@ -8,6 +8,7 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
 - [Contribution Workflow](#contribution-workflow)
 - [Code Quality Standards](#code-quality-standards)
 - [Security & Dependency Review](#security--dependency-review)
+- [Running Tests Locally](#running-tests-locally)
 - [Filing Issues](#filing-backend-issues)
 - [Getting Help](#getting-help)
 
@@ -309,6 +310,92 @@ Instead:
 1. Email maintainers privately
 2. Include proof of concept (if safe to share)
 3. Allow 7 days for maintainers to respond before public disclosure
+
+## Running Tests Locally
+
+### How Tests Use an In-Memory Database
+
+All backend tests run against an **in-memory SQLite database** (`DB_PATH=:memory:`).
+This is configured automatically in [`tests/setup.ts`](tests/setup.ts) before any
+test module is loaded, so you do not need to set `DB_PATH` yourself when running
+tests.
+
+> ⚠️ **Never point tests at a persistent database file.**  
+> Setting `DB_PATH` to a real file path (e.g. `scout-off.db`) will cause tests to
+> read from and write to your local development database, which can corrupt data,
+> cause tests to interfere with one another, and produce non-deterministic results.
+> If you have a `DB_PATH` variable set in your `.env` file it is intentionally
+> ignored by the test runner because `tests/setup.ts` sets `DB_PATH=:memory:` before
+> any module import can read the environment.
+
+### Running the Full Test Suite
+
+```bash
+npm test
+# or equivalently:
+npx jest --runInBand
+```
+
+The `--runInBand` flag runs tests serially in the current process. This is required
+because multiple test files share the same in-memory database singleton — parallel
+workers would each get their own database, causing migration state to diverge.
+
+### Running a Single Test File
+
+Useful when developing a specific feature or debugging a failing test:
+
+```bash
+npx jest tests/routes/player.test.ts
+npx jest tests/middleware/rateLimit.test.ts
+npx jest tests/services/ipfs.test.ts
+```
+
+### Running Tests with Verbose Output
+
+Print each individual test name and result:
+
+```bash
+npx jest --verbose
+# or a single file with verbose output:
+npx jest tests/routes/player.test.ts --verbose
+```
+
+### Filtering by Test Name
+
+Run only tests whose description matches a pattern:
+
+```bash
+npx jest --testNamePattern="rate limit"
+```
+
+### Updating Stale Snapshots
+
+If a snapshot-based test fails because the expected output has legitimately changed
+(e.g. you updated an error response shape), regenerate the snapshots:
+
+```bash
+npx jest --updateSnapshot
+# or for a single file:
+npx jest tests/routes/player.test.ts --updateSnapshot
+```
+
+Review the diff carefully before committing updated snapshots — they represent the
+new expected output and form part of the test contract.
+
+### Test Environment Variables
+
+`tests/setup.ts` pre-sets all required environment variables before any source
+module is imported. You do not need a `.env` file to run tests. The values used
+are safe stubs (placeholder contract ID, dummy JWT secret, etc.) that satisfy
+startup validation without hitting any external service.
+
+| Variable | Value in tests | Reason |
+|---|---|---|
+| `DB_PATH` | `:memory:` | Isolated, ephemeral SQLite per test run |
+| `CONTRACT_ID` | placeholder Stellar address | Satisfies required-env check |
+| `JWT_SECRET` | `test-secret` | Signs tokens in auth tests |
+| `PORT` | `0` | Random available port — prevents `EADDRINUSE` across suites |
+| `STELLAR_HEALTH_CHECK` | `false` | Skips live Stellar RPC call in health tests |
 
 ## Filing Backend Issues
 
