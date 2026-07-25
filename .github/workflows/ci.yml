@@ -98,6 +98,30 @@ jobs:
       # on a legitimately unpatchable finding.
       - name: Audit production dependencies (high/critical)
         run: npm audit --omit=dev --audit-level=high
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image with GIT_COMMIT build arg
+        run: |
+          docker build \
+            --build-arg GIT_COMMIT=${{ github.sha }} \
+            --tag scout-off-backend:ci \
+            .
+
+      - name: Verify GIT_COMMIT is set in the image
+        run: |
+          commit=$(docker run --rm \
+            -e CONTRACT_ID=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4 \
+            -e JWT_SECRET=test-secret-min-32-chars-for-ci-only \
+            scout-off-backend:ci \
+            node -e "console.log(process.env.GIT_COMMIT)")
+          echo "GIT_COMMIT in image: $commit"
+          test "$commit" = "${{ github.sha }}"
   contracts:
     name: Soroban Contracts
     runs-on: ubuntu-latest
