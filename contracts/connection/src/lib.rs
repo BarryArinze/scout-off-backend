@@ -48,7 +48,21 @@ pub struct ConnectionContract;
 
 #[contractimpl]
 impl ConnectionContract {
-    /// One-time setup. Stores admin, register contract, and subscription contract addresses.
+    /// One-time contract setup. Stores the admin, register contract, and subscription contract addresses.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The address that owns admin-only operations on this contract.
+    /// * `register_contract` - Address of the deployed [`RegisterContract`] used to promote
+    ///   a player to Elite Tier (level 3) when a trial offer is logged.
+    /// * `subscription_contract` - Address of the deployed [`SubscriptionContract`] used to
+    ///   verify that a scout has an active subscription or has paid the contact fee.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::AlreadyInitialized`] — Contract has already been initialized.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -71,11 +85,33 @@ impl ConnectionContract {
         Ok(())
     }
 
-    /// Record a trial offer between a scout and player on-chain.
+    /// Record a trial offer between a scout and a player on-chain, promoting the player to Elite Tier.
     ///
-    /// Authorization: scout must have an active subscription or have paid the
-    /// contact fee for this specific player. Repeated calls for the same
-    /// (scout, player_id) pair are idempotent and succeed without side-effects.
+    /// Verifies the scout holds an active subscription or has paid the per-player contact fee
+    /// via cross-contract calls to the [`SubscriptionContract`]. If authorized, stores the
+    /// trial offer, appends the player to the scout's offer list and the scout to the player's
+    /// connections list, calls `update_progress_level(player_id, 3)` on the
+    /// [`RegisterContract`] to promote the player to Elite Tier, and emits a
+    /// `trial_offer_logged` event.
+    ///
+    /// Repeated calls for the same (scout, player_id) pair are idempotent — the second call
+    /// returns `Ok(())` without modifying state.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `scout` - The scout's Stellar address (must authorize this call).
+    /// * `player_id` - The unique player identifier the trial offer targets.
+    /// * `details_uri` - IPFS/Arweave URI pointing to trial offer details. Ignored on
+    ///   duplicate calls; the original URI is preserved.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized, or stored contract
+    ///   addresses are missing.
+    /// * [`Error::Unauthorized`] — Scout has neither an active subscription nor a paid
+    ///   contact fee for this player.
     pub fn log_trial_offer(
         env: Env,
         scout: Address,
@@ -173,7 +209,19 @@ impl ConnectionContract {
         Ok(())
     }
 
-    /// Return all trial offer records for a given player (keyed by player_id).
+    /// Return all trial offer records for a given player, keyed by player_id.
+    ///
+    /// Iterates the scout addresses stored in `PlayerConnections(player_id)` and
+    /// assembles a full [`TrialOfferRecord`] for each. This is a read-only function;
+    /// it requires no authorization.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `player_id` - The unique player identifier whose connections to retrieve.
+    ///
+    /// # Returns
+    /// A `Vec<TrialOfferRecord>` of all trial offers targeting this player (may be empty).
+    /// Never errors.
     pub fn get_connections(env: Env, player_id: u64) -> Vec<TrialOfferRecord> {
         let scouts: Vec<Address> = env
             .storage()
@@ -203,6 +251,18 @@ impl ConnectionContract {
     }
 
     /// Return all trial offers made by a given scout.
+    ///
+    /// Iterates the player IDs stored in `ScoutOffers(scout)` and assembles a full
+    /// [`TrialOfferRecord`] for each. This is a read-only function; it requires no
+    /// authorization.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `scout` - The scout's Stellar address whose offers to retrieve.
+    ///
+    /// # Returns
+    /// A `Vec<TrialOfferRecord>` of all trial offers made by this scout (may be empty).
+    /// Never errors.
     pub fn get_trial_offers(env: Env, scout: Address) -> Vec<TrialOfferRecord> {
         let player_ids: Vec<u64> = env
             .storage()

@@ -22,7 +22,19 @@ pub struct SubscriptionContract;
 
 #[contractimpl]
 impl SubscriptionContract {
-    /// One-time setup. Stores admin, payment token, and platform contact fee.
+    /// One-time contract setup. Stores the admin, payment token, and platform contact fee.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The address authorized to call [`set_platform_fee_bps`].
+    /// * `token` - The XLM or platform-token contract address used for subscription payments.
+    /// * `platform_fee_bps` - Initial platform fee in basis points (e.g. `500` = 5 %).
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::AlreadyInitialized`] — Contract has already been initialized.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -45,9 +57,21 @@ impl SubscriptionContract {
 
     /// Purchase a scout subscription for the given tier and duration (in ledgers).
     ///
-    /// Required payment = tier × duration_ledgers × platform_fee_bps.
-    /// Returns `InsufficientFee(7)` when the scout's balance is too low,
-    /// or `Overflow(11)` when cost computation overflows i128.
+    /// Stores the subscription expiry as `current_ledger_sequence + duration_ledgers`.
+    /// Calling again while a subscription is still active overwrites the stored expiry
+    /// with a new value computed from the current sequence. Emits a `scout_subscribed` event.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `scout` - The scout's Stellar address (must authorize this call).
+    /// * `tier` - Subscription tier level (`u32`); used in the emitted event.
+    /// * `duration_ledgers` - Number of ledgers the subscription should remain active.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
     pub fn subscribe(
         env: Env,
         scout: Address,
@@ -67,7 +91,21 @@ impl SubscriptionContract {
         Ok(())
     }
 
-    /// Unlock direct contact with a player by paying the micro-fee.
+    /// Unlock direct contact with a specific player by paying the per-player micro-fee.
+    ///
+    /// Records the (scout, player_id) pair in contract storage so that
+    /// [`has_paid_contact`] returns `true` for that pair. Emits a `contact_unlocked` event.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `scout` - The scout's Stellar address (must authorize this call).
+    /// * `player_id` - The unique player identifier to unlock contact for.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
     pub fn pay_to_contact(env: Env, scout: Address, player_id: u64) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
@@ -81,7 +119,18 @@ impl SubscriptionContract {
         Ok(())
     }
 
-    /// Return true if the scout has an active (non-expired) subscription.
+    /// Return `true` if the scout has an active (non-expired) subscription.
+    ///
+    /// Compares the stored expiry ledger sequence against the current ledger sequence.
+    /// A scout with no subscription record returns `false`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `scout` - The scout's Stellar address to check.
+    ///
+    /// # Returns
+    /// `true` if the subscription expiry is strictly greater than the current ledger sequence,
+    /// `false` otherwise. Never errors.
     pub fn is_subscribed(env: Env, scout: Address) -> bool {
         let expiry: u32 = match env
             .storage()
@@ -94,14 +143,37 @@ impl SubscriptionContract {
         env.ledger().sequence() < expiry
     }
 
-    /// Check whether a scout has paid the contact fee for a specific player.
+    /// Return `true` if the scout has paid the contact fee for the given player.
+    ///
+    /// Checks whether a `ContactFee(scout, player_id)` entry exists in instance storage.
+    /// This is a read-only function; it requires no authorization.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `scout` - The scout's Stellar address to check.
+    /// * `player_id` - The unique player identifier to check.
+    ///
+    /// # Returns
+    /// `true` if the contact fee has been paid, `false` otherwise. Never errors.
     pub fn has_paid_contact(env: Env, scout: Address, player_id: u64) -> bool {
         env.storage()
             .instance()
             .has(&DataKey::ContactFee(scout, player_id))
     }
 
-    /// Update platform fee (in basis points). Only admin can call this.
+    /// Update the platform fee in basis points. Only the admin may call this.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The admin's Stellar address (must authorize this call and match stored admin).
+    /// * `platform_fee_bps` - New fee expressed in basis points (e.g. `250` = 2.5 %).
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::Unauthorized`] — Caller does not match the stored admin address.
     pub fn set_platform_fee_bps(env: Env, admin: Address, platform_fee_bps: u32) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
