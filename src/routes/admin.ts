@@ -5,6 +5,7 @@ import { importPlayers } from '../controllers/adminPlayerImportController';
 import { getFeatureFlags, updateFeatureFlag } from '../controllers/featureFlagsController';
 import { exportEvents } from '../controllers/exportController';
 import { listDeadLetters, replayDeadLetter } from '../controllers/webhookAdminController';
+import { triggerReindex, reindexStatusHandler } from '../controllers/reindexController';
 import { requireRole } from '../middleware/auth';
 import { ipAllowlistMiddleware } from '../middleware/ipAllowlist';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
@@ -367,6 +368,45 @@ router.route('/actions/:id')
 router.route('/actions/:id/approve')
   .post(requireRole('admin'), approvePendingAction)
   .all(methodNotAllowed(['POST']));
+
+/**
+ * POST /api/admin/reindex
+ *
+ * Trigger a background event backfill for a specific ledger range.
+ * The job fetches events in batches of 100 ledgers with a 50 ms inter-batch
+ * delay. Duplicate events are silently discarded via the UNIQUE constraint on
+ * tx_hash. The job status is available via GET /api/admin/reindex/status.
+ *
+ * @body { fromLedger: number, toLedger: number }
+ * @response 202 { success: true, data: { fromLedger, toLedger, status: 'running' } }
+ * @response 409 { success: false, error: string } - job already running
+ * @response 422 { success: false, error: string } - range > 10 000 ledgers or invalid range
+ * @auth Bearer (admin role required)
+ */
+router.route('/reindex')
+  .post(requireRole('admin'), triggerReindex)
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * GET /api/admin/reindex/status
+ *
+ * Return the current state of the background reindex job (live progress).
+ *
+ * @response 200 {
+ *   success: true,
+ *   data: {
+ *     status: 'idle' | 'running' | 'complete' | 'error',
+ *     from_ledger, to_ledger,
+ *     ledgers_processed, ledgers_total,
+ *     events_inserted,
+ *     started_at, completed_at, error_message
+ *   }
+ * }
+ * @auth Bearer (admin role required)
+ */
+router.route('/reindex/status')
+  .get(requireRole('admin'), reindexStatusHandler)
+  .all(methodNotAllowed(['GET', 'HEAD']));
 
 /**
  * GET /api/admin/webhooks/dead-letters
