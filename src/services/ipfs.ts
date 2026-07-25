@@ -94,6 +94,15 @@ export function clearPinJsonCache(): void {
 }
 
 /**
+ * Returns the number of entries currently held in the pinJson deduplication cache.
+ * Useful for metrics and health dashboards — a high count relative to unique
+ * metadata submissions indicates healthy deduplication is occurring.
+ */
+export function getPinJsonCacheSize(): number {
+  return pinJsonCache.size;
+}
+
+/**
  * Pin a JSON object to IPFS via Pinata. Returns the CID.
  *
  * Deduplication: the metadata is canonically serialized (sorted keys,
@@ -299,4 +308,4 @@ export async function retryPendingPins(): Promise<void> {
   }
 }
 
-export default { pinJson, pinFile, gatewayUrl, getCid, checkHealth, retryPendingPins, clearPinJsonCache };
+export default { pinJson, pinFile, gatewayUrl, getCid, checkHealth, retryPendingPins, clearPinJsonCache, getPinJsonCacheSize };
