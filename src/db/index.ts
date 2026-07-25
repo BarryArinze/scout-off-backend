@@ -9,6 +9,7 @@ import { encryptWebhookSecret, decryptWebhookSecret } from '../utils/webhookSecr
 import { DbDriver } from './driver';
 import { SqliteDriver } from './sqlite-driver';
 import { PostgresDriver } from './postgres-driver';
+import { observeDbQueryDuration } from '../middleware/metrics';
 
 function slowQueryThresholdMs(): number {
   return parseInt(process.env.SLOW_QUERY_THRESHOLD_MS ?? '50', 10);
