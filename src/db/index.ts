@@ -910,6 +910,23 @@ export function respondToTrialOffer(p: {
   timedQuery(sql, () => getDb().prepare(sql).run(p.status, p.reject_reason ?? null, p.responded_at, p.offer_id));
 }
 
+/**
+ * Count the number of trial offers submitted for a given player.
+ * Returns 0 when the trial_offers table does not exist yet (pre-migration).
+ */
+export function countTrialOffersByPlayer(playerId: string): number {
+  try {
+    const sql = 'SELECT COUNT(*) AS cnt FROM trial_offers WHERE player_id = ?';
+    const row = timedQuery(sql, () =>
+      getDb().prepare(sql).get(playerId) as { cnt: number } | undefined,
+    );
+    return row?.cnt ?? 0;
+  } catch {
+    // Table may not exist in very early migration states
+    return 0;
+  }
+}
+
 // ─── Pending pin helpers ──────────────────────────────────────────────────────
 
 export interface PendingPinRow {

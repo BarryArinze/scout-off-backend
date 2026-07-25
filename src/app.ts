@@ -24,6 +24,8 @@ import { requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
 import { getDb } from './db';
 import { getVersionInfo } from './version';
+import { apiVersion } from './middleware/apiVersion';
+import docsRouter from './routes/docs';
 
 /** Probe the SQLite database with a lightweight SELECT 1.
  *  Resolves 'ok' or 'error'; never rejects.
@@ -86,6 +88,8 @@ app.use(traceId);
 app.use(helmet());
 app.use(securityHeaders);
 app.use(responseTime);
+// Set X-API-Version on every response before route handlers run
+app.use(apiVersion);
 // Configure Express body parser with JSON payload size limit
 // Returns 413 Payload Too Large if exceeded
 app.use(express.json({ limit: config.bodyLimit.json }));
@@ -180,6 +184,7 @@ app.use('/auth', authRoutes);
 // Mount API routes under both /api (backwards-compatible alias) and /api/v1
 const prefixes = [API_PREFIX, API_V1_PREFIX];
 for (const prefix of prefixes) {
+  app.use(`${prefix}/docs`, docsRouter);
   app.use(`${prefix}/players`, playerRoutes);
   app.use(`${prefix}/scouts`, scoutRoutes);
   app.use(`${prefix}/validators`, validatorRoutes);
