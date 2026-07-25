@@ -139,6 +139,10 @@ const config = {
     // multi-subscriber deployments should manage subscriptions in the DB instead.
     secret: process.env.WEBHOOK_SECRET ?? '',
   },
+  // Symmetric key (32-byte hex, e.g. `openssl rand -hex 32`) used to encrypt
+  // webhook_subscriptions.secret at rest (#686). Required in production —
+  // see src/utils/webhookSecretCipher.ts and docs/secrets-rotation.md.
+  webhookSecretEncryptionKey: process.env.WEBHOOK_SECRET_ENCRYPTION_KEY ?? '',
   rateLimit: {
     enabled: process.env.RATE_LIMIT_ENABLED !== 'false',
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
@@ -187,6 +191,9 @@ const config = {
 
   /** TTL for pinJson deduplication cache entries in milliseconds (default: 5 min). */
   pinJsonCacheTtlMs: parseInt(process.env.PIN_JSON_CACHE_TTL_MS ?? '300000', 10),
+
+  /** Maximum evidence file size in bytes (default: 50 MB). */
+  evidenceMaxBytes: parseInt(process.env.EVIDENCE_MAX_BYTES ?? String(50 * 1024 * 1024), 10),
 
   /** TTL for multi-admin action proposals in milliseconds (default: 1 hour). */
   adminActionTtlMs: parseInt(process.env.ADMIN_ACTION_TTL_MS ?? '3600000', 10),

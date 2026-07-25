@@ -1,8 +1,9 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { getTrialOfferById, respondToTrialOffer, insertTrialOffer } from '../db';
-import { getEvents } from '../db';
+import { queryEvents } from '../db';
 import { logger } from '../utils/logger';
+import { broadcaster } from '../services/eventBroadcaster';
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -17,7 +18,7 @@ export const rejectOfferSchema = z.object({
  * We look up the player_registered event for their wallet address.
  */
 function getPlayerWallet(playerId: string): string | null {
-  const event = getEvents('player_registered').find(
+  const event = queryEvents('player_registered').find(
     (e) => e.payload.player_id === playerId,
   );
   return event ? (event.payload.wallet as string) : null;
@@ -55,7 +56,7 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
 
     if (!offer) {
       // Try to seed from on-chain indexed events (backward compatibility)
-      const event = getEvents('trial_offer_logged').find(
+      const event = queryEvents('trial_offer_logged').find(
         (e) => e.payload.offer_id === offerId || e.payload.player_id === playerId,
       );
       if (!event) {
@@ -96,6 +97,17 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
     respondToTrialOffer({ offer_id: offerId, status: 'accepted', responded_at: now });
 
     logger.info(`[trialOffer] accepted offerId=${offerId} playerId=${playerId}`);
+
+    // Notify the scout via SSE that their trial offer was accepted.
+    broadcaster.broadcast({
+      type: 'trial_offer_accepted',
+      payload: {
+        offer_id: offerId,
+        player_id: playerId,
+        scout: offer.scout_wallet,
+        responded_at: now,
+      },
+    });
 
     // NOTE: On-chain record of the response is a future step.
     // When the Soroban contract supports `respond_to_offer(offer_id, accepted: bool)`,
@@ -153,7 +165,7 @@ export async function rejectTrialOffer(req: Request, res: Response, next: NextFu
 
     if (!offer) {
       // Try to seed from on-chain indexed events (backward compatibility)
-      const event = getEvents('trial_offer_logged').find(
+      const event = queryEvents('trial_offer_logged').find(
         (e) => e.payload.offer_id === offerId || e.payload.player_id === playerId,
       );
       if (!event) {
@@ -193,6 +205,18 @@ export async function rejectTrialOffer(req: Request, res: Response, next: NextFu
     respondToTrialOffer({ offer_id: offerId, status: 'rejected', reject_reason: reason, responded_at: now });
 
     logger.info(`[trialOffer] rejected offerId=${offerId} playerId=${playerId} reason=${reason ?? 'none'}`);
+
+    // Notify the scout via SSE that their trial offer was rejected.
+    broadcaster.broadcast({
+      type: 'trial_offer_rejected',
+      payload: {
+        offer_id: offerId,
+        player_id: playerId,
+        scout: offer.scout_wallet,
+        reason: reason ?? null,
+        responded_at: now,
+      },
+    });
 
     // NOTE: On-chain record of the response is a future step (see acceptTrialOffer above).
 

@@ -9,7 +9,7 @@ jest.mock('../../src/services/ipfs', () => ({
 }));
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn(),
+  queryEvents: jest.fn(),
   getPendingMilestones: jest.fn(),
 }));
 
@@ -22,8 +22,8 @@ jest.mock('../../src/services/cache', () => ({
   invalidateMilestoneCache: jest.fn(),
 }));
 
-import { getEvents, getPendingMilestones } from '../../src/db';
-const mockGetEvents = getEvents as jest.Mock;
+import { queryEvents, getPendingMilestones } from '../../src/db';
+const mockGetEvents = queryEvents as jest.Mock;
 const mockGetPendingMilestones = getPendingMilestones as jest.Mock;
 
 function makeToken(wallet: string, role: string): string {

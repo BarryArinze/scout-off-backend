@@ -58,6 +58,19 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Dry-run deploy script ordering
+        # Validates that the deploy script's dependency/build ordering is correct:
+        # npm ci (full, devDependencies included) → npm run build → npm prune --omit=dev.
+        # This mirrors what scripts/deploy-staging.sh does on the staging server and
+        # confirms tsc (a devDependency) is available when the build step runs.
+        run: |
+          npm ci
+          npm run build
+          npm prune --omit=dev
+          # Confirm dist/index.js was produced by the build step
+          test -f dist/index.js || (echo "ERROR: dist/index.js not found after build" && exit 1)
+          echo "Deploy script ordering dry-run passed ✓"
+
       - name: Write build commit
         run: echo "${{ github.sha }}" > BUILD_COMMIT
 
@@ -138,6 +151,21 @@ jobs:
           done
           echo "Smoke test failed: GET /health did not return status ok"
           exit 1
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_PATH: ${{ secrets.STAGING_DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+          envs: DEPLOY_PATH
+          script: |
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+            bash scripts/deploy-staging.sh "$DEPLOY_PATH" rollback
 
   notify-failure:
     name: Notify on failure

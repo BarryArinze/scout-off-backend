@@ -1,8 +1,8 @@
 # ScoutOff
 
-![Backend CI](https://github.com/scout-off/scout-off-backend/actions/workflows/ci.yml/badge.svg)
-
-![codecov](https://codecov.io/gh/scout-off/scout-off-backend/graph/badge.svg)
+[![Backend CI](https://github.com/scout-off/scout-off-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/scout-off/scout-off-backend/actions/workflows/ci.yml)
+[![Contract CI](https://github.com/scout-off/scout-off-backend/actions/workflows/contract-ci.yml/badge.svg)](https://github.com/scout-off/scout-off-backend/actions/workflows/contract-ci.yml)
+[![codecov](https://codecov.io/gh/scout-off/scout-off-backend/graph/badge.svg)](https://codecov.io/gh/scout-off/scout-off-backend)
 
 Decentralized football scouting platform on Stellar — tamper-proof player profiles, on-chain progress verification, and direct scout-to-player connections powered by Soroban smart contracts.
 
@@ -335,6 +335,9 @@ npm run dev
 | `npm test`      | `jest --runInBand`                                        | Run the test suite                          |
 | `npm run lint`  | `eslint 'src/**/*.ts' 'tests/**/*.ts' --ext .ts`          | Run TypeScript linting                      |
 | `npm run seed`  | `ts-node --project tsconfig.scripts.json scripts/seed.ts` | Seed the local DB with sample data          |
+| `npm run backfill` | `node scripts/backfill.js`                             | Reset the indexer's last_ledger to replay events from a given ledger |
+| `npm run backup-db` | `bash scripts/backup-db.sh`                           | Back up the SQLite database (local/S3/GCS)  |
+| `npm run verify-backup` | `bash scripts/verify-backup.sh`                   | Verify a backup is restorable               |
 
 On startup the server will:
 

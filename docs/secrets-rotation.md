@@ -13,6 +13,7 @@ This document outlines the rotation policy, cadence, and step-by-step procedures
 | `PLATFORM_SECRET_KEY` / `PLATFORM_SECRET` | Semi-Annually (180 days) | No (Requires Restart) | Key Custodian / Soroban Admin |
 | `ADMIN_WALLET` / `ADMIN_WALLETS` | Annually (365 days) | No (Requires Restart) | Platform Owner / Multi-Sig Signers |
 | `REDIS_URL` (with password) | Annually (365 days) | No (Requires Restart) | Database / DevOps Engineer |
+| `WEBHOOK_SECRET_ENCRYPTION_KEY` | Semi-Annually (180 days), or on suspected compromise | No (Requires Re-encryption + Restart) | Security Administrator |
 
 ---
 
@@ -159,18 +160,80 @@ The connection string for the optional Redis cache, which may contain sensitive 
 
 ---
 
+## 6. Webhook Secret Encryption Key (`WEBHOOK_SECRET_ENCRYPTION_KEY`)
+
+Each row in `webhook_subscriptions` stores a per-subscriber HMAC signing secret used to sign
+outbound webhook deliveries (`X-Webhook-Signature`). Since #686, that secret is encrypted at rest
+with AES-256-GCM using this key — held only in the environment, never in the database — via
+`src/utils/webhookSecretCipher.ts`. The secret is decrypted in memory only at the point of signing
+a delivery (`src/db/index.ts`'s `listWebhookSubscriptions`) and the decrypted value is never
+written back to storage.
+
+* **Recommended Cadence**: Semi-Annually (every 180 days), or immediately upon suspected compromise
+  (e.g. a database backup or read-replica leak).
+* **Responsible Party**: Security Administrator.
+* **Downtime Impact**: **Downtime Required.** Rotating this key requires re-encrypting every
+  existing `webhook_subscriptions.secret` row with the new key before the old key is discarded —
+  there is no dual-key transition support yet (see Known Gaps below).
+
+### Rotation Procedure
+
+1. **Generate a New Key**:
+   ```bash
+   openssl rand -hex 32
+   ```
+2. **Re-encrypt Existing Rows Under the Old Key First**: if you're rotating (not setting the key
+   for the first time), every existing row must already be in the encrypted `v1:...` format. Run
+   the migration script once under the *current* key if you haven't already:
+   ```bash
+   WEBHOOK_SECRET_ENCRYPTION_KEY=<current-key> npm run reencrypt-webhook-secrets
+   ```
+3. **Decrypt-then-Re-encrypt Under the New Key**: there is no in-place re-key command yet — the
+   supported path is to decrypt every row with the old key and re-insert with the new key. The
+   simplest safe option today is **forced re-issuance**: for each subscription, generate a fresh
+   secret (`createWebhookSubscription` mints one automatically when no secret is passed) and have
+   the subscriber update their verification key out-of-band, then update `WEBHOOK_SECRET_ENCRYPTION_KEY`
+   and restart. Do this if the key is rotating due to suspected compromise.
+4. **Update Environment**: set the new `WEBHOOK_SECRET_ENCRYPTION_KEY` value and restart the
+   backend service.
+5. **Verify**: confirm webhook deliveries continue to sign and deliver successfully (check
+   `webhook_dead_letters` for a spike in new failures after the restart).
+
+### Migrating existing plaintext secrets (one-time, pre-#686 deployments)
+
+Deployments that created webhook subscriptions before #686 shipped have plaintext secrets stored
+in `webhook_subscriptions.secret`. `decryptWebhookSecret()` transparently passes these through
+unchanged (identified by the absence of the `v1:` prefix), so nothing breaks — but they remain
+unencrypted at rest until migrated. Run once, after setting `WEBHOOK_SECRET_ENCRYPTION_KEY` and
+building the project:
+
+```bash
+WEBHOOK_SECRET_ENCRYPTION_KEY=<key> npm run reencrypt-webhook-secrets
+```
+
+This is idempotent — rows already in the encrypted format are left untouched, so it's safe to run
+repeatedly (e.g. as a post-deploy health check).
+
+---
+
 ## Known Gaps and Limitations
 
 ### Webhook Signing Secrets
 The backend's webhook dispatcher **does** sign outgoing payloads with an HMAC-SHA256 signature
 sent in the `X-Webhook-Signature` header.  Each subscription row in `webhook_subscriptions` holds
-its own per-subscriber secret generated at creation.
+its own per-subscriber secret generated at creation, and (since #686) that secret is encrypted at
+rest under `WEBHOOK_SECRET_ENCRYPTION_KEY` — see § 6 above.
 
-**Current limitation**: There is no dedicated API endpoint to rotate a subscription's secret
-without deleting and re-creating the subscription.  See
-[docs/webhooks.md § Secret Rotation](webhooks.md#secret-rotation) for the current workaround and
-the planned `POST /api/admin/webhooks/:id/rotate-secret` improvement.
+**Current limitations**:
+- There is no dedicated API endpoint to rotate a subscription's secret without deleting and
+  re-creating the subscription. See
+  [docs/webhooks.md § Secret Rotation](webhooks.md#secret-rotation) for the current workaround and
+  the planned `POST /api/admin/webhooks/:id/rotate-secret` improvement.
+- There is no dual-key support for rotating `WEBHOOK_SECRET_ENCRYPTION_KEY` itself (unlike
+  `JWT_SECRET_PREVIOUS`'s zero-downtime pattern) — rotating the encryption key today requires
+  forced re-issuance of subscriber secrets (§ 6, step 3).
 
 * **Follow-up Action**: Once the rotation endpoint ships, update both this document and
   `docs/webhooks.md` to document zero-downtime dual-secret rotation (analogous to the
-  `JWT_SECRET_PREVIOUS` pattern).
+  `JWT_SECRET_PREVIOUS` pattern), and consider adding dual-key (`WEBHOOK_SECRET_ENCRYPTION_KEY_PREVIOUS`)
+  support for the encryption key so it can rotate without forced re-issuance.

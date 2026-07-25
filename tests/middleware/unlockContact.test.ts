@@ -11,7 +11,7 @@ jest.mock('../../src/services/stellar', () => ({
   },
 }));
 
-jest.mock('../../src/db', () => ({ getEvents: jest.fn(), insertContactUnlock: jest.fn() }));
+jest.mock('../../src/db', () => ({ queryEvents: jest.fn(), insertContactUnlock: jest.fn() }));
 
 import { unlockContact } from '../../src/controllers/scoutController';
 import { submitContactPayment } from '../../src/services/stellar';
@@ -58,7 +58,7 @@ describe('unlockContact', () => {
   });
 
   it('calls submitContactPayment when wallet ownership is verified', async () => {
-    mockSubmit.mockResolvedValue({ txHash: 'abc' });
+    mockSubmit.mockResolvedValue({ transactionId: 'abc', status: 'submitted' });
     const req = { params: { wallet: WALLET, playerId: PLAYER }, account: WALLET } as unknown as Request;
     const res = makeRes();
     await unlockContact(req, res, next);

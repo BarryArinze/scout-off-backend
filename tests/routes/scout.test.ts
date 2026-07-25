@@ -5,7 +5,7 @@ import app from '../../src/app';
 const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn(),
+  queryEvents: jest.fn(),
   getPlayerById: jest.fn(),
   getLatestSubscription: jest.fn(),
   insertSubscription: jest.fn(),
@@ -33,9 +33,9 @@ jest.mock('../../src/services/stellar', () => ({
   },
 }));
 
-import { getEvents, getPlayerById, getContactUnlocksByScout, hasContactUnlock } from '../../src/db';
+import { queryEvents, getPlayerById, getContactUnlocksByScout, hasContactUnlock } from '../../src/db';
 import { submitContactPayment, purchaseSubscription, isSubscribed } from '../../src/services/stellar';
-const mockGetEvents = getEvents as jest.Mock;
+const mockGetEvents = queryEvents as jest.Mock;
 const mockGetPlayerById = getPlayerById as jest.Mock;
 const mockGetContactUnlocksByScout = getContactUnlocksByScout as jest.Mock;
 const mockHasContactUnlock = hasContactUnlock as jest.Mock;

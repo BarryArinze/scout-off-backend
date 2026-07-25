@@ -220,7 +220,8 @@ Filter players by region, position, and minimum verified tier. No auth required.
       "wallet": "GABC...XYZ",
       "position": "Midfielder",
       "region": "West Africa",
-      "progress_level": 2
+      "progress_level": 2,
+      "progress_tier_name": "Performance Milestones"
     }
   ],
   "total": 1,
@@ -228,6 +229,13 @@ Filter players by region, position, and minimum verified tier. No auth required.
   "pageSize": 20
 }
 ```
+
+**Response fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `progress_level` | integer | Numeric progress tier (0–3) |
+| `progress_tier_name` | string | Human-readable tier name: `Unverified`, `Verified Identity`, `Performance Milestones`, or `Elite Tier` |
 
 **Error `400`** — invalid `minTier`
 
@@ -261,6 +269,7 @@ Retrieve a single player profile. No auth required.
     "position": "Midfielder",
     "region": "West Africa",
     "progress_level": 2,
+    "progress_tier_name": "Performance Milestones",
     "tierName": "tier.2.name",
     "tierDescription": "tier.2.description"
   }
@@ -711,3 +720,36 @@ Common HTTP status codes:
 | 403  | Insufficient permissions      |
 | 404  | Resource not found            |
 | 500  | Internal server error         |
+
+---
+
+## Error Codes
+
+When a request triggers a Soroban contract error, the API translates the on-chain error code into an appropriate HTTP status and returns a human-readable message. The `code` field in the response body will contain the snake_case `ErrorCode` constant (e.g. `PLAYER_NOT_FOUND`).
+
+| Code | Error              | HTTP Status              | Description                                    | Resolution                                                      |
+| ---- | ------------------ | ------------------------ | ---------------------------------------------- | --------------------------------------------------------------- |
+| 1    | AlreadyInitialized | 409 Conflict             | Contract already initialized                   | No action needed; contract is ready                             |
+| 2    | NotInitialized     | 503 Service Unavailable  | Contract not initialized                       | Admin must call `initialize` first                              |
+| 3    | PlayerNotFound     | 404 Not Found            | Player ID does not exist                       | Verify `player_id` from the registration transaction            |
+| 4    | InvalidValidator   | 403 Forbidden            | Caller is not a registered validator           | Admin must register the validator address first                 |
+| 5    | MilestoneNotFound  | 404 Not Found            | Milestone ID does not exist                    | Refresh the milestone list and verify the ID                    |
+| 6    | AlreadyVerified    | 409 Conflict             | Milestone already approved                     | No duplicate approvals needed; check milestone status           |
+| 7    | InsufficientFee    | 402 Payment Required     | Payment is below the required contact fee      | Fetch the current fee via `get_contact_fee()` and retry         |
+| 8    | NotSubscribed      | 402 Payment Required     | Scout has no active subscription               | Call `subscribe` before browsing premium data                   |
+| 9    | Unauthorized       | 401 Unauthorized         | Caller is not authorized for this action       | Confirm you are signing with the correct Stellar account        |
+| 10   | ContractPaused     | 503 Service Unavailable  | Contract is paused by the admin                | Wait for admin to call `unpause_contract()`                     |
+| 11   | Overflow           | 500 Internal Server Error| Arithmetic overflow in fee calculation         | Use amounts within the safe u128 range                          |
+
+### Endpoint Error Code Cross-Reference
+
+| Endpoint | Possible Error Codes |
+| -------- | -------------------- |
+| `POST /api/players/register` | 2 (NotInitialized), 10 (ContractPaused) |
+| `GET /api/players/:playerId` | 3 (PlayerNotFound) |
+| `GET /api/players/:playerId/milestones` | 3 (PlayerNotFound), 5 (MilestoneNotFound) |
+| `POST /api/validators/milestone` | 2 (NotInitialized), 4 (InvalidValidator), 10 (ContractPaused) |
+| `POST /api/scouts/:wallet/contacts/:playerId/unlock` | 7 (InsufficientFee), 8 (NotSubscribed), 9 (Unauthorized), 10 (ContractPaused) |
+| `GET /api/scouts/:wallet/subscription` | 8 (NotSubscribed) |
+| `POST /api/admin/contract/pause` | 9 (Unauthorized), 1 (AlreadyInitialized) |
+| `POST /api/admin/contract/unpause` | 9 (Unauthorized), 10 (ContractPaused) |

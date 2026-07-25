@@ -84,9 +84,11 @@ import {
   pauseContractOnChain,
   registerValidatorOnChain,
   renewSubscription,
+  submitContactPayment,
   PaymentError,
   FeeWithdrawalError,
   ValidatorActionError,
+  updateProfile,
 } from '../../src/services/stellar';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
@@ -1114,6 +1116,129 @@ describe('renewSubscription', () => {
     mockGetTransaction.mockRejectedValue(new Error('poll unreachable'));
 
     await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+});
+
+// ─── submitContactPayment ─────────────────────────────────────────────────────
+
+describe('submitContactPayment', () => {
+  const PLAYER_ID = 'player-123';
+
+  it('throws PaymentError INVALID_ACCOUNT for empty wallet', async () => {
+    await expect(submitContactPayment('', PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INVALID_ACCOUNT',
+    });
+    expect(mockGetAccount).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError INVALID_ACCOUNT for empty playerId', async () => {
+    await expect(submitContactPayment(WALLET, '')).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INVALID_ACCOUNT',
+    });
+    expect(mockGetAccount).not.toHaveBeenCalled();
+  });
+
+  it('invokes pay_to_contact and returns the confirmed transaction hash with a submitted status', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'real-unlock-tx-001' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' });
+
+    const result = await submitContactPayment(WALLET, PLAYER_ID);
+
+    expect(result.transactionId).toBe('real-unlock-tx-001');
+    expect(result.status).toBe('submitted');
+    expect(mockGetAccount).toHaveBeenCalled();
+    expect(mockSimulate).toHaveBeenCalled();
+    expect(mockAssemble).toHaveBeenCalled();
+    expect(mockSendTransaction).toHaveBeenCalled();
+    expect(mockGetTransaction).toHaveBeenCalledWith('real-unlock-tx-001');
+  });
+
+  it('polls getTransaction until status is no longer NOT_FOUND before returning', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'unlock-poll-hash' });
+    mockGetTransaction
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'SUCCESS' });
+
+    jest.useFakeTimers();
+    const promise = submitContactPayment(WALLET, PLAYER_ID);
+    await jest.runAllTimersAsync();
+    const result = await promise;
+    jest.useRealTimers();
+
+    expect(result.transactionId).toBe('unlock-poll-hash');
+    expect(mockGetTransaction).toHaveBeenCalledTimes(3);
+  });
+
+  it('throws PaymentError INSUFFICIENT_FUNDS when simulation reports contract error #7', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Contract error: #7' });
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INSUFFICIENT_FUNDS',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError INSUFFICIENT_FUNDS when sendTransaction reports contract error #7', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'ERROR', errorResult: 'Contract error: #7', hash: 'x' });
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INSUFFICIENT_FUNDS',
+    });
+    expect(mockGetTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError INSUFFICIENT_FUNDS when the confirmed tx XDR reports insufficient fee', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'unlock-fail-fee' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'error-payload-#7-encoded' });
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'INSUFFICIENT_FUNDS',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when the confirmed transaction FAILED for an unrecognized reason', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'unlock-fail-generic' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'some other error' });
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when getAccount rejects', async () => {
+    mockGetAccount.mockRejectedValue(new Error('account unreachable'));
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when sendTransaction rejects', async () => {
+    mockSendTransaction.mockRejectedValue(new Error('submit unreachable'));
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws PaymentError NETWORK_ERROR when getTransaction polling rejects', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'unlock-poll-fail' });
+    mockGetTransaction.mockRejectedValue(new Error('poll unreachable'));
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
       name: 'PaymentError',
       code: 'NETWORK_ERROR',
     });

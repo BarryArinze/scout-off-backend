@@ -43,10 +43,10 @@ const EVENT_JAN25: EventRecord = {
 };
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn(),
+  queryEvents: jest.fn(),
   getEventsCount: jest.fn().mockReturnValue(3),
-  getLastLedger: jest.fn().mockReturnValue(0),
-  setLastLedger: jest.fn(),
+  fetchLastIndexedLedger: jest.fn().mockReturnValue(0),
+  persistLastIndexedLedger: jest.fn(),
   getValidatorStats: jest.fn().mockReturnValue(null),
   queryPlayers: jest.fn().mockReturnValue([]),
   countPlayers: jest.fn().mockReturnValue(0),
@@ -69,8 +69,8 @@ jest.mock('../../src/services/audit', () => ({
   logAuditEvent: jest.fn(),
 }));
 
-import { getEvents } from '../../src/db';
-const mockGetEvents = getEvents as jest.Mock;
+import { queryEvents } from '../../src/db';
+const mockGetEvents = queryEvents as jest.Mock;
 
 async function getAdminToken(): Promise<string> {
   const kp = Keypair.random();

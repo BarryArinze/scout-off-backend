@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import {
-  getEvents,
+  queryEvents,
   getPlayerById,
   getLatestSubscription,
   insertSubscription,
@@ -81,7 +81,7 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
   if (localSub && localSub.expires_at > graceThreshold) return true;
 
   // 3. Indexed scout_subscribed events (fallback for pre-table records)
-  const subs = getEvents('scout_subscribed').filter((e) => e.payload.scout === scoutWallet);
+  const subs = queryEvents('scout_subscribed').filter((e) => e.payload.scout === scoutWallet);
   const latestSub = subs.at(-1);
   if (latestSub) {
     const expiresAt = latestSub.payload.subscription_expiry as number;
@@ -146,7 +146,7 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
     }
 
     // Fall back to indexed events
-    const subs = getEvents('scout_subscribed').filter((e) => e.payload.scout === wallet);
+    const subs = queryEvents('scout_subscribed').filter((e) => e.payload.scout === wallet);
     const latest = subs.at(-1);
     if (!latest) {
       res.json({
@@ -409,7 +409,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
     insertContactUnlock({
       scout_wallet: wallet,
       player_id: playerId,
-      tx_hash: (result as { txHash?: string }).txHash ?? '',
+      tx_hash: result.transactionId,
       unlocked_at: Math.floor(Date.now() / 1000),
     });
     res.json({ success: true, data: result });
@@ -464,7 +464,7 @@ export async function submitTrialOffer(req: Request, res: Response, next: NextFu
       return;
     }
 
-    const playerExists = getEvents('player_registered').some((e) => e.payload.player_id === playerId);
+    const playerExists = queryEvents('player_registered').some((e) => e.payload.player_id === playerId);
     if (!playerExists) {
       res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
       return;
@@ -509,7 +509,7 @@ export async function getPaymentHistory(req: Request, res: Response, next: NextF
     }
     const { from, to } = req.query as { from?: string; to?: string };
 
-    let payments = getEvents('contact_unlocked')
+    let payments = queryEvents('contact_unlocked')
       .filter((e) => e.payload.scout === wallet)
       .map((e) => ({
         transactionId: (e.payload.tx_hash as string | undefined) ?? null,

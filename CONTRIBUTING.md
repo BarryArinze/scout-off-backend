@@ -5,6 +5,7 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
 ## Table of Contents
 
 - [Getting Started](#getting-started)
+- [Seeding the Database](#seeding-the-database)
 - [Contribution Workflow](#contribution-workflow)
 - [Code Quality Standards](#code-quality-standards)
 - [Security & Dependency Review](#security--dependency-review)
@@ -46,23 +47,96 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
    - No security vulnerabilities: `npm audit`
    - Environment is set up: `cp .env.example .env`
 
-### Pre-commit Hook
+## Seeding the Database
 
-`npm install` runs the `prepare` script, which installs a [Husky](https://typicode.github.io/husky/)
-git hook at `.husky/pre-commit`. From then on, every `git commit` automatically:
+New contributors don't need to manually create players, events, or
+subscriptions to start testing the API — `scripts/seed.ts` populates the
+local SQLite database with a realistic sample dataset in one command.
 
-1. Runs `npx lint-staged`, which applies `eslint --fix` and `prettier --write` to the
-   **staged** `*.ts` files only (configured via the `lint-staged` key in `package.json`).
-2. Runs `npx tsc --noEmit` to type-check the project and catch TypeScript errors.
+### Running the seed
 
-If either step fails, the commit is blocked so broken code never lands in the history —
-this is the same lint/type-check CI already enforces, just moved earlier so you find out
-before pushing instead of after. Because `lint-staged` only touches files you've staged,
-the hook normally finishes in a few seconds even on a large repo.
+```bash
+npm run seed
+# or equivalently:
+npx ts-node --project tsconfig.scripts.json scripts/seed.ts
+```
 
-To skip the hook in an exceptional case (e.g. a WIP commit on a personal branch), use
-`git commit --no-verify` — but note CI still runs the full lint/type-check, so the commit
-will need to be fixed before merging regardless.
+This connects to the database at `DB_PATH` (default: `scout-off.db`),
+runs any pending migrations, and inserts the sample rows described below.
+
+### What gets seeded
+
+| Data                 | Count | Details                                                                          |
+| -------------------- | ----- | --------------------------------------------------------------------------------- |
+| Players               | 5     | One per region (West Africa, East Africa, South America, Europe, Southeast Asia) |
+| Positions             | 5     | Forward, Midfielder, Defender, Goalkeeper, Winger                                |
+| Progress tiers        | 0–3   | One player at each tier level (0, 1, 1, 2, 3), showcasing the full tier model     |
+| Milestone events      | 3     | `performance`, `identity`, and `trial_offer` milestones (`milestone_approved`)   |
+| Scout subscriptions   | 2     | One `premium` (90 days) and one `basic` (30 days), both active                   |
+| Contact unlocks       | 2     | Scout Alpha → `seed-player-001`, Scout Beta → `seed-player-003`                  |
+
+The full player/scout wallet list (with the exact seed values) lives in
+the comment block and constant declarations at the top of
+[`scripts/seed.ts`](scripts/seed.ts). At the time of writing, the seeded
+wallets used for manual API testing are:
+
+| Role                   | Wallet                                                    |
+| ----------------------- | ---------------------------------------------------------- |
+| `seed-player-001` (Forward, West Africa)   | `GAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZFAZQXNK3BFMN7XRVGB` |
+| `seed-player-003` (Defender, South America) | `GCRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZFAZQXNK3BFMN7X` |
+| Scout Alpha (`premium` subscription)        | `GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE` |
+| Scout Beta (`basic` subscription)           | `GHAJBGZFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVB` |
+
+### Example requests against seeded data
+
+Once seeded, the server (`npm run dev`) exposes the sample data through
+the normal API — no manual setup required for read endpoints:
+
+```bash
+# List all players
+curl http://localhost:4000/api/players
+
+# Filter by region and minimum tier
+curl "http://localhost:4000/api/players?region=West%20Africa&minTier=2"
+
+# Fetch a specific seeded player and their milestone history
+curl http://localhost:4000/api/players/seed-player-003
+curl http://localhost:4000/api/players/seed-player-001/milestones
+```
+
+Scout-facing endpoints require a Bearer token for the seeded scout wallet
+(see `POST /auth/challenge` and `POST /auth/token` in
+[`BACKEND_API_DOCS.md`](BACKEND_API_DOCS.md) for how to mint one locally),
+for example:
+
+```bash
+# Scout Alpha's subscription status (premium, seeded active)
+curl http://localhost:4000/api/scouts/GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE/subscription \
+  -H "Authorization: Bearer <scout-jwt-for-GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE>"
+
+# Contacts Scout Alpha has already unlocked (seed-player-001)
+curl http://localhost:4000/api/scouts/GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE/contacts \
+  -H "Authorization: Bearer <scout-jwt-for-GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE>"
+```
+
+### Idempotency
+
+The seed script is **idempotent** — every player is keyed by a stable
+`player_id` and every event by a stable `tx_hash`, both enforced by
+`UNIQUE`/primary-key constraints. Re-running `npm run seed` against an
+already-seeded database skips rows that already exist instead of creating
+duplicates or erroring, so it's always safe to run again (e.g. after
+pulling `main` or restarting your dev environment).
+
+### Resetting the seed
+
+To start from a clean slate, delete the SQLite database file and re-run
+the seed:
+
+```bash
+rm scout-off.db   # or whatever DB_PATH points at in your .env
+npm run seed
+```
 
 ## Contribution Workflow
 
@@ -138,6 +212,36 @@ Fixes #123
 
 ## Code Quality Standards
 
+### Pre-commit Hook
+
+A [Husky](https://typicode.com/husky/) pre-commit hook runs
+[lint-staged](https://github.com/lint-staged/lint-staged) automatically on
+every `git commit`. It applies ESLint (with `--fix`) to all staged `.ts` files
+under `src/` and `tests/`, so you catch and auto-fix lint violations before
+they reach CI.
+
+The configuration lives in the `"lint-staged"` key in `package.json`:
+
+```json
+"lint-staged": {
+  "src/**/*.ts": ["eslint --fix --ext .ts"],
+  "tests/**/*.ts": ["eslint --fix --ext .ts"]
+}
+```
+
+Husky is set up automatically when you run `npm install` (via the `prepare`
+lifecycle hook). If the hook does not run after cloning, enable it manually:
+
+```bash
+npx husky install
+```
+
+You can also run lint-staged on your current staged files at any time:
+
+```bash
+npx lint-staged
+```
+
 ### Required Checks
 
 - **Tests**: New features must include unit or integration tests
@@ -158,9 +262,18 @@ Fixes #123
 
 ### Coverage Goals
 
-- Target ≥ 80% code coverage for new code
-- Focus on critical paths: auth, payments, data validation
-- See `tests/` directory for examples
+Jest enforces minimum coverage thresholds automatically when running `npm run test:coverage`. The thresholds are configured in the `jest.coverageThreshold` block in `package.json`:
+
+| Metric     | Minimum |
+| ---------- | ------- |
+| Branches   | 70%     |
+| Functions  | 75%     |
+| Lines      | 80%     |
+| Statements | 80%     |
+
+Running `npm run test:coverage` below these thresholds will fail the suite. CI enforces coverage on every pull request via the `test` job in `.github/workflows/ci.yml`, which calls `npm run test:coverage` and uploads the `lcov` report to Codecov. The default `npm test` command does **not** collect coverage and will not fail on threshold violations — use `npm run test:coverage` locally when you want threshold enforcement.
+
+Focus coverage on critical paths: auth, payments, and data validation.
 
 ### Naming Conventions
 
@@ -269,6 +382,28 @@ The following dependencies require extra scrutiny during updates due to their se
 - Run security audit: `npm audit`
 - Test integration points manually
 - Verify no secrets are logged
+
+### Automated Dependency Updates
+
+Dependabot is configured in `.github/dependabot.yml` to open pull requests for outdated dependencies automatically, once per week on Mondays.
+
+**npm (Node.js backend)**
+
+- Directory: `/` (project root)
+- Label: `dependencies`, `infrastructure`, `javascript`
+- Limit: 5 open PRs at a time
+
+**Cargo (Rust smart contracts)**
+
+- Directory: `/contracts`
+- Label: `infra`, `easy`
+- Limit: 5 open PRs at a time
+- Grouped: all `soroban-*` crates are bundled into a single PR via the `soroban-deps` group, reducing noise from Soroban SDK patch releases.
+
+When Dependabot opens a Cargo PR, verify:
+1. Review the Cargo.lock diff and the crate's CHANGELOG for breaking changes.
+2. Run `cd contracts && cargo test --target x86_64-unknown-linux-gnu` locally to confirm the contracts still build and pass tests.
+3. Merge or close the PR — do **not** leave stale Dependabot PRs open longer than one sprint.
 
 ### Supply Chain Security
 

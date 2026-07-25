@@ -7,12 +7,12 @@ import { CID_REGEX } from "../utils/cidValidator";
 import { pinJson } from "../services/ipfs";
 import { serializeIpfsResult } from "../utils/ipfsSerializer";
 import {
-  getEvents,
+  queryEvents,
   getPlayerById,
   insertPlayerProfileHistory,
   queryPlayers,
   countPlayers,
-  upsertPlayer,
+  insertOrUpdatePlayer,
   deactivatePlayer,
   reactivatePlayer,
 } from "../db";
@@ -21,7 +21,7 @@ import { queryMilestones, updateProfile } from "../services/stellar";
 import { cacheGet, cacheSet, invalidatePlayerCache } from "../services/cache";
 import { ApiResponse } from "../types";
 import { ErrorCode } from "../utils/errorCodes";
-import { getTierMeta } from "../utils/tier";
+import { getTierMeta, tierName } from "../utils/tier";
 import { validateMinTier } from "../utils/minTierValidator";
 import { normalizePosition } from "../utils/positionAliases";
 import { dispatchEventWebhook } from "../services/webhooks";
@@ -89,7 +89,7 @@ export async function registerPlayer(
     // Write to DB immediately so GET /players/:playerId returns 200 without
     // waiting for the indexer to process the blockchain event (#282).
     const playerId = createId();
-    upsertPlayer({
+    insertOrUpdatePlayer({
       player_id: playerId,
       wallet: parsed.wallet,
       position: sanitizedPosition,
@@ -144,7 +144,7 @@ export async function getPlayer(
         res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
         return;
       }
-      const { tierName, tierDescription } = getTierMeta(row.progress_level as number);
+      const { tierName: tierNameMeta, tierDescription } = getTierMeta(row.progress_level as number);
       data = {
         player_id: row.player_id,
         wallet: row.wallet,
@@ -154,8 +154,9 @@ export async function getPlayer(
         progress_level: row.progress_level,
         created_at: row.created_at,
         is_active: row.is_active,
-        tierName,
+        tierName: tierNameMeta,
         tierDescription,
+        progress_tier_name: tierName(row.progress_level as number),
       };
       await cacheSet(cacheKey, data);
     }
@@ -198,7 +199,10 @@ export async function filterPlayers(
   try {
     const tierResult = validateMinTier(req.query.minTier);
     if (!tierResult.valid) {
-      res.status(400).json({ success: false, error: tierResult.error, code: ErrorCode.VALIDATION_ERROR });
+      // minTier is a valid integer but outside the 0–3 range → semantic error (422).
+      // A non-integer or wrong type is caught by Zod as a format error (400).
+      const isRangeError = typeof tierResult.error === 'string' && tierResult.error.includes('out of range');
+      res.status(isRangeError ? 422 : 400).json({ success: false, error: tierResult.error, code: ErrorCode.VALIDATION_ERROR });
       return;
     }
     const minTier = tierResult.tier;
@@ -245,6 +249,7 @@ export async function filterPlayers(
       metadataUri: row.metadata_uri,
       progress_level: row.progress_level,
       created_at: row.created_at,
+      progress_tier_name: tierName(row.progress_level as number),
       ...enrichPlayerResult(row.progress_level),
     }));
 
@@ -353,7 +358,7 @@ export async function getPlayerMilestones(
       return;
     }
     const { sortBy, order } = parsed.data;
-    const indexedMilestones = getEvents("milestone_approved")
+    const indexedMilestones = queryEvents("milestone_approved")
       .filter((e) => e.payload.player_id === playerId)
       .map((e) => ({ ...e.payload }));
     const onChainMilestones = await queryMilestones(playerId);

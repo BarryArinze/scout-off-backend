@@ -15,7 +15,11 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `SOROBAN_RPC_URL` | ✅ | e.g. `https://soroban-testnet.stellar.org` |
 | `NETWORK` | ✅ | `testnet` or `mainnet` |
 | `PINATA_API_KEY` / `PINATA_SECRET` | ✅ | IPFS upload credentials |
-| `DB_PATH` | — | SQLite file path (default: `scout-off.db`) |
+| `DB_DRIVER` | — | Database driver: `sqlite` (default) or `postgres` |
+| `DB_PATH` | — | SQLite file path (default: `scout-off.db`); only used when `DB_DRIVER=sqlite` |
+| `DATABASE_URL` | — (required when `DB_DRIVER=postgres`) | PostgreSQL connection string, e.g. `postgresql://user:pass@host:5432/db` |
+| `SSE_KEEPALIVE_INTERVAL_MS` | — | Keep-alive ping interval for SSE connections, in ms (default: `15000`) |
+| `SSE_MAX_CONNECTIONS` | — | Max concurrent SSE connections; `0` = unlimited (default: `0`) |
 | `PORT` | — | API port (default: `4000`) |
 | `LOG_LEVEL` | — | `debug` / `info` / `warn` / `error` |
 | `LOG_SKIP_PATHS` | — | Comma-separated paths requestLogger silences (default: health + metrics probes) |
@@ -69,13 +73,16 @@ It supports local paths, AWS S3, and Google Cloud Storage.
 
 ```bash
 # Local
-DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off npm run backup-db
 
 # AWS S3 (requires aws CLI and credentials in environment)
-DB_PATH=/data/scout-off.db BACKUP_DEST=s3://my-bucket/scout-off-backups bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=s3://my-bucket/scout-off-backups npm run backup-db
 
 # Google Cloud Storage (requires gsutil / gcloud SDK)
-DB_PATH=/data/scout-off.db BACKUP_DEST=gs://my-bucket/scout-off-backups bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=gs://my-bucket/scout-off-backups npm run backup-db
+
+# Equivalent direct invocation
+DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off bash scripts/backup-db.sh
 ```
 
 The script exits with code `1` and prints an error to stderr on any failure (file missing, CLI not found, copy error, or verification failure).
@@ -94,15 +101,20 @@ Run periodic drills against historical backups to confirm they remain restorable
 
 ```bash
 # Local backup + sidecar created at backup time
-bash scripts/backup-db.sh --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
+npm run backup-db -- --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
 
 # S3 (downloads backup and .counts sidecar automatically)
-bash scripts/backup-db.sh --verify-only s3://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
+npm run backup-db -- --verify-only s3://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
 
 # GCS
-bash scripts/backup-db.sh --verify-only gs://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
+npm run backup-db -- --verify-only gs://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
 
 # Direct verifier with explicit expected counts (e.g. if the sidecar was lost)
+EXPECT_PLAYERS=120 EXPECT_EVENTS=5400 EXPECT_MIGRATIONS=18 \
+  npm run verify-backup -- /var/backups/scout-off/scout-off-20250720T120000Z.db
+
+# Equivalent direct invocations
+bash scripts/backup-db.sh --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
 EXPECT_PLAYERS=120 EXPECT_EVENTS=5400 EXPECT_MIGRATIONS=18 \
   bash scripts/verify-backup.sh /var/backups/scout-off/scout-off-20250720T120000Z.db
 ```
@@ -190,6 +202,21 @@ Recommended metrics to track:
 - Event indexer lag (gap between latest on-chain event and last indexed event)
 - SQLite file size growth
 
+### Docker Compose Healthcheck
+
+The `docker-compose.yml` configures a healthcheck on the backend service that polls `/health/liveness` every 10 seconds:
+
+```yaml
+healthcheck:
+  test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/health/liveness"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 15s
+```
+
+Docker marks the container `(healthy)` once the first probe succeeds. The `start_period` of 15 seconds gives the Express server time to initialise before probes are counted as failures. The `--spider` flag tells `wget` to perform a HEAD-only request without downloading the response body, keeping healthcheck logs quiet. Run `docker compose ps` to confirm the container status shows `(healthy)` after startup.
+
 ## Multi-Sig Admin Operations
 
 High-value admin operations (withdraw fees, pause/unpause contract) require M-of-N multi-signature approval:
@@ -221,6 +248,46 @@ If any check fails, roll back to the previous build immediately.
 2. Tag the release: `git tag v<semver> && git push --tags`
 3. Build the Docker image (or run `npm run build` on the target server)
 4. Apply any pending DB migrations
-5. Restart the server process / redeploy the container
-6. Run smoke tests (see above)
+5. The deploy script handles starting the new process and flipping traffic automatically.
+6. Run smoke tests (see above) - this happens automatically in the staging pipeline.
 7. Monitor logs for 10 minutes post-deploy
+
+## Blue-Green Deployment Topology
+
+Staging uses a local blue-green deployment strategy to eliminate restart downtime.
+
+### Topology
+- **Process Manager**: PM2 manages two identical Node.js services named `scout-off-backend-blue` (port 4000) and `scout-off-backend-green` (port 4001).
+- **Reverse Proxy**: Nginx routes traffic to the active slot.
+- **State**: The currently active slot is stored in a `.active-slot` file in the deployment root.
+
+### Nginx Configuration Requirement
+To support dynamic traffic flipping, Nginx must be configured to use a dedicated upstream config block located at `/etc/nginx/conf.d/scout-off-upstream.conf`.
+
+1. Create the upstream config file:
+   ```bash
+   sudo touch /etc/nginx/conf.d/scout-off-upstream.conf
+   sudo chmod 666 /etc/nginx/conf.d/scout-off-upstream.conf
+   echo "upstream scout_off_backend { server 127.0.0.1:4000; }" > /etc/nginx/conf.d/scout-off-upstream.conf
+   ```
+2. In your main Nginx site config (e.g., `/etc/nginx/sites-available/scout-off`), use the upstream:
+   ```nginx
+   location / {
+       proxy_pass http://scout_off_backend;
+       # ... other proxy headers ...
+   }
+   ```
+
+### Manual Override & Rollback
+If you need to manually rollback traffic to the previously active slot:
+```bash
+# From the deployment root path:
+bash scripts/deploy-staging.sh . rollback
+```
+
+To manually view the PM2 processes:
+```bash
+pm2 status
+pm2 logs scout-off-backend-blue
+pm2 logs scout-off-backend-green
+```
