@@ -14,7 +14,7 @@ import { securityHeaders } from './middleware/securityHeaders';
 import { correlationId } from './middleware/correlationId';
 import { traceId } from './middleware/traceId';
 import { responseTime } from './middleware/responseTime';
-import { stellarHealth } from './services/stellar';
+import { stellarHealth, stellarBreaker } from './services/stellar';
 import { checkHealth } from './services/ipfs';
 import { API_PREFIX, API_V1_PREFIX } from './config';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
@@ -127,11 +127,15 @@ async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | '
   }
 
   if (config.stellarHealthCheckEnabled) {
-    try {
-      const stellarOk = await stellarHealth();
-      services.stellar = stellarOk ? 'ok' : 'unavailable';
-    } catch {
+    if (stellarBreaker.state === 'OPEN') {
       services.stellar = 'unavailable';
+    } else {
+      try {
+        const stellarOk = await stellarHealth();
+        services.stellar = stellarOk ? 'ok' : 'unavailable';
+      } catch {
+        services.stellar = 'unavailable';
+      }
     }
   } else {
     services.stellar = 'disabled';

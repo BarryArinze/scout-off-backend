@@ -13,13 +13,25 @@ import {
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 
+import { stellarBreaker } from '../utils/circuitBreaker';
+
 const tracer = trace.getTracer('scout-off-backend');
 
-const server = new SorobanRpc.Server(config.sorobanRpcUrl, {
+const rawServer = new SorobanRpc.Server(config.sorobanRpcUrl, {
   allowHttp: config.sorobanRpcUrl.startsWith('http://'),
 });
 
-export { server };
+const server = new Proxy(rawServer, {
+  get(target, prop, receiver) {
+    const value = Reflect.get(target, prop, receiver);
+    if (typeof value === 'function') {
+      return (...args: any[]) => stellarBreaker.execute(() => value.apply(target, args));
+    }
+    return value;
+  }
+});
+
+export { server, stellarBreaker };
 
 export function networkPassphrase(): string {
   return config.network === 'mainnet'
@@ -1199,6 +1211,82 @@ export async function registerValidatorOnChain(
           throw new ValidatorActionError('Validator is already registered on-chain', 'ALREADY_REGISTERED');
         }
         throw new ValidatorActionError('register_validator transaction failed on-chain', 'NETWORK_ERROR');
+      }
+
+      return { transactionId: hash };
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.setAttribute('error.type', (err as Error).name);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+
+export async function revokeValidatorOnChain(
+  validatorWallet: string,
+): Promise<RegisterValidatorResult> {
+  return tracer.startActiveSpan('stellar.revokeValidatorOnChain', async (span) => {
+    span.setAttribute('stellar.contract_function', 'revoke_validator');
+    try {
+      if (!validatorWallet) {
+        throw new PaymentError('Missing validatorWallet', 'INVALID_ACCOUNT');
+      }
+
+      const { getPlatformKeypair } = await import('../utils/signer');
+      const keypair = getPlatformKeypair();
+
+      const account = await server.getAccount(keypair.publicKey());
+      const contract = new Contract(config.contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: networkPassphrase(),
+      })
+        .addOperation(
+          contract.call('revoke_validator', Address.fromString(validatorWallet).toScVal()),
+        )
+        .setTimeout(30)
+        .build();
+
+      const simResult = await server.simulateTransaction(tx);
+
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        const errMsg = simResult.error ?? '';
+        if (errMsg.includes('#14') || /not.?registered/i.test(errMsg) || /already.?revoked/i.test(errMsg)) {
+          throw new ValidatorActionError('Validator is not registered or already revoked', 'ALREADY_REVOKED');
+        }
+        if (/unauthorized/i.test(errMsg)) {
+          throw new ValidatorActionError('Unauthorized: platform account cannot revoke this validator', 'UNAUTHORIZED');
+        }
+        throw new ValidatorActionError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
+      }
+
+      const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+      preparedTx.sign(keypair);
+
+      const sendResult = await server.sendTransaction(preparedTx);
+      if (sendResult.status === 'ERROR') {
+        throw new ValidatorActionError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
+      }
+
+      const hash = sendResult.hash;
+      span.setAttribute('stellar.tx_hash', hash);
+
+      let getResult = await server.getTransaction(hash);
+      while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+        await new Promise((r) => setTimeout(r, 1000));
+        getResult = await server.getTransaction(hash);
+      }
+
+      if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+        const resultMeta = ((getResult as unknown) as { resultMetaXdr?: string }).resultMetaXdr ?? '';
+        if (resultMeta.includes('#14') || /not.?registered/i.test(resultMeta) || /already.?revoked/i.test(resultMeta)) {
+          throw new ValidatorActionError('Validator is not registered or already revoked', 'ALREADY_REVOKED');
+        }
+        throw new ValidatorActionError('revoke_validator transaction failed on-chain', 'NETWORK_ERROR');
       }
 
       return { transactionId: hash };
