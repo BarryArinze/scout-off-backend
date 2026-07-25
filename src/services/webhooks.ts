@@ -6,6 +6,7 @@ import {
   WebhookSubscription,
 } from '../db';
 import { logger } from '../utils/logger';
+import { recordWebhookDelivery } from '../middleware/metrics';
 
 type WebhookRetryOptions = {
   retries?: number;
@@ -112,6 +113,7 @@ async function deliverToSubscription(
       ...RETRY_OPTIONS,
       secret: subscription.secret,
     });
+    recordWebhookDelivery('success');
   } catch (err) {
     const failureReason = err instanceof Error ? err.message : String(err);
     logger.warn(
@@ -125,5 +127,6 @@ async function deliverToSubscription(
       failureReason,
       attempts: RETRY_OPTIONS.retries,
     });
+    recordWebhookDelivery('dead_letter');
   }
 }

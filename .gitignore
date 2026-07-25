@@ -6,4 +6,5 @@ contracts/target/
 contracts/**/test_snapshots/
 coverage/
 BUILD_COMMIT
+.husky/_
 
