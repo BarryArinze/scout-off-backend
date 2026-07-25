@@ -79,7 +79,7 @@ export async function indexEvents(): Promise<void> {
 
   const fromLedger = fetchLastIndexedLedger();
 
-  const response = await server.queryEvents({
+  const response = await server.getEvents({
     startLedger: fromLedger || undefined,
     filters: [{ type: 'contract', contractIds: [config.contractId] }],
   });

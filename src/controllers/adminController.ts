@@ -6,7 +6,7 @@ import { getAllValidators, insertValidator, revokeValidatorRow, getValidatorByWa
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { logAuditEvent } from '../services/audit';
 import { verifyAuditChain } from '../utils/auditVerify';
-import { withdrawFees as stellarWithdrawFees, FeeWithdrawalError, FeeWithdrawalResult, pauseContractOnChain, unpauseContractOnChain, registerValidatorOnChain, ValidatorActionError } from '../services/stellar';
+import { withdrawFees as stellarWithdrawFees, FeeWithdrawalError, FeeWithdrawalResult, pauseContractOnChain, unpauseContractOnChain, registerValidatorOnChain, revokeValidatorOnChain, ValidatorActionError } from '../services/stellar';
 import { revokeToken } from '../services/tokenBlocklist';
 import config from '../config';
 import { logger } from '../utils/logger';
