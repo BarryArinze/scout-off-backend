@@ -34,6 +34,22 @@ if (!adminWalletValue) {
   }
 }
 
+// Validate PINATA_GATEWAY when set — it must be a valid HTTPS URL. An invalid
+// gateway would otherwise only surface as a runtime failure when resolving
+// IPFS content, with no clear indication of the misconfiguration.
+const pinataGatewayValue = process.env.PINATA_GATEWAY ?? '';
+if (pinataGatewayValue) {
+  let pinataGatewayIsHttps = false;
+  try {
+    pinataGatewayIsHttps = new URL(pinataGatewayValue).protocol === 'https:';
+  } catch {
+    pinataGatewayIsHttps = false;
+  }
+  if (!pinataGatewayIsHttps) {
+    throw new Error(`Invalid PINATA_GATEWAY: "${pinataGatewayValue}". Must be a valid HTTPS URL.`);
+  }
+}
+
 const ENV_LOG_LEVEL: Record<NodeEnv, LogLevel> = {
   development: 'debug',
   test: 'warn',
