@@ -15,6 +15,7 @@ import {
   insertOrUpdatePlayer,
   deactivatePlayer,
   reactivatePlayer,
+  countTrialOffersByPlayer,
 } from "../db";
 
 import { queryMilestones, updateProfile } from "../services/stellar";
@@ -53,6 +54,13 @@ export const filterSchema = z.object({
   minTier: z.coerce.number().int().min(0).max(3).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  /**
+   * Comma-separated list of field names to include in each player object.
+   * Unknown field names are silently ignored.
+   * When omitted, all fields are returned (backwards-compatible).
+   * Example: ?fields=player_id,position,region
+   */
+  fields: z.string().optional(),
 });
 
 /** POST /api/players/register */
@@ -176,7 +184,10 @@ export async function getPlayer(
       return;
     }
     res.set("ETag", etag);
-    res.json({ success: true, data });
+    // offerCount is appended after the ETag digest so it doesn't bust the cache
+    // every time an offer is submitted, while still being fresh on each request.
+    const offerCount = countTrialOffersByPlayer(String(data.player_id));
+    res.json({ success: true, data: { ...data, offerCount } });
   } catch (err) {
     next(err);
   }
@@ -188,6 +199,23 @@ interface FilterPlayersResult {
   page: number;
   pageSize: number;
   pages: number;
+}
+
+/**
+ * Return a copy of `obj` containing only the keys present in `allowedFields`.
+ * If `allowedFields` is null/empty the original object is returned unchanged.
+ */
+function projectFields(
+  obj: Record<string, unknown>,
+  allowedFields: Set<string>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const key of allowedFields) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      result[key] = obj[key];
+    }
+  }
+  return result;
 }
 
 /** GET /api/players?region=&position=&minTier= */
@@ -206,12 +234,18 @@ export async function filterPlayers(
       return;
     }
     const minTier = tierResult.tier;
-    const { region, position, page, pageSize } = filterSchema.parse(req.query);
+    const { region, position, page, pageSize, fields } = filterSchema.parse(req.query);
     const sanitizedRegion = region ? sanitizeInput(region) : undefined;
     const sanitizedPosition = position ? sanitizeInput(position) : undefined;
     const normalizedPosition = sanitizedPosition
       ? normalizePosition(sanitizedPosition)
       : undefined;
+
+    // Parse the ?fields= param into a Set for O(1) lookup.
+    // An empty param or absent param means "return all fields".
+    const requestedFields = fields
+      ? new Set(fields.split(',').map((f) => f.trim()).filter(Boolean))
+      : null;
 
     const cacheKey = `players:list:${JSON.stringify({
       region: sanitizedRegion ?? null,
@@ -223,7 +257,11 @@ export async function filterPlayers(
 
     const cached = await cacheGet<FilterPlayersResult>(cacheKey);
     if (cached) {
-      res.json({ success: true, ...cached });
+      // Apply field projection to the cached result when requested
+      const responseData = requestedFields
+        ? cached.data.map((p) => projectFields(p, requestedFields))
+        : cached.data;
+      res.json({ success: true, ...cached, data: responseData });
       return;
     }
 
@@ -266,7 +304,12 @@ export async function filterPlayers(
       resultCount: total,
     });
 
-    res.json({ success: true, ...result });
+    // Apply field projection after caching the full result so the cache always
+    // stores all fields (enabling different ?fields= requests to reuse it).
+    const responseData = requestedFields
+      ? enriched.map((p) => projectFields(p, requestedFields))
+      : enriched;
+    res.json({ success: true, ...result, data: responseData });
   } catch (err) {
     next(err);
   }

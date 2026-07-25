@@ -88,6 +88,7 @@ import {
   PaymentError,
   FeeWithdrawalError,
   ValidatorActionError,
+  updateProfile,
 } from '../../src/services/stellar';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any

@@ -19,6 +19,7 @@ import {
 } from "../controllers/playerController";
 import { getPlayerHistory } from "../controllers/playerHistoryController";
 import { acceptTrialOffer, rejectTrialOffer, rejectOfferSchema } from "../controllers/trialOfferController";
+import { getPlayerTokenHolders, buyPlayerToken } from "../controllers/playerTokenController";
 
 import { validateBody, validateQuery } from "../middleware/validate";
 import { requireRole, optionalAuth } from "../middleware/auth";
@@ -126,6 +127,38 @@ router.route("/:playerId/trial-offers/:offerId/reject")
     validateBody(rejectOfferSchema),
     rejectTrialOffer,
   )
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * GET /api/players/:playerId/tokens
+ *
+ * Return the list of token holders and their balances for the given player.
+ * Gated by the `player_tokens` feature flag — returns 404 when disabled.
+ *
+ * @param playerId {string} - The player's on-chain identifier
+ * @response 200 { success: true, data: { playerId, holders: [{ holder, tokens }], meta } }
+ * @response 404 { success: false, error: string } - Feature flag disabled
+ * @auth Bearer (optional — public read)
+ */
+router.route("/:playerId/tokens")
+  .get(optionalAuth, getPlayerTokenHolders)
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * POST /api/players/:playerId/tokens/buy
+ *
+ * Purchase Player Tokens for the given player (stub — no real XLM transfer).
+ * Gated by the `player_tokens` feature flag — returns 404 when disabled.
+ *
+ * @param playerId {string} - The player's on-chain identifier
+ * @body { amount: number, buyerWallet: string }
+ * @response 200 { success: true, data: { playerId, buyerWallet, amount, newBalance } }
+ * @response 400 { success: false, error: string } - Invalid amount
+ * @response 404 { success: false, error: string } - Feature flag disabled or player not found
+ * @auth Bearer (scout or player role required)
+ */
+router.route("/:playerId/tokens/buy")
+  .post(requireRole("scout"), buyPlayerToken)
   .all(methodNotAllowed(['POST']));
 
 export default router;
