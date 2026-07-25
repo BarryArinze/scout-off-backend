@@ -71,6 +71,11 @@ export function isEventRelevantToWallet(
     case 'trial_offer_logged':
       return p.scout === wallet || p.player_id === wallet;
 
+    case 'trial_offer_accepted':
+    case 'trial_offer_rejected':
+      // Notify the scout who made the offer and the player who responded.
+      return p.scout === wallet || p.player_id === wallet;
+
     case 'player_registered':
       return p.wallet === wallet || p.player_id === wallet;
 

@@ -13,13 +13,25 @@ import {
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 
+import { stellarBreaker } from '../utils/circuitBreaker';
+
 const tracer = trace.getTracer('scout-off-backend');
 
-const server = new SorobanRpc.Server(config.sorobanRpcUrl, {
+const rawServer = new SorobanRpc.Server(config.sorobanRpcUrl, {
   allowHttp: config.sorobanRpcUrl.startsWith('http://'),
 });
 
-export { server };
+const server = new Proxy(rawServer, {
+  get(target, prop, receiver) {
+    const value = Reflect.get(target, prop, receiver);
+    if (typeof value === 'function') {
+      return (...args: any[]) => stellarBreaker.execute(() => value.apply(target, args));
+    }
+    return value;
+  }
+});
+
+export { server, stellarBreaker };
 
 export function networkPassphrase(): string {
   return config.network === 'mainnet'
