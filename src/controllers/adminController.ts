@@ -12,6 +12,7 @@ import config from '../config';
 import { logger } from '../utils/logger';
 import { ErrorCode } from '../utils/errorCodes';
 import { proposeAction, approveAction, listPendingActions, getActionDetails } from '../services/adminMultiSig';
+import { withConcurrencyLimit } from '../utils/concurrency';
 import type { ApiResponse, EventRecord, ContractEventType } from '../types';
 
 // ─── Audit trail types & constants (#832) ─────────────────────────────────────
@@ -1096,7 +1097,7 @@ export interface ImportValidatorEntry {
   region?: string;
 }
 
-export type ImportResultStatus = 'registered' | 'duplicate' | 'invalid';
+export type ImportResultStatus = 'registered' | 'duplicate' | 'invalid' | 'pending_approval';
 
 export interface ImportValidatorResult {
   wallet: string;
@@ -1135,52 +1136,146 @@ export function parseCsvBody(text: string): ImportValidatorEntry[] {
 
 /**
  * Process a batch of ImportValidatorEntry items and return per-entry results.
- * Delegates registration to the same insertValidator() path used by the single-
- * registration endpoint so no registration logic is duplicated.
+ *
+ * Multi-sig gating:
+ *   - When ADMIN_THRESHOLD > 1, queues each valid row as a pending admin action
+ *     instead of registering immediately on-chain. Per-row status is "pending_approval".
+ *   - When ADMIN_THRESHOLD <= 1, calls registerValidatorOnChain() for each valid row
+ *     with a concurrency limit of 5 simultaneous calls.
+ *
+ * Database mutation ordering:
+ *   - DB insert (insertValidator) happens ONLY AFTER on-chain confirmation succeeds
+ *   - Prevents orphaned rows that don't reflect contract state
+ *   - Uses allSettled semantics so one failure doesn't abort the batch
  *
  * Duplicate detection:
  *   - A validator that already exists AND is not revoked → "duplicate"
  *   - A validator that was previously revoked is re-registered (same as single-
  *     registration, which also does INSERT OR REPLACE)
  */
-export function processBatch(
+export async function processBatch(
   entries: ImportValidatorEntry[],
   adminWallet: string,
-): ImportValidatorResult[] {
+): Promise<ImportValidatorResult[]> {
   const results: ImportValidatorResult[] = [];
-  // Track wallets already seen in this batch to handle intra-batch duplicates
   const seenInBatch = new Set<string>();
 
-  for (const entry of entries) {
+  // Split entries into two phases: validation, then registration/queueing
+  const validatedEntries: Array<{
+    entry: ImportValidatorEntry;
+    index: number;
+  }> = [];
+
+  // Phase 1: Validation (fast path, synchronous)
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     const { wallet, label, region } = entry;
 
-    // 1. Validate the address
+    // Check if wallet address is valid
     if (!isValidStellarAddress(wallet)) {
       logger.warn(`[admin] import_validator rejected — invalid address | admin=${adminWallet} target=${wallet}`);
-      results.push({ wallet, status: 'invalid', reason: 'invalid Stellar address', label, region });
+      results[i] = { wallet, status: 'invalid', reason: 'invalid Stellar address', label, region };
       continue;
     }
 
-    // 2. Check intra-batch duplicate
+    // Check intra-batch duplicate
     if (seenInBatch.has(wallet)) {
-      results.push({ wallet, status: 'duplicate', reason: 'duplicate within batch', label, region });
+      results[i] = { wallet, status: 'duplicate', reason: 'duplicate within batch', label, region };
       continue;
     }
 
-    // 3. Check DB for an already-active (non-revoked) registration
+    // Check DB for already-active (non-revoked) registration
     const existing = getValidatorByWallet(wallet);
     if (existing && existing.revoked_at === null) {
-      results.push({ wallet, status: 'duplicate', reason: 'already registered', label, region });
+      results[i] = { wallet, status: 'duplicate', reason: 'already registered', label, region };
       seenInBatch.add(wallet);
       continue;
     }
 
-    // 4. Register — reuses the same insertValidator path as the single endpoint
-    logger.info(`[admin] action=import_register_validator admin=${adminWallet} target=${wallet}`);
-    // TODO: invoke register_validator on Soroban contract (same as single-registration endpoint)
-    insertValidator(wallet);
+    // Passes validation
     seenInBatch.add(wallet);
-    results.push({ wallet, status: 'registered', label, region });
+    validatedEntries.push({ entry, index: i });
+  }
+
+  // Phase 2: Registration/Queueing (async, with multi-sig gating and concurrency limit)
+  if (validatedEntries.length > 0) {
+    if (config.adminThreshold > 1) {
+      // Multi-sig: queue each validated entry as a pending admin action
+      for (const { entry, index } of validatedEntries) {
+        const { wallet, label, region } = entry;
+        try {
+          const proposal = proposeAction(
+            'bulk_validator_import',
+            { wallet, label: label || undefined, region: region || undefined },
+            adminWallet,
+          );
+          // Status depends on whether threshold was already met (immediate) or pending
+          const status = proposal.status === 'immediate' ? 'registered' : 'pending_approval';
+          logger.info(
+            `[admin] action=import_register_validator_multisig admin=${adminWallet} target=${wallet} status=${status}`,
+          );
+          results[index] = {
+            wallet,
+            status: status as ImportResultStatus,
+            label,
+            region,
+          };
+        } catch (err) {
+          logger.error(`[admin] import_validator_multisig error | admin=${adminWallet} target=${wallet} error=${err}`);
+          results[index] = {
+            wallet,
+            status: 'invalid',
+            reason: `Multi-sig queuing failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+            label,
+            region,
+          };
+        }
+      }
+    } else {
+      // Single-admin: call registerValidatorOnChain with concurrency limit of 5
+      const tasks = validatedEntries.map(({ entry, index }) => {
+        return async () => {
+          const { wallet, label, region } = entry;
+          try {
+            logger.info(`[admin] action=import_register_validator admin=${adminWallet} target=${wallet}`);
+            const result = await registerValidatorOnChain(wallet);
+
+            // DB insert ONLY after on-chain confirmation succeeds
+            insertValidator(wallet, result.transactionId);
+
+            logger.info(
+              `[admin] action=import_register_validator_success admin=${adminWallet} target=${wallet} txid=${result.transactionId}`,
+            );
+            results[index] = {
+              wallet,
+              status: 'registered',
+              label,
+              region,
+            };
+          } catch (err) {
+            logger.error(
+              `[admin] import_validator error | admin=${adminWallet} target=${wallet} error=${err instanceof Error ? err.message : 'unknown'}`,
+            );
+            // Do NOT insert into DB if on-chain call fails
+            results[index] = {
+              wallet,
+              status: 'invalid',
+              reason:
+                err instanceof ValidatorActionError
+                  ? `On-chain registration failed: ${err.code}`
+                  : `On-chain registration failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+              label,
+              region,
+            };
+          }
+        };
+      });
+
+      // Execute with concurrency limit of 5
+      await withConcurrencyLimit(tasks, 5);
+
+      // Results are already populated by each task
+    }
   }
 
   return results;
@@ -1248,20 +1343,26 @@ export async function importValidators(req: Request, res: Response, next: NextFu
       return;
     }
 
-    const results = processBatch(entries, adminWallet);
+    const results = await processBatch(entries, adminWallet);
 
     const registered = results.filter((r) => r.status === 'registered').length;
+    const pending = results.filter((r) => r.status === 'pending_approval').length;
     const duplicates = results.filter((r) => r.status === 'duplicate').length;
     const invalid = results.filter((r) => r.status === 'invalid').length;
 
     logger.info(
-      `[admin] action=import_validators admin=${adminWallet} total=${results.length} registered=${registered} duplicates=${duplicates} invalid=${invalid}`,
+      `[admin] action=import_validators admin=${adminWallet} total=${results.length} registered=${registered} pending=${pending} duplicates=${duplicates} invalid=${invalid}`,
     );
 
     logAuditEvent({
       action: 'bulk_validator_import',
       adminWallet,
-      queryParams: { total: results.length, registered, duplicates, invalid },
+      queryParams: {
+        total: results.length,
+        registered: registered + pending,
+        duplicates,
+        invalid,
+      },
       timestamp: new Date().toISOString(),
     });
 
@@ -1271,7 +1372,7 @@ export async function importValidators(req: Request, res: Response, next: NextFu
         results,
         summary: {
           total: results.length,
-          registered,
+          registered: registered + pending,
           duplicates,
           invalid,
         },
