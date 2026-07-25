@@ -279,7 +279,10 @@ sequenceDiagram
 
 ### 1. Install Dependencies
 
+This project pins its Node.js version in [`.nvmrc`](.nvmrc). If you use [nvm](https://github.com/nvm-sh/nvm), run `nvm use` before installing to avoid version-mismatch errors:
+
 ```bash
+nvm use
 npm install
 ```
 
@@ -446,12 +449,13 @@ This section covers everything you need to get the backend running locally.
 
 ### Prerequisites
 
-- Node.js ≥ 18
+- Node.js ≥ 18 (the exact version this project targets is pinned in [`.nvmrc`](.nvmrc); run `nvm use` if you use [nvm](https://github.com/nvm-sh/nvm))
 - npm ≥ 9
 
 ### Install Dependencies
 
 ```bash
+nvm use   # switches to the Node version pinned in .nvmrc
 npm install
 ```
 
