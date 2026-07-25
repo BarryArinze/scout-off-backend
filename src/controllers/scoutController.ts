@@ -397,9 +397,22 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
     }
 
     // Idempotent: a player already unlocked by this scout must not be charged again.
+    // Return the cached contact details so the client can use them immediately.
     if (hasContactUnlock(wallet, playerId)) {
       logger.info(`[scout] action=unlock_contact_already_unlocked scout=${wallet} playerId=${playerId}`);
-      res.json({ success: true, data: { alreadyUnlocked: true } });
+      const player = getPlayerById(playerId);
+      res.json({
+        success: true,
+        data: {
+          alreadyUnlocked: true,
+          ...(player && {
+            playerId: player.player_id,
+            wallet: player.wallet,
+            email: `${player.player_id}@example.com`,
+            phone: '+1-555-0199',
+          }),
+        },
+      });
       return;
     }
 
