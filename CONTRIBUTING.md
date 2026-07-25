@@ -46,6 +46,24 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
    - No security vulnerabilities: `npm audit`
    - Environment is set up: `cp .env.example .env`
 
+### Pre-commit Hook
+
+`npm install` runs the `prepare` script, which installs a [Husky](https://typicode.github.io/husky/)
+git hook at `.husky/pre-commit`. From then on, every `git commit` automatically:
+
+1. Runs `npx lint-staged`, which applies `eslint --fix` and `prettier --write` to the
+   **staged** `*.ts` files only (configured via the `lint-staged` key in `package.json`).
+2. Runs `npx tsc --noEmit` to type-check the project and catch TypeScript errors.
+
+If either step fails, the commit is blocked so broken code never lands in the history —
+this is the same lint/type-check CI already enforces, just moved earlier so you find out
+before pushing instead of after. Because `lint-staged` only touches files you've staged,
+the hook normally finishes in a few seconds even on a large repo.
+
+To skip the hook in an exceptional case (e.g. a WIP commit on a personal branch), use
+`git commit --no-verify` — but note CI still runs the full lint/type-check, so the commit
+will need to be fixed before merging regardless.
+
 ## Contribution Workflow
 
 ### 1. Claim an Issue
