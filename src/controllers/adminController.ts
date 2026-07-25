@@ -344,9 +344,31 @@ export async function registerValidator(req: Request, res: Response, next: NextF
     return;
   }
 
+  // Multi-sig threshold check: propose when threshold > 1.
+  if (!config.adminWallets.includes(adminWallet)) {
+    res.status(403).json({ success: false, error: 'Insufficient permissions' });
+    return;
+  }
+
+  const proposal = proposeAction('pause_contract', { validatorWallet, action: 'register_validator' }, adminWallet);
+  if (proposal.status === 'proposed') {
+    logAuditEvent({
+      action: 'validator_registration',
+      adminWallet,
+      queryParams: { validatorWallet, actionId: proposal.actionId, outcome: 'multisig_pending' },
+      timestamp: new Date().toISOString(),
+      contractAction: 'register_validator',
+    });
+    res.status(202).json({
+      success: true,
+      message: `Validator registration proposed, awaiting ${config.adminThreshold - 1} more admin signature(s)`,
+      data: { actionId: proposal.actionId, collectedSignatures: 1, requiredSignatures: config.adminThreshold },
+    });
+    return;
+  }
+
   try {
     logger.info(`[admin] action=register_validator admin=${adminWallet} target=${validatorWallet}`);
-    // Audit the attempt before submitting the on-chain transaction (pre-transaction state).
     logAuditEvent({
       action: 'validator_registration',
       adminWallet,
@@ -357,8 +379,7 @@ export async function registerValidator(req: Request, res: Response, next: NextF
 
     const result = await registerValidatorOnChain(validatorWallet);
 
-    // Only mutate the local row once the chain has confirmed the register —
-    // never mark it active locally while the contract call is still in flight.
+    // Only mutate the local row once the chain has confirmed the register.
     insertValidator(validatorWallet, result.transactionId);
 
     logAuditEvent({
@@ -422,20 +443,42 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
     return;
   }
 
-  try {
-    // Short-circuit on already-revoked local state before touching the chain.
-    const existing = getValidatorByWallet(validatorWallet);
-    if (existing?.revoked_at != null) {
-      res.status(409).json({
-        success: false,
-        error: `Validator ${validatorWallet} is already revoked`,
-        code: ErrorCode.CONFLICT,
-      });
-      return;
-    }
+  // Multi-sig threshold check.
+  if (!config.adminWallets.includes(adminWallet)) {
+    res.status(403).json({ success: false, error: 'Insufficient permissions' });
+    return;
+  }
 
+  // Short-circuit on already-revoked local state before touching the chain.
+  const existing = getValidatorByWallet(validatorWallet);
+  if (existing?.revoked_at != null) {
+    res.status(409).json({
+      success: false,
+      error: `Validator ${validatorWallet} is already revoked`,
+      code: ErrorCode.CONFLICT,
+    });
+    return;
+  }
+
+  const proposal = proposeAction('pause_contract', { validatorWallet, action: 'revoke_validator' }, adminWallet);
+  if (proposal.status === 'proposed') {
+    logAuditEvent({
+      action: 'validator_revocation',
+      adminWallet,
+      queryParams: { validatorWallet, actionId: proposal.actionId, outcome: 'multisig_pending' },
+      timestamp: new Date().toISOString(),
+      contractAction: 'revoke_validator',
+    });
+    res.status(202).json({
+      success: true,
+      message: `Validator revocation proposed, awaiting ${config.adminThreshold - 1} more admin signature(s)`,
+      data: { actionId: proposal.actionId, collectedSignatures: 1, requiredSignatures: config.adminThreshold },
+    });
+    return;
+  }
+
+  try {
     logger.info(`[admin] action=revoke_validator admin=${adminWallet} target=${validatorWallet}`);
-    // Audit the attempt before submitting the on-chain transaction (pre-transaction state).
     logAuditEvent({
       action: 'validator_revocation',
       adminWallet,
@@ -446,8 +489,7 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
 
     const result = await revokeValidatorOnChain(validatorWallet);
 
-    // Only mutate the local row once the chain has confirmed the revoke —
-    // never mark revoked locally while the contract call is still in flight.
+    // Only mutate the local row once the chain has confirmed the revoke.
     revokeValidatorRow(validatorWallet, result.transactionId);
 
     logAuditEvent({

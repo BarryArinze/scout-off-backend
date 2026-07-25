@@ -9,6 +9,10 @@ import { setIpReputationController, getIpReputationController } from '../control
 import { requireRole } from '../middleware/auth';
 import { ipAllowlistMiddleware } from '../middleware/ipAllowlist';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
+import { rateLimit } from '../middleware/rateLimit';
+
+/** Stricter rate limit for bulk import — 5 requests per minute per IP. */
+const importRateLimit = rateLimit({ windowMs: 60_000, max: 5 });
 
 const router = Router();
 
@@ -227,6 +231,7 @@ router.post(
  */
 router.post(
   '/players/import',
+  importRateLimit,
   requireRole('admin'),
   express.text({ type: ['text/csv', 'text/plain'], limit: '1mb' }),
   importPlayers,
