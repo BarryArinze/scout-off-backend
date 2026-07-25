@@ -47,3 +47,23 @@ export async function getActiveSubscription(scoutWallet: string): Promise<Active
 
   return { active, tier: active ? tier : null, expiresAt };
 }
+
+/** Default grace period in hours after subscription expiry before access is revoked. */
+export const SUBSCRIPTION_GRACE_PERIOD_HOURS = 24;
+
+/**
+ * Determines if a subscription is still considered active, accounting for a
+ * grace period after the nominal expiry timestamp.
+ *
+ * @param expiresAt - Unix-second expiry timestamp, or null for no subscription.
+ * @param gracePeriodHours - Hours of grace period after expiry (default: SUBSCRIPTION_GRACE_PERIOD_HOURS).
+ * @returns true if the subscription is active or within the grace period.
+ */
+export function isActive(
+  expiresAt: number | null,
+  gracePeriodHours: number = SUBSCRIPTION_GRACE_PERIOD_HOURS,
+): boolean {
+  if (expiresAt === null) return false;
+  const now = Math.floor(Date.now() / 1000);
+  return now <= expiresAt + gracePeriodHours * 3600;
+}
