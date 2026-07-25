@@ -8,6 +8,7 @@ import {
   updatePlayerProgress,
   queryEvents,
   insertPendingMilestone,
+  rollbackEventsFromLedger,
 } from '../db';
 import { dispatchEventWebhook } from './webhooks';
 import { logger } from '../utils/logger';
@@ -19,6 +20,11 @@ export let indexerLedgerLag = 0;
 /** Threshold in ledgers above which a warning is logged. Configurable via INDEXER_LAG_WARN_THRESHOLD. */
 function getLagWarnThreshold(): number {
   return parseInt(process.env.INDEXER_LAG_WARN_THRESHOLD ?? '100', 10);
+}
+
+/** Configurable finality margin delays treating the most recent N ledgers as immutable. */
+function getFinalityMargin(): number {
+  return parseInt(process.env.INDEXER_FINALITY_MARGIN ?? '10', 10);
 }
 
 // ─── Payload normalisation ────────────────────────────────────────────────────
@@ -74,17 +80,19 @@ function onAfterInsert(_eventId: string): void { /* hook */ }
 export async function indexEvents(): Promise<void> {
   const db = getDb();
   const insert = db.prepare(
-    'INSERT OR IGNORE INTO events (type, ledger, tx_hash, payload, created_at) VALUES (?, ?, ?, ?, ?)'
+    'INSERT OR IGNORE INTO events (type, ledger, ledger_hash, tx_hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
   );
 
-  const fromLedger = fetchLastIndexedLedger();
+  const lastIndexed = fetchLastIndexedLedger();
+  const margin = getFinalityMargin();
+  const fromLedger = Math.max(0, lastIndexed > margin ? lastIndexed - margin : 0);
 
   const response = await server.queryEvents({
     startLedger: fromLedger || undefined,
     filters: [{ type: 'contract', contractIds: [config.contractId] }],
   });
 
-  const lagAfterPoll = Math.max(0, response.latestLedger - (fromLedger > 0 ? fromLedger - 1 : response.latestLedger));
+  const lagAfterPoll = Math.max(0, response.latestLedger - (lastIndexed > 0 ? lastIndexed - 1 : response.latestLedger));
   indexerLedgerLag = lagAfterPoll;
   const threshold = getLagWarnThreshold();
   if (lagAfterPoll > threshold) {
@@ -95,17 +103,39 @@ export async function indexEvents(): Promise<void> {
 
   const webhookEvents: Array<{ type: string; payload: unknown }> = [];
 
-  const insertMany = db.transaction((events: typeof response.events) => {
+  const processBatch = db.transaction((events: typeof response.events) => {
+    // 1. Reorg detection
+    const overlappingEvents = db.prepare('SELECT ledger, ledger_hash FROM events WHERE ledger >= ?').all(fromLedger) as { ledger: number, ledger_hash: string | null }[];
+    const existingHashes = new Map<number, string>();
+    for (const row of overlappingEvents) {
+      if (row.ledger_hash) existingHashes.set(row.ledger, row.ledger_hash);
+    }
+
+    let reorgLedger: number | null = null;
+    for (const raw of events) {
+      const existingHash = existingHashes.get(raw.ledger);
+      const incomingHash = (raw as any).ledgerHash ?? (raw as any).pagingToken ?? raw.txHash;
+      if (existingHash && incomingHash && existingHash !== incomingHash) {
+        reorgLedger = raw.ledger;
+        break;
+      }
+    }
+
+    if (reorgLedger !== null) {
+      logger.warn(`[indexer] Reorg detected at ledger ${reorgLedger}! Rolling back...`);
+      rollbackEventsFromLedger(reorgLedger);
+    }
+
+    // 2. Insert events
     for (const raw of events) {
       const type = raw.topic[0]?.value() as string;
       const payload = normalizePayload((raw.value?.value() as unknown as Record<string, unknown>) ?? {});
       const eventId = normalizeEventId(config.contractId, raw.ledger, raw.txHash);
-      // Use ledger close time when available (seconds → ms), otherwise index time.
-      const createdAt = raw.ledgerClosedAt
-        ? new Date(raw.ledgerClosedAt).getTime()
-        : Date.now();
+      const createdAt = raw.ledgerClosedAt ? new Date(raw.ledgerClosedAt).getTime() : Date.now();
+      const ledgerHash = (raw as any).ledgerHash ?? (raw as any).pagingToken ?? raw.txHash;
+
       onBeforeInsert(eventId);
-      insert.run(type, raw.ledger, raw.txHash, JSON.stringify(payload), createdAt);
+      insert.run(type, raw.ledger, ledgerHash, raw.txHash, JSON.stringify(payload), createdAt);
       onAfterInsert(eventId);
 
       if (type === 'player_registered') {
@@ -118,7 +148,6 @@ export async function indexEvents(): Promise<void> {
           created_at: raw.ledger,
         });
       } else if (type === 'milestone_submitted') {
-        // Insert into pending_milestones
         const milestoneId = payload.milestone_id as string;
         const playerId = payload.player_id as string;
         const validatorWallet = payload.validator as string;
@@ -132,11 +161,6 @@ export async function indexEvents(): Promise<void> {
       } else if (type === 'milestone_approved') {
         const playerId = payload.player_id as string;
         if (playerId) {
-          // Tier promotion (#359): derive the player's tier from the total number
-          // of approved milestones now recorded for them, rather than trusting a
-          // progress_level field on the event payload. The just-inserted event is
-          // already part of this count (same transaction), and replays are safe
-          // because the events table dedups on tx_hash.
           const approvedMilestoneCount = queryEvents('milestone_approved').filter(
             (e) => e.payload.player_id === playerId,
           ).length;
@@ -145,9 +169,13 @@ export async function indexEvents(): Promise<void> {
         webhookEvents.push({ type, payload });
       }
     }
+
+    // 3. Update last indexed ledger safely inside the transaction!
+    const latest = events.at(-1)!;
+    persistLastIndexedLedger(latest.ledger + 1);
   });
 
-  insertMany(response.events);
+  processBatch(response.events);
 
   for (const { type, payload } of webhookEvents) {
     dispatchEventWebhook(type, payload).catch((err: unknown) => {
@@ -156,7 +184,6 @@ export async function indexEvents(): Promise<void> {
   }
 
   const latest = response.events.at(-1)!;
-  persistLastIndexedLedger(latest.ledger + 1);
   indexerLedgerLag = Math.max(0, response.latestLedger - latest.ledger);
 }
 
