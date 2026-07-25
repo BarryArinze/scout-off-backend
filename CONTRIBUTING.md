@@ -5,6 +5,7 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
 ## Table of Contents
 
 - [Getting Started](#getting-started)
+- [Seeding the Database](#seeding-the-database)
 - [Contribution Workflow](#contribution-workflow)
 - [Code Quality Standards](#code-quality-standards)
 - [Security & Dependency Review](#security--dependency-review)
@@ -45,6 +46,97 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
    - Linting passes: `npm run lint`
    - No security vulnerabilities: `npm audit`
    - Environment is set up: `cp .env.example .env`
+
+## Seeding the Database
+
+New contributors don't need to manually create players, events, or
+subscriptions to start testing the API — `scripts/seed.ts` populates the
+local SQLite database with a realistic sample dataset in one command.
+
+### Running the seed
+
+```bash
+npm run seed
+# or equivalently:
+npx ts-node --project tsconfig.scripts.json scripts/seed.ts
+```
+
+This connects to the database at `DB_PATH` (default: `scout-off.db`),
+runs any pending migrations, and inserts the sample rows described below.
+
+### What gets seeded
+
+| Data                 | Count | Details                                                                          |
+| -------------------- | ----- | --------------------------------------------------------------------------------- |
+| Players               | 5     | One per region (West Africa, East Africa, South America, Europe, Southeast Asia) |
+| Positions             | 5     | Forward, Midfielder, Defender, Goalkeeper, Winger                                |
+| Progress tiers        | 0–3   | One player at each tier level (0, 1, 1, 2, 3), showcasing the full tier model     |
+| Milestone events      | 3     | `performance`, `identity`, and `trial_offer` milestones (`milestone_approved`)   |
+| Scout subscriptions   | 2     | One `premium` (90 days) and one `basic` (30 days), both active                   |
+| Contact unlocks       | 2     | Scout Alpha → `seed-player-001`, Scout Beta → `seed-player-003`                  |
+
+The full player/scout wallet list (with the exact seed values) lives in
+the comment block and constant declarations at the top of
+[`scripts/seed.ts`](scripts/seed.ts). At the time of writing, the seeded
+wallets used for manual API testing are:
+
+| Role                   | Wallet                                                    |
+| ----------------------- | ---------------------------------------------------------- |
+| `seed-player-001` (Forward, West Africa)   | `GAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZFAZQXNK3BFMN7XRVGB` |
+| `seed-player-003` (Defender, South America) | `GCRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZFAZQXNK3BFMN7X` |
+| Scout Alpha (`premium` subscription)        | `GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE` |
+| Scout Beta (`basic` subscription)           | `GHAJBGZFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVB` |
+
+### Example requests against seeded data
+
+Once seeded, the server (`npm run dev`) exposes the sample data through
+the normal API — no manual setup required for read endpoints:
+
+```bash
+# List all players
+curl http://localhost:4000/api/players
+
+# Filter by region and minimum tier
+curl "http://localhost:4000/api/players?region=West%20Africa&minTier=2"
+
+# Fetch a specific seeded player and their milestone history
+curl http://localhost:4000/api/players/seed-player-003
+curl http://localhost:4000/api/players/seed-player-001/milestones
+```
+
+Scout-facing endpoints require a Bearer token for the seeded scout wallet
+(see `POST /auth/challenge` and `POST /auth/token` in
+[`BACKEND_API_DOCS.md`](BACKEND_API_DOCS.md) for how to mint one locally),
+for example:
+
+```bash
+# Scout Alpha's subscription status (premium, seeded active)
+curl http://localhost:4000/api/scouts/GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE/subscription \
+  -H "Authorization: Bearer <scout-jwt-for-GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE>"
+
+# Contacts Scout Alpha has already unlocked (seed-player-001)
+curl http://localhost:4000/api/scouts/GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE/contacts \
+  -H "Authorization: Bearer <scout-jwt-for-GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE>"
+```
+
+### Idempotency
+
+The seed script is **idempotent** — every player is keyed by a stable
+`player_id` and every event by a stable `tx_hash`, both enforced by
+`UNIQUE`/primary-key constraints. Re-running `npm run seed` against an
+already-seeded database skips rows that already exist instead of creating
+duplicates or erroring, so it's always safe to run again (e.g. after
+pulling `main` or restarting your dev environment).
+
+### Resetting the seed
+
+To start from a clean slate, delete the SQLite database file and re-run
+the seed:
+
+```bash
+rm scout-off.db   # or whatever DB_PATH points at in your .env
+npm run seed
+```
 
 ## Contribution Workflow
 
