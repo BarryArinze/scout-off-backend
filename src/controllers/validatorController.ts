@@ -5,14 +5,14 @@ import { pinJson } from '../services/ipfs';
 import { getPendingMilestones as getPendingMilestonesFromDb } from '../db';
 import { invalidateMilestoneCache } from '../services/cache';
 import { recordAudit } from '../utils/audit';
-import { isValidEvidenceUri } from '../utils/uriValidator';
+import { isValidMetadataUri, URI_VALIDATION_ERROR } from '../utils/uriValidator';
 
-export { isValidEvidenceUri };
+export { isValidMetadataUri as isValidEvidenceUri };
 
 export const milestoneSchema = z.object({
   playerId: z.string().min(1),
   milestoneType: z.enum(['identity', 'performance', 'trial_offer']),
-  evidenceUri: z.string().min(1).refine(isValidEvidenceUri, 'evidenceUri must be a valid IPFS (ipfs://) or HTTPS URI'),
+  evidenceUri: z.string().min(1).refine(isValidMetadataUri, URI_VALIDATION_ERROR),
 });
 
 export const pendingQuerySchema = z.object({
