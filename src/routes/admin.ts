@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import express from 'express';
-import { getStats, getAllEvents, getFeeSummary, listValidators, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, introspectToken, revokeTokenController, reindex, getValidatorStatsEndpoint, getAuditLog, getAuditChainVerification, importValidators, getPendingActions, getPendingActionById, approvePendingAction } from '../controllers/adminController';
+import { getStats, getAllEvents, getFeeSummary, listValidators, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, introspectToken, revokeTokenController, reindex, getValidatorStatsEndpoint, getAuditLog, getAuditChainVerification, importValidators, getPendingActions, getPendingActionById, approvePendingAction, getAuditTrail } from '../controllers/adminController';
 import { importPlayers } from '../controllers/adminPlayerImportController';
 import { getFeatureFlags, updateFeatureFlag } from '../controllers/featureFlagsController';
 import { exportEvents } from '../controllers/exportController';
@@ -97,6 +97,22 @@ router.route('/fees')
  */
 router.route('/audit')
   .get(requireRole('admin'), getAuditLog)
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * GET /api/admin/audit/trail
+ *
+ * Returns a paginated, event-type-filtered audit trail in the canonical
+ * AuditEntry shape { id, event_type, actor_wallet, target_id, metadata,
+ * created_at, hash }. Accepts ?eventType=, ?from=, ?to= (ISO 8601),
+ * ?page=, ?pageSize= (#832).
+ *
+ * @response 200 { success: true, data: AuditEntry[], total, page, pageSize }
+ * @response 400 { success: false, error: string } - Invalid eventType or date range
+ * @auth Bearer (admin role required)
+ */
+router.route('/audit/trail')
+  .get(requireRole('admin'), getAuditTrail)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
 /**
