@@ -38,6 +38,17 @@ jobs:
         run: cargo build --target wasm32-unknown-unknown --release
         working-directory: contracts
 
-      - name: Run contract tests
-        run: cargo test --workspace --tests
+      - name: Run unit tests
+        run: cargo test --workspace --lib
+        working-directory: contracts
+
+      # Property-based invariant fuzz tests live in each contract's tests/ directory.
+      # PROPTEST_CASES controls the number of random inputs per test; the default is
+      # 10 000 which matches the in-code ProptestConfig::with_cases values.  CI can
+      # override this to a lower number (e.g. 256) for faster feedback on PRs while
+      # keeping the full 10 000 run available locally and on nightly.
+      - name: Run invariant fuzz tests
+        env:
+          PROPTEST_CASES: ${{ vars.PROPTEST_CASES || '10000' }}
+        run: cargo test --workspace --tests -- invariants
         working-directory: contracts
