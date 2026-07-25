@@ -220,7 +220,8 @@ Filter players by region, position, and minimum verified tier. No auth required.
       "wallet": "GABC...XYZ",
       "position": "Midfielder",
       "region": "West Africa",
-      "progress_level": 2
+      "progress_level": 2,
+      "progress_tier_name": "Performance Milestones"
     }
   ],
   "total": 1,
@@ -228,6 +229,13 @@ Filter players by region, position, and minimum verified tier. No auth required.
   "pageSize": 20
 }
 ```
+
+**Response fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `progress_level` | integer | Numeric progress tier (0–3) |
+| `progress_tier_name` | string | Human-readable tier name: `Unverified`, `Verified Identity`, `Performance Milestones`, or `Elite Tier` |
 
 **Error `400`** — invalid `minTier`
 
@@ -261,6 +269,7 @@ Retrieve a single player profile. No auth required.
     "position": "Midfielder",
     "region": "West Africa",
     "progress_level": 2,
+    "progress_tier_name": "Performance Milestones",
     "tierName": "tier.2.name",
     "tierDescription": "tier.2.description"
   }
