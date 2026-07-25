@@ -1,4 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
+import express from 'express';
+import request from 'supertest';
 import { rateLimit, walletRateLimit } from '../../src/middleware/rateLimit';
 
 // ── Unit tests for rateLimit middleware ──────────────────────────────────────
@@ -137,3 +139,83 @@ describe('walletRateLimit middleware', () => {
   });
 });
 
+
+// ── X-Forwarded-For / trusted-proxy tests ────────────────────────────────────
+//
+// Express resolves req.ip from X-Forwarded-For when `trust proxy` is
+// configured on the app (app.set('trust proxy', N)).  These tests spin up a
+// minimal Express app that mirrors the production app.set() call so we can
+// verify the rate-limiter uses the correct client IP in each proxy scenario.
+
+/**
+ * Build a minimal Express app with `trust proxy` set to `trustedProxyCount`
+ * and a single GET /ping route protected by the rateLimit middleware.
+ *
+ * The handler echoes back the resolved req.ip so tests can assert on it.
+ */
+function makeProxyApp(trustedProxyCount: number, max = 2) {
+  const app = express();
+  app.set('trust proxy', trustedProxyCount);
+  const mw = rateLimit({ windowMs: 60_000, max });
+  app.get('/ping', mw, (req, res) => {
+    res.json({ ip: req.ip, status: 'ok' });
+  });
+  return app;
+}
+
+describe('rateLimit middleware — X-Forwarded-For / trusted proxy', () => {
+  it('uses the socket IP when no X-Forwarded-For header is present', async () => {
+    const app = makeProxyApp(0, 3);
+
+    const res = await request(app).get('/ping');
+    expect(res.status).toBe(200);
+    // supertest connects via loopback; req.ip should be the loopback address
+    expect(res.body.ip).toMatch(/^(::1|::ffff:127\.0\.0\.1|127\.0\.0\.1)$/);
+  });
+
+  it('uses the X-Forwarded-For IP when TRUSTED_PROXY_COUNT=1', async () => {
+    const app = makeProxyApp(1, 3);
+
+    const res = await request(app)
+      .get('/ping')
+      .set('X-Forwarded-For', '1.2.3.4');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ip).toBe('1.2.3.4');
+  });
+
+  it('tracks two different X-Forwarded-For IPs independently', async () => {
+    // max=1 per IP; two different clients should each get their own counter
+    const app = makeProxyApp(1, 1);
+
+    // First request from 10.0.0.1 — should pass
+    const r1 = await request(app).get('/ping').set('X-Forwarded-For', '10.0.0.1');
+    expect(r1.status).toBe(200);
+
+    // First request from 10.0.0.2 — different IP, should also pass
+    const r2 = await request(app).get('/ping').set('X-Forwarded-For', '10.0.0.2');
+    expect(r2.status).toBe(200);
+
+    // Second request from 10.0.0.1 — same IP, limit exceeded
+    const r3 = await request(app).get('/ping').set('X-Forwarded-For', '10.0.0.1');
+    expect(r3.status).toBe(429);
+
+    // Second request from 10.0.0.2 — same IP, limit exceeded
+    const r4 = await request(app).get('/ping').set('X-Forwarded-For', '10.0.0.2');
+    expect(r4.status).toBe(429);
+  });
+
+  it('uses the first untrusted hop when X-Forwarded-For has two proxies and TRUSTED_PROXY_COUNT=1', async () => {
+    // Header:  X-Forwarded-For: 1.2.3.4, 5.6.7.8
+    // TRUSTED_PROXY_COUNT=1 means the rightmost entry (5.6.7.8) is a trusted
+    // proxy; Express therefore resolves req.ip to 1.2.3.4 (first untrusted hop).
+    const app = makeProxyApp(1, 3);
+
+    const res = await request(app)
+      .get('/ping')
+      .set('X-Forwarded-For', '1.2.3.4, 5.6.7.8');
+
+    expect(res.status).toBe(200);
+    expect(res.body.ip).toBe('1.2.3.4');
+  });
+});
