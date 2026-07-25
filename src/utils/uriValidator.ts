@@ -7,6 +7,7 @@
 const SCHEMES = ['ipfs://', 'https://'];
 const MIN_CONTENT_LENGTH = 3;
 
+/** Returns true when `uri` is a non-empty string with an ipfs:// or https:// scheme and meaningful content after it. */
 export function isValidEvidenceUri(uri: string): boolean {
   if (!uri || typeof uri !== 'string') return false;
 

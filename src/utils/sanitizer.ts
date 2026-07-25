@@ -1,3 +1,4 @@
+/** Trims whitespace and strips null bytes/control characters (U+0000–U+001F, U+007F) from a string. */
 export function sanitizeInput(input: string): string {
   if (typeof input !== 'string') return input;
   
