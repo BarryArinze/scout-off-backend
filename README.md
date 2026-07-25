@@ -519,6 +519,31 @@ npx ts-node --project tsconfig.scripts.json scripts/seed.ts
 
 The seed script is **idempotent** — running it multiple times is safe; existing rows are skipped.
 
+#### Seeding Individual Data Types with `--only`
+
+When developing a specific feature you can seed only the data types you need instead of inserting everything:
+
+```bash
+# Seed only players
+npm run seed -- --only players
+
+# Seed only subscriptions
+npm run seed -- --only subscriptions
+
+# Seed players and subscriptions together (comma-separated, no spaces)
+npm run seed -- --only players,subscriptions
+
+# Seed milestone events only
+npm run seed -- --only milestones
+
+# Seed contact-unlock events only
+npm run seed -- --only contacts
+```
+
+Supported types: `players`, `events`, `milestones`, `subscriptions`, `contacts`.  
+Unknown type names are logged as a warning and skipped; the rest of the seed continues normally.  
+When `--only` is omitted all types are seeded (original behaviour).
+
 **What gets seeded:**
 
 | Data                | Count | Details                                                                         |
