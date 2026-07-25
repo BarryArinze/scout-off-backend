@@ -3,7 +3,7 @@ import { createHash } from "crypto";
 import { sanitizeInput } from "../utils/sanitizer";
 import { createId } from "@paralleldrive/cuid2";
 import { z } from "zod";
-import { CID_REGEX } from "../utils/cidValidator";
+import { isValidMetadataUri, URI_VALIDATION_ERROR } from "../utils/uriValidator";
 import { pinJson } from "../services/ipfs";
 import { serializeIpfsResult } from "../utils/ipfsSerializer";
 import {
@@ -39,7 +39,8 @@ const baseRegistrationSchema = z.object({
 const metadataSchema = z.record(z.unknown());
 const metadataUriSchema = z
   .string()
-  .regex(CID_REGEX, "metadataUri must be a valid CID");
+  .min(1)
+  .refine(isValidMetadataUri, URI_VALIDATION_ERROR);
 
 export const registerSchema = z.union([
   baseRegistrationSchema.extend({ metadata: metadataSchema }),

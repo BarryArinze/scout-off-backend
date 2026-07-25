@@ -128,7 +128,9 @@ const config = {
     xFrameOptions: process.env.SECURITY_X_FRAME_OPTIONS ?? 'DENY',
     referrerPolicy: process.env.SECURITY_REFERRER_POLICY ?? 'no-referrer',
     /** Content-Security-Policy value. Override via SECURITY_CSP env var. */
-    csp: process.env.SECURITY_CSP ?? "default-src 'none'",
+    csp: process.env.SECURITY_CSP ?? "default-src 'none'; frame-ancestors 'none'",
+    /** Permissions-Policy value. Override via SECURITY_PERMISSIONS_POLICY env var. */
+    permissionsPolicy: process.env.SECURITY_PERMISSIONS_POLICY ?? 'camera=(), microphone=(), geolocation=()',
   },
   webhook: {
     enabled: process.env.WEBHOOK_ENABLED === 'true',
