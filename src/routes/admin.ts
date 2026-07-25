@@ -5,6 +5,7 @@ import { importPlayers } from '../controllers/adminPlayerImportController';
 import { getFeatureFlags, updateFeatureFlag } from '../controllers/featureFlagsController';
 import { exportEvents } from '../controllers/exportController';
 import { listDeadLetters, replayDeadLetter } from '../controllers/webhookAdminController';
+import { setIpReputationController, getIpReputationController } from '../controllers/ipReputationController';
 import { requireRole } from '../middleware/auth';
 import { ipAllowlistMiddleware } from '../middleware/ipAllowlist';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
@@ -400,5 +401,34 @@ router.route('/webhooks/dead-letters')
 router.route('/webhooks/:id/replay')
   .post(requireRole('admin'), replayDeadLetter)
   .all(methodNotAllowed(['POST']));
+
+/**
+ * POST /api/admin/ip-allowlist
+ *
+ * Manually set an IP's reputation score.
+ * - body { ip, score: 0 }   → whitelist the IP (score pinned at 0, immune to decay)
+ * - body { ip, score: 100 } → blacklist the IP (immediate 429 for all requests)
+ * - body { ip, score: N }   → any 0–100 value (admin override)
+ *
+ * @body { ip: string, score: number }
+ * @response 200 { success: true, data: { ip, score } }
+ * @response 400 { success: false, error: string } - Validation error
+ * @auth Bearer (admin role required)
+ */
+router.route('/ip-allowlist')
+  .post(requireRole('admin'), setIpReputationController)
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * GET /api/admin/ip-reputation/:ip
+ *
+ * Returns the current reputation record (score, lastSeen, pinned) for a given IP.
+ *
+ * @response 200 { success: true, data: IpReputation | null }
+ * @auth Bearer (admin role required)
+ */
+router.route('/ip-reputation/:ip')
+  .get(requireRole('admin'), getIpReputationController)
+  .all(methodNotAllowed(['GET', 'HEAD']));
 
 export default router;

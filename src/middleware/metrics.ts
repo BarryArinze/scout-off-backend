@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ipReputationCounters, resetIpReputationCounters } from '../services/ipReputation';
 
 export interface RouteMetric {
   count: number;
@@ -237,20 +238,7 @@ export function resetMetrics(): void {
   cacheCountsStore.hits = 0;
   cacheCountsStore.misses = 0;
   cacheCountsStore.evictions = 0;
-  // New metric stores.
-  Object.keys(ipfsHistogram.bucketCounts).forEach((k) => delete ipfsHistogram.bucketCounts[k]);
-  Object.keys(ipfsHistogram.sum).forEach((k) => delete ipfsHistogram.sum[k]);
-  Object.keys(ipfsHistogram.count).forEach((k) => delete ipfsHistogram.count[k]);
-  Object.keys(dbQueryHistogram.bucketCounts).forEach((k) => delete dbQueryHistogram.bucketCounts[k]);
-  Object.keys(dbQueryHistogram.sum).forEach((k) => delete dbQueryHistogram.sum[k]);
-  Object.keys(dbQueryHistogram.count).forEach((k) => delete dbQueryHistogram.count[k]);
-  Object.keys(sorobanRpcHistogram.bucketCounts).forEach((k) => delete sorobanRpcHistogram.bucketCounts[k]);
-  Object.keys(sorobanRpcHistogram.sum).forEach((k) => delete sorobanRpcHistogram.sum[k]);
-  Object.keys(sorobanRpcHistogram.count).forEach((k) => delete sorobanRpcHistogram.count[k]);
-  webhookDeliveryStore.success = 0;
-  webhookDeliveryStore.failure = 0;
-  webhookDeliveryStore.dead_letter = 0;
-  sseConnectionsActive = 0;
+  resetIpReputationCounters();
 }
 
 // ─── Cache hit / miss / eviction counters ─────────────────────────────────────
@@ -410,6 +398,14 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
     lines.push('# TYPE indexer_ledger_lag gauge');
     lines.push(`indexer_ledger_lag ${extras.indexerLedgerLag}`);
   }
+
+  // IP reputation counters.
+  lines.push('# HELP ip_reputation_blocked_total Total number of requests blocked by IP reputation scoring');
+  lines.push('# TYPE ip_reputation_blocked_total counter');
+  lines.push(`ip_reputation_blocked_total ${ipReputationCounters.blocked}`);
+  lines.push('# HELP ip_reputation_penalised_total Total number of requests that received a reputation penalty (delay or rate restriction)');
+  lines.push('# TYPE ip_reputation_penalised_total counter');
+  lines.push(`ip_reputation_penalised_total ${ipReputationCounters.penalised}`);
 
   return lines.join('\n') + '\n';
 }
