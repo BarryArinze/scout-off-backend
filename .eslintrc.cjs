@@ -22,6 +22,8 @@ module.exports = {
   },
   overrides: [
     {
+      // logger.ts also uses console.debug/console.info, which the base
+      // allowlist (warn/error only) doesn't cover.
       files: ['src/utils/logger.ts'],
       rules: { 'no-console': 'off' }
     }
