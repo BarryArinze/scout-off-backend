@@ -23,9 +23,9 @@ jest.mock('../../src/services/webhooks', () => ({
   dispatchEventWebhook: jest.fn().mockResolvedValue(undefined),
 }));
 
-// ── mock db (registerPlayer writes via upsertPlayer) ──────────────────────────
+// ── mock db (registerPlayer writes via insertOrUpdatePlayer) ──────────────────────────
 jest.mock('../../src/db', () => ({
-  upsertPlayer: jest.fn(),
+  insertOrUpdatePlayer: jest.fn(),
 }));
 
 import { registerPlayer } from '../../src/controllers/playerController';

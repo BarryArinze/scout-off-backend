@@ -17,7 +17,7 @@ const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 
 jest.mock('../../src/db', () => ({
   // shared scout router dependencies
-  getEvents: jest.fn(),
+  queryEvents: jest.fn(),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn(),
   dbRenewSubscription: jest.fn(),

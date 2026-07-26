@@ -5,9 +5,11 @@ import { EventRecord, ContractEventType } from '../types';
 import { runMigrations } from './migrate';
 import { logger } from '../utils/logger';
 import { computeChainHash, auditChainContent, GENESIS_HASH } from '../utils/hashChain';
+import { encryptWebhookSecret, decryptWebhookSecret } from '../utils/webhookSecretCipher';
 import { DbDriver } from './driver';
 import { SqliteDriver } from './sqlite-driver';
 import { PostgresDriver } from './postgres-driver';
+import { observeDbQueryDuration } from '../middleware/metrics';
 
 function slowQueryThresholdMs(): number {
   return parseInt(process.env.SLOW_QUERY_THRESHOLD_MS ?? '50', 10);
@@ -45,7 +47,7 @@ export async function initDb(): Promise<void> {
       );
     }
 
-    const pgDriver = new PostgresDriver(config.databaseUrl);
+    const pgDriver = new PostgresDriver(config.databaseUrl, config.databaseSsl);
     await pgDriver.connect();
     _driver = pgDriver;
 
@@ -61,10 +63,12 @@ export async function initDb(): Promise<void> {
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         type       TEXT NOT NULL,
         ledger     INTEGER NOT NULL,
+        ledger_hash TEXT,
         tx_hash    TEXT NOT NULL UNIQUE,
         payload    TEXT NOT NULL,
         created_at INTEGER
       );
+      CREATE INDEX IF NOT EXISTS idx_events_ledger ON events (ledger);
       CREATE INDEX IF NOT EXISTS idx_events_type_ledger ON events (type, ledger);
       CREATE TABLE IF NOT EXISTS indexer_state (
         key   TEXT PRIMARY KEY,
@@ -129,9 +133,9 @@ export function getDb(): Database.Database {
   return _db;
 }
 
-export function closeDb(): void {
+export async function closeDb(): Promise<void> {
   if (_driver) {
-    _driver.close();
+    await _driver.close();
     _driver = null;
   }
   if (_db) {
@@ -142,7 +146,7 @@ export function closeDb(): void {
 
 // ─── State helpers ────────────────────────────────────────────────────────────
 
-export function getLastLedger(): number {
+export function fetchLastIndexedLedger(): number {
   const sql = 'SELECT value FROM indexer_state WHERE key = ?';
   const row = timedQuery(sql, () =>
     getDb().prepare(sql).get('last_ledger') as { value: string } | undefined
@@ -150,10 +154,16 @@ export function getLastLedger(): number {
   return row ? parseInt(row.value, 10) : 0;
 }
 
-export function setLastLedger(ledger: number): void {
+/** @deprecated Use fetchLastIndexedLedger instead. Will be removed in next release. */
+export const getLastLedger = fetchLastIndexedLedger;
+
+export function persistLastIndexedLedger(ledger: number): void {
   const sql = 'INSERT INTO indexer_state (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value';
   timedQuery(sql, () => getDb().prepare(sql).run('last_ledger', String(ledger)));
 }
+
+/** @deprecated Use persistLastIndexedLedger instead. Will be removed in next release. */
+export const setLastLedger = persistLastIndexedLedger;
 
 // ─── Query helpers ────────────────────────────────────────────────────────────
 
@@ -161,6 +171,7 @@ interface EventRow {
   type: string;
   payload: string;
   created_at: number | null;
+  ledger_hash: string | null;
 }
 
 export interface GetEventsOptions {
@@ -168,7 +179,7 @@ export interface GetEventsOptions {
   offset?: number;
 }
 
-export function getEvents(
+export function queryEvents(
   type?: ContractEventType,
   opts?: GetEventsOptions,
 ): EventRecord[] {
@@ -199,6 +210,17 @@ export function getEvents(
     contractAddress: config.contractId,
     created_at: r.created_at,
   }));
+}
+
+/** @deprecated Use queryEvents instead. Will be removed in next release. */
+export const getEvents = queryEvents;
+
+export function rollbackEventsFromLedger(ledger: number): void {
+  const db = getDb();
+  // Delete pending milestones associated with these events (since they might be re-indexed)
+  // Actually, wait, it's safer to just let the indexer re-insert, but pending_milestones has a unique milestone_id so INSERT OR IGNORE will handle it.
+  // We'll delete events from the specified ledger forwards.
+  db.prepare('DELETE FROM events WHERE ledger >= ?').run(ledger);
 }
 
 export function getEventsCount(type?: ContractEventType): number {
@@ -255,8 +277,8 @@ export function getEventsPage(filter: EventsPageFilter, limit: number, offset: n
     params.push(filter.endDate.getTime());
   }
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const sql = `SELECT type, ledger, payload, created_at FROM events ${where} ORDER BY ledger ASC, id ASC LIMIT ? OFFSET ?`;
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const sql = 'SELECT type, ledger, payload, created_at FROM events ' + where + ' ORDER BY ledger ASC, id ASC LIMIT ? OFFSET ?';
   params.push(limit, offset);
 
   const rows = timedQuery(sql, () => db.prepare(sql).all(...(params as unknown[]))) as Array<{
@@ -272,6 +294,54 @@ export function getEventsPage(filter: EventsPageFilter, limit: number, offset: n
     createdAt: r.created_at,
     payload: JSON.parse(r.payload),
   }));
+}
+
+/**
+ * Generator that lazily yields one event row at a time using
+ * better-sqlite3's `Statement.iterate()` cursor, filtered by type and/or
+ * created_at range, ordered by ledger ascending (ties broken by id).
+ *
+ * Unlike LIMIT/OFFSET pagination this uses a single prepared statement
+ * cursor, so the result is a stable snapshot that does not drift when the
+ * indexer inserts rows concurrently — no duplicates or skipped rows.
+ */
+export function* getEventsIterable(filter: EventsPageFilter): Generator<EventExportRow, void, void> {
+  const db = getDb();
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (filter.type) {
+    clauses.push('type = ?');
+    params.push(filter.type);
+  }
+  if (filter.startDate) {
+    clauses.push('created_at >= ?');
+    params.push(filter.startDate.getTime());
+  }
+  if (filter.endDate) {
+    clauses.push('created_at <= ?');
+    params.push(filter.endDate.getTime());
+  }
+
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const sql = 'SELECT type, ledger, payload, created_at FROM events ' + where + ' ORDER BY ledger ASC, id ASC';
+
+  const stmt = db.prepare(sql);
+  const iterator = stmt.iterate(...(params as unknown[])) as IterableIterator<{
+    type: string;
+    ledger: number;
+    payload: string;
+    created_at: number | null;
+  }>;
+
+  for (const row of iterator) {
+    yield {
+      type: row.type as ContractEventType,
+      ledger: row.ledger,
+      createdAt: row.created_at,
+      payload: JSON.parse(row.payload),
+    };
+  }
 }
 
 // ─── Player table helpers ─────────────────────────────────────────────────────
@@ -329,7 +399,7 @@ export function getPlayerProfileHistory(
     .all(playerId) as PlayerProfileHistoryRow[];
 }
 
-export function upsertPlayer(p: {
+export function insertOrUpdatePlayer(p: {
   player_id: string;
   wallet: string;
   position?: string;
@@ -348,6 +418,9 @@ export function upsertPlayer(p: {
     getDb().prepare(sql).run(p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null)
   );
 }
+
+/** @deprecated Use insertOrUpdatePlayer instead. Will be removed in next release. */
+export const upsertPlayer = insertOrUpdatePlayer;
 
 export function updatePlayerProgress(playerId: string, level: number): void {
   const sql = 'UPDATE players SET progress_level = ? WHERE player_id = ?';
@@ -409,6 +482,18 @@ export function removePendingMilestone(milestoneId: string): void {
   timedQuery(sql, () => getDb().prepare(sql).run(milestoneId));
 }
 
+/**
+ * Cancel (delete) all pending milestones for a given player.
+ * Returns the number of rows removed.
+ */
+export function cancelPendingMilestonesForPlayer(playerId: string): number {
+  const sql = 'DELETE FROM pending_milestones WHERE player_id = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(playerId);
+    return info.changes;
+  });
+}
+
 export interface GetPendingMilestonesOptions {
   validatorWallet?: string;
   position?: string;
@@ -441,12 +526,12 @@ export function getPendingMilestones(options: GetPendingMilestonesOptions): { da
     params.push(options.playerId);
   }
 
-  const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+  const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
 
   // Get total count
-  const countSql = `SELECT COUNT(*) AS total FROM pending_milestones pm 
-                    LEFT JOIN players p ON pm.player_id = p.player_id 
-                    ${whereClause}`;
+  const countSql = 'SELECT COUNT(*) AS total FROM pending_milestones pm ' + 
+                   'LEFT JOIN players p ON pm.player_id = p.player_id ' + 
+                   whereClause;
   const countRow = timedQuery(countSql, () => db.prepare(countSql).get(...params) as { total: number });
   const total = countRow.total;
 
@@ -454,11 +539,11 @@ export function getPendingMilestones(options: GetPendingMilestonesOptions): { da
   const page = options.page || 1;
   const pageSize = options.pageSize || 20;
   const offset = (page - 1) * pageSize;
-  const dataSql = `SELECT pm.* FROM pending_milestones pm 
-                   LEFT JOIN players p ON pm.player_id = p.player_id 
-                   ${whereClause}
-                   ORDER BY pm.submitted_at DESC
-                   LIMIT ? OFFSET ?`;
+  const dataSql = 'SELECT pm.* FROM pending_milestones pm ' + 
+                  'LEFT JOIN players p ON pm.player_id = p.player_id ' + 
+                  whereClause + 
+                  ' ORDER BY pm.submitted_at DESC ' + 
+                  'LIMIT ? OFFSET ?';
   const data = timedQuery(dataSql, () => db.prepare(dataSql).all(...params, pageSize, offset) as PendingMilestoneRow[]);
 
   return { data, total };
@@ -476,8 +561,20 @@ export function deactivatePlayer(playerId: string): void {
   timedQuery(sql, () => getDb().prepare(sql).run(playerId));
 }
 
+/** Deactivate a player and persist a human-readable reason. */
+export function deactivatePlayerWithReason(playerId: string, reason: string): void {
+  const sql = 'UPDATE players SET is_active = 0, deactivation_reason = ? WHERE player_id = ?';
+  timedQuery(sql, () => getDb().prepare(sql).run(reason, playerId));
+}
+
 export function reactivatePlayer(playerId: string): void {
   const sql = 'UPDATE players SET is_active = 1 WHERE player_id = ?';
+  timedQuery(sql, () => getDb().prepare(sql).run(playerId));
+}
+
+/** Clear deactivation state and reason on reactivation. */
+export function reactivatePlayerWithReason(playerId: string): void {
+  const sql = "UPDATE players SET is_active = 1, deactivation_reason = NULL WHERE player_id = ?";
   timedQuery(sql, () => getDb().prepare(sql).run(playerId));
 }
 
@@ -501,7 +598,7 @@ function buildPlayerWhereClause(opts: QueryPlayersOptions): { where: string; par
     conditions.push("is_active = 1");
   }
 
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   return { where, params };
 }
 
@@ -509,7 +606,7 @@ export function queryPlayers(opts: QueryPlayersOptions): PlayerRow[] {
   const { where, params } = buildPlayerWhereClause(opts);
   const limit = opts.limit ?? 20;
   const offset = opts.offset ?? 0;
-  const sql = `SELECT * FROM players ${where} ORDER BY created_at ASC LIMIT ? OFFSET ?`;
+  const sql = 'SELECT * FROM players ' + where + ' ORDER BY created_at ASC LIMIT ? OFFSET ?';
   return timedQuery(sql, () =>
     getDb().prepare(sql).all(...params, limit, offset) as PlayerRow[]
   );
@@ -517,7 +614,7 @@ export function queryPlayers(opts: QueryPlayersOptions): PlayerRow[] {
 
 export function countPlayers(opts: Omit<QueryPlayersOptions, 'limit' | 'offset'>): number {
   const { where, params } = buildPlayerWhereClause(opts);
-  const sql = `SELECT COUNT(*) as count FROM players ${where}`;
+  const sql = 'SELECT COUNT(*) as count FROM players ' + where;
   return timedQuery(sql, () => {
     const row = getDb().prepare(sql).get(...params) as { count: number };
     return row.count;
@@ -649,6 +746,16 @@ export function getContactUnlocksByScout(scoutWallet: string): ContactUnlockRow[
   return timedQuery(sql, () => getDb().prepare(sql).all(scoutWallet) as ContactUnlockRow[]);
 }
 
+/**
+ * Return all contact-unlock rows for a given player (i.e. every scout who has
+ * unlocked that player's contact details). Used to fan out SSE notifications
+ * when a player is deactivated.
+ */
+export function getContactUnlocksByPlayer(playerId: string): ContactUnlockRow[] {
+  const sql = `SELECT * FROM contact_unlocks WHERE player_id = ? ORDER BY unlocked_at DESC`;
+  return timedQuery(sql, () => getDb().prepare(sql).all(playerId) as ContactUnlockRow[]);
+}
+
 export function hasContactUnlock(scoutWallet: string, playerId: string): boolean {
   const sql = `SELECT 1 FROM contact_unlocks WHERE scout_wallet = ? AND player_id = ? LIMIT 1`;
   return timedQuery(sql, () => getDb().prepare(sql).get(scoutWallet, playerId) !== undefined);
@@ -744,10 +851,10 @@ export function getAuditLogs(filters: {
   if (filters.endDate) { conditions.push('created_at <= ?'); params.push(filters.endDate); }
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const limit = filters.limit ?? 50;
   const offset = filters.offset ?? 0;
-  const sql = `SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+  const sql = 'SELECT * FROM audit_log ' + where + ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
   return timedQuery(sql, () => getDb().prepare(sql).all(...params, limit, offset) as AuditLogRow[]);
 }
 
@@ -765,8 +872,8 @@ export function getAuditLogsCount(filters: {
   if (filters.endDate) { conditions.push('created_at <= ?'); params.push(filters.endDate); }
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const sql = `SELECT COUNT(*) AS count FROM audit_log ${where}`;
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  const sql = 'SELECT COUNT(*) AS count FROM audit_log ' + where;
   return timedQuery(sql, () => {
     const row = getDb().prepare(sql).get(...params) as { count: number };
     return row.count;
@@ -790,8 +897,8 @@ export function getAllAuditLogRows(filters: {
   if (filters.action) { conditions.push('action = ?'); params.push(filters.action); }
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
-  const sql = `SELECT * FROM audit_log ${where} ORDER BY id ASC`;
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
+  const sql = 'SELECT * FROM audit_log ' + where + ' ORDER BY id ASC';
   return timedQuery(sql, () => getDb().prepare(sql).all(...params) as AuditLogRow[]);
 }
 
@@ -835,6 +942,23 @@ export function respondToTrialOffer(p: {
 }): void {
   const sql = `UPDATE trial_offers SET status = ?, reject_reason = ?, responded_at = ? WHERE offer_id = ?`;
   timedQuery(sql, () => getDb().prepare(sql).run(p.status, p.reject_reason ?? null, p.responded_at, p.offer_id));
+}
+
+/**
+ * Count the number of trial offers submitted for a given player.
+ * Returns 0 when the trial_offers table does not exist yet (pre-migration).
+ */
+export function countTrialOffersByPlayer(playerId: string): number {
+  try {
+    const sql = 'SELECT COUNT(*) AS cnt FROM trial_offers WHERE player_id = ?';
+    const row = timedQuery(sql, () =>
+      getDb().prepare(sql).get(playerId) as { cnt: number } | undefined,
+    );
+    return row?.cnt ?? 0;
+  } catch {
+    // Table may not exist in very early migration states
+    return 0;
+  }
 }
 
 // ─── Pending pin helpers ──────────────────────────────────────────────────────
@@ -1106,6 +1230,27 @@ export interface SavedSearchRow {
   name: string;
   filters: string; // JSON string
   created_at: number;
+  notify_enabled: number;
+}
+
+export function getAllActiveSavedSearches(): SavedSearchRow[] {
+  const sql = 'SELECT * FROM scout_saved_searches WHERE notify_enabled = 1';
+  return timedQuery(sql, () => getDb().prepare(sql).all() as SavedSearchRow[]);
+}
+
+export function getSavedSearchNotification(scoutWallet: string, playerId: string): number | null {
+  const sql = 'SELECT notified_at FROM saved_search_notifications WHERE scout_wallet = ? AND player_id = ?';
+  return timedQuery(sql, () => {
+    const row = getDb().prepare(sql).get(scoutWallet, playerId) as { notified_at: number } | undefined;
+    return row ? row.notified_at : null;
+  });
+}
+
+export function recordSavedSearchNotification(scoutWallet: string, playerId: string, notifiedAt: number): void {
+  const sql = 'INSERT INTO saved_search_notifications (scout_wallet, player_id, notified_at) ' +
+              'VALUES (?, ?, ?) ' +
+              'ON CONFLICT(scout_wallet, player_id) DO UPDATE SET notified_at = excluded.notified_at';
+  timedQuery(sql, () => getDb().prepare(sql).run(scoutWallet, playerId, notifiedAt));
 }
 
 /**
@@ -1117,13 +1262,11 @@ export function insertSavedSearch(p: {
   name: string;
   filters: string; // pre-serialised JSON
   created_at: number;
+  notify_enabled?: number;
 }): number {
-  const sql = `
-    INSERT INTO scout_saved_searches (scout_wallet, name, filters, created_at)
-    VALUES (?, ?, ?, ?)
-  `;
+  const sql = 'INSERT INTO scout_saved_searches (scout_wallet, name, filters, created_at, notify_enabled) VALUES (?, ?, ?, ?, ?)';
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.scout_wallet, p.name, p.filters, p.created_at);
+    const info = getDb().prepare(sql).run(p.scout_wallet, p.name, p.filters, p.created_at, p.notify_enabled ?? 1);
     return info.lastInsertRowid as number;
   });
 }
@@ -1287,9 +1430,13 @@ export interface WebhookSubscription {
 
 export function createWebhookSubscription(url: string, secret?: string): WebhookSubscription {
   const finalSecret = secret ?? crypto.randomBytes(32).toString('hex');
+  // Encrypted at rest (#686) — only the ciphertext is ever persisted. The
+  // plaintext is returned to the caller here (e.g. for the API response at
+  // issuance time) but is never written back to storage.
+  const encryptedSecret = encryptWebhookSecret(finalSecret);
   const sql = 'INSERT INTO webhook_subscriptions (url, secret) VALUES (?, ?)';
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(url, finalSecret);
+    const info = getDb().prepare(sql).run(url, encryptedSecret);
     return {
       id: Number(info.lastInsertRowid),
       url,
@@ -1301,7 +1448,12 @@ export function createWebhookSubscription(url: string, secret?: string): Webhook
 
 export function listWebhookSubscriptions(): WebhookSubscription[] {
   const sql = 'SELECT * FROM webhook_subscriptions ORDER BY id ASC';
-  return timedQuery(sql, () => getDb().prepare(sql).all() as WebhookSubscription[]);
+  return timedQuery(sql, () => {
+    const rows = getDb().prepare(sql).all() as WebhookSubscription[];
+    // Decrypted only here, in memory, immediately before the caller signs a
+    // delivery with it (src/services/webhooks.ts) — never persisted.
+    return rows.map((row) => ({ ...row, secret: decryptWebhookSecret(row.secret) }));
+  });
 }
 
 /**
@@ -1416,4 +1568,24 @@ export function updateWebhookDeadLetterAttempt(
 ): void {
   const sql = 'UPDATE webhook_dead_letters SET attempts = ?, failure_reason = ? WHERE id = ?';
   timedQuery(sql, () => getDb().prepare(sql).run(attempts, failureReason, id));
+}
+
+/** Delete a specific dead-letter row by id. Returns true when a row was deleted. */
+export function deleteWebhookDeadLetter(id: number): boolean {
+  const sql = 'DELETE FROM webhook_dead_letters WHERE id = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(id);
+    return info.changes > 0;
+  });
+}
+
+/** Delete all dead-letter rows older than cutoffDays days. Returns the count deleted. */
+export function purgeOldWebhookDeadLetters(cutoffDays: number): number {
+  // created_at is stored as ISO text ("2024-01-01T00:00:00.000Z")
+  const cutoff = new Date(Date.now() - cutoffDays * 24 * 60 * 60 * 1000).toISOString();
+  const sql = "DELETE FROM webhook_dead_letters WHERE created_at < ?";
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(cutoff);
+    return info.changes;
+  });
 }

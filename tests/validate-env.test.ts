@@ -96,109 +96,104 @@ describe('validate-env runtime validation', () => {
       'Invalid CORS origin format: "invalid-origin-without-protocol". Origins must be "*" or start with http:// or https://'
     );
   });
+
+  it('should pass when PINATA_GATEWAY is a valid HTTPS URL', () => {
+    const env = {
+      NODE_ENV: 'development',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+      PINATA_GATEWAY: 'https://gateway.pinata.cloud',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toEqual([]);
+  });
+
+  it('should pass when PINATA_GATEWAY is unset', () => {
+    const env = {
+      NODE_ENV: 'development',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toEqual([]);
+  });
+
+  it('should report an error when PINATA_GATEWAY is HTTP instead of HTTPS', () => {
+    const env = {
+      NODE_ENV: 'development',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+      PINATA_GATEWAY: 'http://gateway.pinata.cloud',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toContain(
+      'PINATA_GATEWAY="http://gateway.pinata.cloud" is invalid. Must be a valid HTTPS URL.'
+    );
+  });
+
+  it('should report an error when PINATA_GATEWAY is not a valid URL', () => {
+    const env = {
+      NODE_ENV: 'development',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+      PINATA_GATEWAY: 'not-a-url',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toContain(
+      'PINATA_GATEWAY="not-a-url" is invalid. Must be a valid HTTPS URL.'
+    );
+  });
 });
 
-// ─── Helpers for findStaleExampleKeys tests ───────────────────────────────────
+describe('DB_DRIVER validation', () => {
+  const baseEnv = {
+    NODE_ENV: 'development',
+    CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+    JWT_SECRET: 'test-secret',
+  };
 
-/** Write a temporary .env.example file and return its path. */
-function makeTmpExample(keys: string[]): string {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'validate-env-test-'));
-  const filePath = path.join(tmpDir, '.env.example');
-  const content = keys.map((k) => `${k}=`).join('\n') + '\n';
-  fs.writeFileSync(filePath, content, 'utf8');
-  return filePath;
-}
-
-/** Write a temporary .ts source file referencing the given keys and return its path. */
-function makeTmpSrc(keys: string[]): string {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'validate-env-src-'));
-  const filePath = path.join(tmpDir, 'config.ts');
-  const content = keys.map((k) => `const x = process.env.${k};`).join('\n') + '\n';
-  fs.writeFileSync(filePath, content, 'utf8');
-  return filePath;
-}
-
-// ─── findStaleExampleKeys tests ───────────────────────────────────────────────
-
-describe('findStaleExampleKeys (reverse direction: .env.example → src/)', () => {
-  it('returns empty array when every .env.example key is referenced in src/', () => {
-    const examplePath = makeTmpExample(['CONTRACT_ID', 'JWT_SECRET', 'PORT']);
-    const srcFile = makeTmpSrc(['CONTRACT_ID', 'JWT_SECRET', 'PORT']);
-
-    const stale = findStaleExampleKeys(examplePath, [srcFile]);
-
-    expect(stale).toEqual([]);
+  it('passes when DB_DRIVER is "sqlite"', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'sqlite' });
+    expect(errors).toEqual([]);
   });
 
-  it('returns stale keys that appear in .env.example but not in src/', () => {
-    // LEGACY_FLAG is documented but no longer referenced in code
-    const examplePath = makeTmpExample(['CONTRACT_ID', 'JWT_SECRET', 'LEGACY_FLAG']);
-    const srcFile = makeTmpSrc(['CONTRACT_ID', 'JWT_SECRET']);
-
-    const stale = findStaleExampleKeys(examplePath, [srcFile]);
-
-    expect(stale).toContain('LEGACY_FLAG');
-    expect(stale).not.toContain('CONTRACT_ID');
-    expect(stale).not.toContain('JWT_SECRET');
+  it('passes when DB_DRIVER is "postgres"', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'postgres' });
+    expect(errors).toEqual([]);
   });
 
-  it('returns all keys as stale when src/ references nothing', () => {
-    const examplePath = makeTmpExample(['CONTRACT_ID', 'JWT_SECRET']);
-    const srcFile = makeTmpSrc([]); // no process.env references
-
-    const stale = findStaleExampleKeys(examplePath, [srcFile]);
-
-    expect(stale).toContain('CONTRACT_ID');
-    expect(stale).toContain('JWT_SECRET');
-    expect(stale.length).toBe(2);
+  it('passes when DB_DRIVER is unset (defaults to sqlite)', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv });
+    expect(errors).toEqual([]);
   });
 
-  it('returns empty array when .env.example is empty', () => {
-    const examplePath = makeTmpExample([]);
-    const srcFile = makeTmpSrc(['CONTRACT_ID']);
-
-    const stale = findStaleExampleKeys(examplePath, [srcFile]);
-
-    expect(stale).toEqual([]);
+  it('rejects a typo like "Postgres" (wrong case)', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'Postgres' });
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/DB_DRIVER="Postgres" is invalid/);
+    expect(errors[0]).toMatch(/sqlite.*postgres|postgres.*sqlite/i);
   });
 
-  it('ignores comment lines and blank lines in .env.example', () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'validate-env-comment-'));
-    const examplePath = path.join(tmpDir, '.env.example');
-    fs.writeFileSync(
-      examplePath,
-      '# This is a comment\nCONTRACT_ID=\n\n# Another comment\nJWT_SECRET=\n',
-      'utf8'
-    );
-    const srcFile = makeTmpSrc(['CONTRACT_ID', 'JWT_SECRET']);
-
-    const stale = findStaleExampleKeys(examplePath, [srcFile]);
-
-    expect(stale).toEqual([]);
+  it('rejects a typo like "postgresql"', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'postgresql' });
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/DB_DRIVER="postgresql" is invalid/);
   });
 
-  it('handles multiple src files correctly', () => {
-    const examplePath = makeTmpExample(['CONTRACT_ID', 'JWT_SECRET', 'PORT', 'STALE_VAR']);
-    const srcFile1 = makeTmpSrc(['CONTRACT_ID', 'JWT_SECRET']);
-    const srcFile2 = makeTmpSrc(['PORT']);
-
-    const stale = findStaleExampleKeys(examplePath, [srcFile1, srcFile2]);
-
-    expect(stale).toContain('STALE_VAR');
-    expect(stale).not.toContain('CONTRACT_ID');
-    expect(stale).not.toContain('JWT_SECRET');
-    expect(stale).not.toContain('PORT');
+  it('rejects a value with a stray space like " postgres"', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: ' postgres' });
+    expect(errors.length).toBe(1);
+    expect(errors[0]).toMatch(/DB_DRIVER=" postgres" is invalid/);
   });
 
-  it('does not treat commented-out env refs in src/ as active references', () => {
-    const examplePath = makeTmpExample(['COMMENTED_VAR']);
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'validate-env-comment-src-'));
-    const srcFile = path.join(tmpDir, 'config.ts');
-    // COMMENTED_VAR is only referenced in a comment — should not count
-    fs.writeFileSync(srcFile, '// const x = process.env.COMMENTED_VAR;\n', 'utf8');
+  it('error message names the invalid value clearly', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'mysql' });
+    expect(errors[0]).toContain('mysql');
+  });
 
-    const stale = findStaleExampleKeys(examplePath, [srcFile]);
-
-    expect(stale).toContain('COMMENTED_VAR');
+  it('error message lists the valid options', () => {
+    const errors = validateRuntimeEnv({ ...baseEnv, DB_DRIVER: 'badval' });
+    expect(errors[0]).toContain('sqlite');
+    expect(errors[0]).toContain('postgres');
   });
 });

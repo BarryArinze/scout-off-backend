@@ -11,7 +11,7 @@ function makeToken(sub: string, role = 'scout'): string {
 }
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn(),
+  queryEvents: jest.fn(),
   getPlayerById: jest.fn(),
 }));
 
@@ -20,8 +20,8 @@ jest.mock('../../src/services/indexer', () => ({
   normalizeEventId: jest.fn(),
 }));
 
-import { getEvents } from '../../src/db';
-const mockGetEvents = getEvents as jest.Mock;
+import { queryEvents } from '../../src/db';
+const mockGetEvents = queryEvents as jest.Mock;
 
 beforeEach(() => {
   mockGetEvents.mockReset();

@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events';
 import RedisMock from 'ioredis-mock';
 import { InMemoryCacheStore } from '../../src/services/inMemoryCacheStore';
 import { RedisCacheStore, RedisLike } from '../../src/services/redisCacheStore';
@@ -72,5 +73,33 @@ describe('cache.ts public API (default in-memory backend)', () => {
     await expect(cache.cacheGet('milestones:7')).resolves.toBeUndefined();
     await expect(cache.cacheGet('players:list:all')).resolves.toBeUndefined();
     await expect(cache.cacheGet('players:7')).resolves.toBeUndefined();
+  });
+});
+
+describe('cache.ts Redis backend error handling', () => {
+  // A Redis client's 'error' event with no listener is treated by Node as an
+  // uncaught exception and crashes the process. Simulate that event here and
+  // assert the module survives it, guarding against the listener being
+  // dropped in a future refactor.
+  it('does not crash when the Redis client emits an error event', async () => {
+    const fakeClient = new EventEmitter();
+    jest.resetModules();
+    jest.doMock('ioredis', () => ({
+      __esModule: true,
+      default: jest.fn(() => fakeClient),
+    }));
+    jest.doMock('../../src/config', () => ({
+      __esModule: true,
+      default: { ...jest.requireActual('../../src/config').default, redisUrl: 'redis://fake:6379' },
+    }));
+
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('../../src/services/cache');
+
+    expect(() => fakeClient.emit('error', new Error('connection refused'))).not.toThrow();
+
+    jest.dontMock('ioredis');
+    jest.dontMock('../../src/config');
+    jest.resetModules();
   });
 });

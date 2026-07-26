@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# --- USAGE START ---
 # backup-db.sh — Copy the ScoutOff SQLite database to a timestamped backup location.
 #
 # Supports both local filesystem destinations and S3/GCS URIs:
@@ -22,6 +23,7 @@
 # Exit codes:
 #   0  Success (backup created and verified, or standalone verify passed)
 #   1  Validation, copy, or verification failure
+# --- USAGE END ---
 
 set -euo pipefail
 
@@ -57,7 +59,22 @@ require_sqlite3() {
 table_count() {
   local db_path="$1"
   local table="$2"
-  bash "${SCRIPT_DIR}/sqlite-cli.sh" "${db_path}" "SELECT COUNT(*) FROM \"${table}\";" 2>/dev/null || echo "0"
+  local output
+  local status
+
+  # Capture output and exit code separately so we can distinguish
+  # "query succeeded and returned 0" from "query failed" (locked DB,
+  # corrupt file, missing table, etc.).  The previous implementation
+  # used `2>/dev/null || echo "0"`, which silently masked any failure
+  # and returned 0 — indistinguishable from a genuinely empty table.
+  output="$(bash "${SCRIPT_DIR}/sqlite-cli.sh" "${db_path}" "SELECT COUNT(*) FROM \"${table}\";" 2>&1)"
+  status=$?
+
+  if [[ "${status}" -ne 0 ]]; then
+    fail "table_count() query failed for table '${table}' in '${db_path}' (exit ${status}): ${output}"
+  fi
+
+  echo "${output}"
 }
 
 capture_source_counts() {
@@ -113,7 +130,9 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,24p' "$0"
+      # Extract usage text between marker lines so --help is robust to
+      # future edits that add/remove lines from the header comment.
+      awk '/^# --- USAGE START ---/{found=1; next} /^# --- USAGE END ---/{exit} found{sub(/^# ?/,""); print}' "$0"
       exit 0
       ;;
     *)
