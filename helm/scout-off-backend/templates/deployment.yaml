@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "scout-off-backend.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "scout-off-backend.labels" . | nindent 4 }}
+spec:
+  # replicas is managed by the HPA when hpa.enabled=true.
+  # We still set it here so `helm template` produces a valid manifest and the
+  # initial rollout starts with at least replicaCount pods.
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "scout-off-backend.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: {{ .Values.strategy.type }}
+    {{- if eq .Values.strategy.type "RollingUpdate" }}
+    rollingUpdate:
+      maxSurge: {{ .Values.strategy.rollingUpdate.maxSurge }}
+      maxUnavailable: {{ .Values.strategy.rollingUpdate.maxUnavailable }}
+    {{- end }}
+  template:
+    metadata:
+      labels:
+        {{- include "scout-off-backend.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "scout-off-backend.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ include "scout-off-backend.imageTag" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          # ── Environment: non-sensitive values from ConfigMap ─────────────────
+          envFrom:
+            - configMapRef:
+                name: {{ include "scout-off-backend.fullname" . }}-config
+          # ── Environment: sensitive values from Secret ────────────────────────
+          # CONTRACT_ID and JWT_SECRET are never stored in the ConfigMap.
+          # They are injected directly from the Kubernetes Secret so they do
+          # not appear in ConfigMap data, audit logs, or helm templates.
+          env:
+            - name: CONTRACT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: CONTRACT_ID
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: JWT_SECRET
+          # ── Liveness probe ────────────────────────────────────────────────────
+          # Restarts the container if this fails failureThreshold times in a row.
+          # /health/liveness is a lightweight check with no external dependencies.
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          # ── Readiness probe ────────────────────────────────────────────────────
+          # Removes the pod from the Service endpoint slice until it passes.
+          # /health/readiness checks DB writability and IPFS connectivity.
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          # ── Resources ──────────────────────────────────────────────────────────
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.extraVolumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.extraVolumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

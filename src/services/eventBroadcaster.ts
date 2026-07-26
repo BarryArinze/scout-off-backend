@@ -102,6 +102,13 @@ export function isEventRelevantToWallet(
     case 'fees_withdrawn':
       return p.recipient === wallet || p.wallet === wallet;
 
+    case 'player_deactivated':
+      // Notify the player themselves and any scout who unlocked their contact.
+      return p.player_id === wallet || p.wallet === wallet || p.scout_wallet === wallet;
+
+    case 'player_reactivated':
+      return p.player_id === wallet || p.wallet === wallet;
+
     default:
       return false;
   }

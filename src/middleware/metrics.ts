@@ -277,6 +277,33 @@ export function getCacheMetrics(): CacheCounts {
   return { ...cacheCountsStore };
 }
 
+// ─── Webhook dead-letter counters ─────────────────────────────────────────────
+
+export interface WebhookCounters {
+  deadLettersTotal: number;
+  retrySuccessTotal: number;
+}
+
+export const webhookCountersStore: WebhookCounters = {
+  deadLettersTotal: 0,
+  retrySuccessTotal: 0,
+};
+
+/** Increment webhook_dead_letters_total counter. */
+export function incrementWebhookDeadLettersTotal(): void {
+  webhookCountersStore.deadLettersTotal += 1;
+}
+
+/** Increment webhook_retry_success_total counter. */
+export function incrementWebhookRetrySuccessTotal(): void {
+  webhookCountersStore.retrySuccessTotal += 1;
+}
+
+/** Returns a snapshot of webhook counters. */
+export function getWebhookCounters(): WebhookCounters {
+  return { ...webhookCountersStore };
+}
+
 // ─── Prometheus exposition ──────────────────────────────────────────────────────
 
 /** Content-Type for the Prometheus text exposition format (v0.0.4). */
@@ -305,6 +332,7 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   const errors = getErrorMetrics();
   const hist = getLatencyHistogram();
   const cache = getCacheMetrics();
+  const webhook = getWebhookCounters();
   const lines: string[] = [];
 
   // Request count (counter) — one series per route.
