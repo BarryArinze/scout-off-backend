@@ -3,7 +3,7 @@ import { dispatchEventWebhook } from '../../src/services/webhooks';
 
 jest.mock('../../src/services/stellar', () => ({
   server: {
-    getEvents: jest.fn(),
+    queryEvents: jest.fn(),
   },
 }));
 
@@ -11,7 +11,8 @@ jest.mock('../../src/services/webhooks', () => ({
   dispatchEventWebhook: jest.fn().mockResolvedValue(undefined),
 }));
 
-const { server } = require('../../src/services/stellar') as { server: { getEvents: jest.Mock } };
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { server } = require('../../src/services/stellar') as { server: { queryEvents: jest.Mock } };
 const mockedDispatch = dispatchEventWebhook as jest.MockedFunction<typeof dispatchEventWebhook>;
 
 function makeEvent(type: string, payload: Record<string, unknown>, txHash: string, ledger = 100) {
@@ -30,7 +31,7 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
 
   it('dispatches a webhook when a milestone_approved event is indexed', async () => {
     const payload = { player_id: 'P1', milestone_type: 'identity' };
-    server.getEvents.mockResolvedValue({
+    server.queryEvents.mockResolvedValue({
       events: [makeEvent('milestone_approved', payload, 'hash-001')],
     });
 
@@ -41,10 +42,10 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
   });
 
   it('dispatches a webhook for each milestone_approved event in a batch', async () => {
-    server.getEvents.mockResolvedValue({
+    server.queryEvents.mockResolvedValue({
       events: [
         makeEvent('milestone_approved', { player_id: 'P1' }, 'hash-002', 100),
-        makeEvent('player_registered', { player_id: 'P2' }, 'hash-003', 101),
+        makeEvent('player_registered', { player_id: 'P2', wallet: 'GWALLETP2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }, 'hash-003', 101),
         makeEvent('milestone_approved', { player_id: 'P3' }, 'hash-004', 102),
       ],
     });
@@ -57,8 +58,8 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
   });
 
   it('does not dispatch a webhook for non-milestone_approved events', async () => {
-    server.getEvents.mockResolvedValue({
-      events: [makeEvent('player_registered', { player_id: 'P1' }, 'hash-005')],
+    server.queryEvents.mockResolvedValue({
+      events: [makeEvent('player_registered', { player_id: 'P1', wallet: 'GWALLETP1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }, 'hash-005')],
     });
 
     await indexEvents();
@@ -67,7 +68,7 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
   });
 
   it('does not dispatch any webhooks when the event stream is empty', async () => {
-    server.getEvents.mockResolvedValue({ events: [] });
+    server.queryEvents.mockResolvedValue({ events: [] });
 
     await indexEvents();
 
@@ -75,10 +76,11 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
   });
 
   it('logs a warning and continues when the webhook dispatch fails', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const warnSpy = jest.spyOn(require('../../src/utils/logger').logger, 'warn').mockImplementation(() => {});
     mockedDispatch.mockRejectedValueOnce(new Error('endpoint unreachable'));
 
-    server.getEvents.mockResolvedValue({
+    server.queryEvents.mockResolvedValue({
       events: [makeEvent('milestone_approved', { player_id: 'P1' }, 'hash-006')],
     });
 
@@ -87,5 +89,78 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
 
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('endpoint unreachable'));
     warnSpy.mockRestore();
+  });
+
+  it('detects a reorg and rolls back previously indexed events', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getDb } = require('../../src/db');
+    const db = getDb();
+    const warnSpy = jest.spyOn(require('../../src/utils/logger').logger, 'warn').mockImplementation(() => {});
+
+    // Initial indexing
+    server.queryEvents.mockResolvedValue({
+      latestLedger: 101,
+      events: [
+        makeEvent('player_registered', { player_id: 'R1' }, 'hash-R1', 100, 'hashA'),
+        makeEvent('player_registered', { player_id: 'R2' }, 'hash-R2', 101, 'hashB')
+      ],
+    });
+    await indexEvents();
+
+    let count = db.prepare("SELECT count(*) as c FROM events WHERE ledger IN (100, 101)").get().c;
+    expect(count).toBe(2);
+
+    // Reorg simulation: RPC returns a different hash for ledger 101
+    server.queryEvents.mockResolvedValue({
+      latestLedger: 101,
+      events: [
+        makeEvent('player_registered', { player_id: 'R1' }, 'hash-R1', 100, 'hashA'),
+        makeEvent('player_registered', { player_id: 'R3' }, 'hash-R3', 101, 'hashC')
+      ],
+    });
+    
+    await indexEvents();
+    
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('Reorg detected at ledger 101'));
+    warnSpy.mockRestore();
+
+    count = db.prepare("SELECT count(*) as c FROM events WHERE ledger IN (100, 101)").get().c;
+    expect(count).toBe(2);
+    const hashes = db.prepare("SELECT tx_hash FROM events WHERE ledger = 101").all().map((r: any) => r.tx_hash);
+    expect(hashes).toContain('hash-R3');
+    expect(hashes).not.toContain('hash-R2');
+  });
+
+  it('rolls back the entire batch if an error occurs mid-batch', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { getDb, fetchLastIndexedLedger } = require('../../src/db');
+    const db = getDb();
+    
+    const beforeCount = db.prepare("SELECT count(*) as c FROM events").get().c;
+    const beforeLedger = fetchLastIndexedLedger();
+
+    // Mock normalizePayload to throw midway through the batch
+    const { normalizePayload } = require('../../src/services/indexer');
+    const originalNormalizePayload = normalizePayload;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    jest.spyOn(require('../../src/services/indexer'), 'normalizePayload').mockImplementation((p: any) => {
+      if (p.player_id === 'CRASH') throw new Error('Crash!');
+      return originalNormalizePayload(p);
+    });
+
+    server.queryEvents.mockResolvedValue({
+      latestLedger: 150,
+      events: [
+        makeEvent('player_registered', { player_id: 'OK' }, 'hash-OK', 150),
+        makeEvent('player_registered', { player_id: 'CRASH' }, 'hash-CRASH', 150)
+      ],
+    });
+
+    await expect(indexEvents()).rejects.toThrow('Crash!');
+
+    const afterCount = db.prepare("SELECT count(*) as c FROM events").get().c;
+    expect(afterCount).toBe(beforeCount);
+    
+    expect(fetchLastIndexedLedger()).toBe(beforeLedger);
   });
 });

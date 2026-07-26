@@ -1,82 +1,105 @@
-/**
- * Tests for the player list cache: hit/miss behaviour and invalidation.
- * Uses the real cache module (not mocked) to verify actual cache logic.
- */
+import { EventEmitter } from 'events';
+import RedisMock from 'ioredis-mock';
+import { InMemoryCacheStore } from '../../src/services/inMemoryCacheStore';
+import { RedisCacheStore, RedisLike } from '../../src/services/redisCacheStore';
+import { runCacheStoreContractTests } from './cacheStore.contract';
 
-// Isolate the cache module between tests so state doesn't leak.
-let cacheModule: typeof import('../../src/services/cache');
+// Same contract, two backends. There is no live Redis server in this
+// environment, so the Redis-backed run uses ioredis-mock — an in-memory fake
+// that implements the ioredis client surface (get/set/del/exists/scan/
+// pipeline, including PX/EX TTL support) so the SCAN-based invalidation and
+// TTL-expiry paths in RedisCacheStore are exercised without a real server.
+runCacheStoreContractTests('InMemoryCacheStore', () => new InMemoryCacheStore());
 
-beforeEach(() => {
-  jest.resetModules();
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  cacheModule = require('../../src/services/cache');
+runCacheStoreContractTests('RedisCacheStore (ioredis-mock)', async () => {
+  // ioredis-mock simulates multiple clients talking to the *same* server, so
+  // separate `new RedisMock()` instances share state by default (mirroring
+  // real Redis). Flush before each test so the contract suite sees an
+  // isolated store per test, same as the fresh InMemoryCacheStore above.
+  const client = new RedisMock();
+  await client.flushall();
+  return new RedisCacheStore(client as unknown as RedisLike);
 });
 
-describe('cacheGet / cacheSet', () => {
-  it('returns undefined for a key that has never been set', () => {
-    expect(cacheModule.cacheGet('players:list:{}' )).toBeUndefined();
+describe('cache.ts public API (default in-memory backend)', () => {
+  // REDIS_URL is unset in the test environment, so src/services/cache.ts
+  // resolves to the InMemoryCacheStore backend.
+  let cache: typeof import('../../src/services/cache');
+
+  beforeEach(() => {
+    jest.resetModules();
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    cache = require('../../src/services/cache');
   });
 
-  it('returns the stored value immediately after cacheSet', () => {
-    cacheModule.cacheSet('players:list:{"region":"eu"}', { data: [], total: 0 });
-    expect(cacheModule.cacheGet('players:list:{"region":"eu"}')).toEqual({ data: [], total: 0 });
+  it('cacheSet/cacheGet round-trip a value', async () => {
+    await cache.cacheSet('players:1', { name: 'Bob' });
+    await expect(cache.cacheGet('players:1')).resolves.toEqual({ name: 'Bob' });
   });
 
-  it('returns undefined after TTL expires', () => {
-    jest.useFakeTimers();
-    cacheModule.cacheSet('players:list:ttl', { data: [] }, 500);
-    jest.advanceTimersByTime(600);
-    expect(cacheModule.cacheGet('players:list:ttl')).toBeUndefined();
-    jest.useRealTimers();
+  it('cacheGet returns undefined for a key that was never set', async () => {
+    await expect(cache.cacheGet('nope')).resolves.toBeUndefined();
   });
 
-  it('still returns value before TTL expires', () => {
-    jest.useFakeTimers();
-    cacheModule.cacheSet('players:list:ttl2', { data: ['x'] }, 500);
-    jest.advanceTimersByTime(400);
-    expect(cacheModule.cacheGet('players:list:ttl2')).toEqual({ data: ['x'] });
-    jest.useRealTimers();
-  });
-});
+  it('invalidatePlayerCache() clears players:list:* and, if given a playerId, players:<id>', async () => {
+    await cache.cacheSet('players:list:region=africa', ['a', 'b']);
+    await cache.cacheSet('players:list:region=europe', ['c']);
+    await cache.cacheSet('players:42', { id: 42 });
 
-describe('invalidatePlayerCache', () => {
-  it('clears all players:list: prefixed entries', () => {
-    cacheModule.cacheSet('players:list:{}', { data: [] });
-    cacheModule.cacheSet('players:list:{"region":"eu"}', { data: [] });
+    await cache.invalidatePlayerCache('42');
 
-    cacheModule.invalidatePlayerCache();
-
-    expect(cacheModule.cacheGet('players:list:{}')).toBeUndefined();
-    expect(cacheModule.cacheGet('players:list:{"region":"eu"}')).toBeUndefined();
+    await expect(cache.cacheGet('players:list:region=africa')).resolves.toBeUndefined();
+    await expect(cache.cacheGet('players:list:region=europe')).resolves.toBeUndefined();
+    await expect(cache.cacheGet('players:42')).resolves.toBeUndefined();
   });
 
-  it('does not clear non-list player entries when no playerId is given', () => {
-    cacheModule.cacheSet('players:abc123', { wallet: 'G...' });
+  it('invalidatePlayerCache() without a playerId only clears the list cache', async () => {
+    await cache.cacheSet('players:list:all', ['a']);
+    await cache.cacheSet('players:99', { id: 99 });
 
-    cacheModule.invalidatePlayerCache();
+    await cache.invalidatePlayerCache();
 
-    expect(cacheModule.cacheGet('players:abc123')).toBeDefined();
+    await expect(cache.cacheGet('players:list:all')).resolves.toBeUndefined();
+    await expect(cache.cacheGet('players:99')).resolves.toEqual({ id: 99 });
   });
 
-  it('clears the specific player entry when playerId is supplied', () => {
-    cacheModule.cacheSet('players:abc123', { wallet: 'G...' });
-    cacheModule.cacheSet('players:list:{}', { data: [] });
+  it('invalidateMilestoneCache() clears the milestone entry and the player list cache', async () => {
+    await cache.cacheSet('milestones:7', [{ type: 'identity' }]);
+    await cache.cacheSet('players:list:all', ['x']);
+    await cache.cacheSet('players:7', { id: 7 });
 
-    cacheModule.invalidatePlayerCache('abc123');
+    await cache.invalidateMilestoneCache('7');
 
-    expect(cacheModule.cacheGet('players:abc123')).toBeUndefined();
-    expect(cacheModule.cacheGet('players:list:{}')).toBeUndefined();
+    await expect(cache.cacheGet('milestones:7')).resolves.toBeUndefined();
+    await expect(cache.cacheGet('players:list:all')).resolves.toBeUndefined();
+    await expect(cache.cacheGet('players:7')).resolves.toBeUndefined();
   });
 });
 
-describe('invalidateMilestoneCache', () => {
-  it('clears the milestone entry and all list entries', () => {
-    cacheModule.cacheSet('milestones:p1', [{ id: 1 }]);
-    cacheModule.cacheSet('players:list:{}', { data: [] });
+describe('cache.ts Redis backend error handling', () => {
+  // A Redis client's 'error' event with no listener is treated by Node as an
+  // uncaught exception and crashes the process. Simulate that event here and
+  // assert the module survives it, guarding against the listener being
+  // dropped in a future refactor.
+  it('does not crash when the Redis client emits an error event', async () => {
+    const fakeClient = new EventEmitter();
+    jest.resetModules();
+    jest.doMock('ioredis', () => ({
+      __esModule: true,
+      default: jest.fn(() => fakeClient),
+    }));
+    jest.doMock('../../src/config', () => ({
+      __esModule: true,
+      default: { ...jest.requireActual('../../src/config').default, redisUrl: 'redis://fake:6379' },
+    }));
 
-    cacheModule.invalidateMilestoneCache('p1');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('../../src/services/cache');
 
-    expect(cacheModule.cacheGet('milestones:p1')).toBeUndefined();
-    expect(cacheModule.cacheGet('players:list:{}')).toBeUndefined();
+    expect(() => fakeClient.emit('error', new Error('connection refused'))).not.toThrow();
+
+    jest.dontMock('ioredis');
+    jest.dontMock('../../src/config');
+    jest.resetModules();
   });
 });

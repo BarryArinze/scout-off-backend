@@ -1,5 +1,6 @@
 jest.mock('../../src/services/ipfs', () => ({
   gatewayUrl: (cid: string) => `https://gateway.pinata.cloud/ipfs/${cid}`,
+  gatewayUrls: (cid: string) => [`https://gateway.pinata.cloud/ipfs/${cid}`],
 }));
 
 import { serializeIpfsResult, IpfsSerializedResult } from '../../src/utils/ipfsSerializer';

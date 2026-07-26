@@ -18,6 +18,7 @@ describe('sendUnauthorized', () => {
       success: false,
       errorCode: 9,
       error: 'Missing auth token',
+      code: 'UNAUTHORIZED',
     });
   });
 
@@ -28,6 +29,7 @@ describe('sendUnauthorized', () => {
       success: false,
       errorCode: 9,
       error: 'Missing auth token',
+      code: 'UNAUTHORIZED',
       reason: { detail: 'no header' },
     });
   });
@@ -49,6 +51,7 @@ describe('sendForbidden', () => {
       success: false,
       errorCode: 9,
       error: 'Insufficient permissions',
+      code: 'FORBIDDEN',
     });
   });
 
@@ -59,6 +62,7 @@ describe('sendForbidden', () => {
       success: false,
       errorCode: 9,
       error: 'Insufficient permissions',
+      code: 'FORBIDDEN',
       reason: { requiredRole: 'admin', providedRole: 'player' },
     });
   });

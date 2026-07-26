@@ -37,6 +37,7 @@ describe("Player profile history", () => {
     // Ensure base player exists in DB via register endpoint.
     // This endpoint expects either `metadata` (pins to IPFS) or `metadataUri`.
     // To avoid IPFS side effects, mock pinJson.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const ipfs = require("../../src/services/ipfs");
     jest.spyOn(ipfs, "pinJson").mockResolvedValue("QmMetaPinned");
     jest
@@ -44,6 +45,7 @@ describe("Player profile history", () => {
       .mockImplementation((cid: unknown) => `https://gateway/${cid}`);
 
     // Mock webhook dispatch so test doesn't fail.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const webhooks = require("../../src/services/webhooks");
     jest.spyOn(webhooks, "dispatchEventWebhook").mockResolvedValue(undefined);
 

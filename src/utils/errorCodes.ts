@@ -15,6 +15,7 @@ export const ErrorCode = {
   VALIDATION_ERROR:      'VALIDATION_ERROR',
   MALFORMED_JSON:        'MALFORMED_JSON',
   PAYLOAD_TOO_LARGE:     'PAYLOAD_TOO_LARGE',
+  UNSUPPORTED_MEDIA_TYPE: 'UNSUPPORTED_MEDIA_TYPE',
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   UNAUTHORIZED:          'UNAUTHORIZED',
@@ -38,6 +39,11 @@ export const ErrorCode = {
   SUBSCRIPTION_REQUIRED: 'SUBSCRIPTION_REQUIRED',
   CONFLICT:              'CONFLICT',
   WALLET_MISMATCH:       'WALLET_MISMATCH',
+  FEATURE_DISABLED:      'FEATURE_DISABLED',
+
+  // ── Multi-sig administration ───────────────────────────────────────────────
+  EXPIRED_ACTION:        'EXPIRED_ACTION',
+  ACTION_EXECUTED:       'ACTION_EXECUTED',
 } as const;
 
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];

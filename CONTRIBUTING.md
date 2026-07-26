@@ -5,6 +5,7 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
 ## Table of Contents
 
 - [Getting Started](#getting-started)
+- [Seeding the Database](#seeding-the-database)
 - [Contribution Workflow](#contribution-workflow)
 - [Code Quality Standards](#code-quality-standards)
 - [Security & Dependency Review](#security--dependency-review)
@@ -15,9 +16,14 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
 
 ### Prerequisites
 
-- Node.js ≥ 18
+- Node.js — supported range is `>=18.0.0 <23.0.0` (see `engines.node` in [`package.json`](package.json)). [`.nvmrc`](.nvmrc) pins the version used for local dev and for the primary CI coverage upload (currently Node 20)
+  - If you use **nvm**: `nvm install && nvm use` (reads `.nvmrc` automatically)
+  - If you use **fnm**: `fnm install && fnm use`
+  - If you use **asdf**: `asdf install nodejs` (reads `.nvmrc` via the Node.js plugin)
 - npm ≥ 9
 - Git
+
+> CI's `lint` and `test` jobs run across a matrix of Node 18, 20, and 22 (`.github/workflows/ci.yml`) so a regression that only manifests on one supported version is caught before merge. `.nvmrc` remains the default for local dev; bump `engines.node` in `package.json` alongside the CI matrix if the supported range changes.
 
 ### Setup
 
@@ -25,6 +31,8 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
    ```bash
    git clone https://github.com/scout-off/scout-off-backend.git
    cd scout-off-backend
+   # Pick up the correct Node version automatically (nvm/fnm/asdf)
+   nvm use   # or: fnm use
    npm install
    ```
 
@@ -38,6 +46,97 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
    - Linting passes: `npm run lint`
    - No security vulnerabilities: `npm audit`
    - Environment is set up: `cp .env.example .env`
+
+## Seeding the Database
+
+New contributors don't need to manually create players, events, or
+subscriptions to start testing the API — `scripts/seed.ts` populates the
+local SQLite database with a realistic sample dataset in one command.
+
+### Running the seed
+
+```bash
+npm run seed
+# or equivalently:
+npx ts-node --project tsconfig.scripts.json scripts/seed.ts
+```
+
+This connects to the database at `DB_PATH` (default: `scout-off.db`),
+runs any pending migrations, and inserts the sample rows described below.
+
+### What gets seeded
+
+| Data                 | Count | Details                                                                          |
+| -------------------- | ----- | --------------------------------------------------------------------------------- |
+| Players               | 5     | One per region (West Africa, East Africa, South America, Europe, Southeast Asia) |
+| Positions             | 5     | Forward, Midfielder, Defender, Goalkeeper, Winger                                |
+| Progress tiers        | 0–3   | One player at each tier level (0, 1, 1, 2, 3), showcasing the full tier model     |
+| Milestone events      | 3     | `performance`, `identity`, and `trial_offer` milestones (`milestone_approved`)   |
+| Scout subscriptions   | 2     | One `premium` (90 days) and one `basic` (30 days), both active                   |
+| Contact unlocks       | 2     | Scout Alpha → `seed-player-001`, Scout Beta → `seed-player-003`                  |
+
+The full player/scout wallet list (with the exact seed values) lives in
+the comment block and constant declarations at the top of
+[`scripts/seed.ts`](scripts/seed.ts). At the time of writing, the seeded
+wallets used for manual API testing are:
+
+| Role                   | Wallet                                                    |
+| ----------------------- | ---------------------------------------------------------- |
+| `seed-player-001` (Forward, West Africa)   | `GAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZFAZQXNK3BFMN7XRVGB` |
+| `seed-player-003` (Defender, South America) | `GCRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZFAZQXNK3BFMN7X` |
+| Scout Alpha (`premium` subscription)        | `GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE` |
+| Scout Beta (`basic` subscription)           | `GHAJBGZFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVB` |
+
+### Example requests against seeded data
+
+Once seeded, the server (`npm run dev`) exposes the sample data through
+the normal API — no manual setup required for read endpoints:
+
+```bash
+# List all players
+curl http://localhost:4000/api/players
+
+# Filter by region and minimum tier
+curl "http://localhost:4000/api/players?region=West%20Africa&minTier=2"
+
+# Fetch a specific seeded player and their milestone history
+curl http://localhost:4000/api/players/seed-player-003
+curl http://localhost:4000/api/players/seed-player-001/milestones
+```
+
+Scout-facing endpoints require a Bearer token for the seeded scout wallet
+(see `POST /auth/challenge` and `POST /auth/token` in
+[`BACKEND_API_DOCS.md`](BACKEND_API_DOCS.md) for how to mint one locally),
+for example:
+
+```bash
+# Scout Alpha's subscription status (premium, seeded active)
+curl http://localhost:4000/api/scouts/GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE/subscription \
+  -H "Authorization: Bearer <scout-jwt-for-GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE>"
+
+# Contacts Scout Alpha has already unlocked (seed-player-001)
+curl http://localhost:4000/api/scouts/GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE/contacts \
+  -H "Authorization: Bearer <scout-jwt-for-GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE>"
+```
+
+### Idempotency
+
+The seed script is **idempotent** — every player is keyed by a stable
+`player_id` and every event by a stable `tx_hash`, both enforced by
+`UNIQUE`/primary-key constraints. Re-running `npm run seed` against an
+already-seeded database skips rows that already exist instead of creating
+duplicates or erroring, so it's always safe to run again (e.g. after
+pulling `main` or restarting your dev environment).
+
+### Resetting the seed
+
+To start from a clean slate, delete the SQLite database file and re-run
+the seed:
+
+```bash
+rm scout-off.db   # or whatever DB_PATH points at in your .env
+npm run seed
+```
 
 ## Contribution Workflow
 
@@ -113,6 +212,36 @@ Fixes #123
 
 ## Code Quality Standards
 
+### Pre-commit Hook
+
+A [Husky](https://typicode.com/husky/) pre-commit hook runs
+[lint-staged](https://github.com/lint-staged/lint-staged) automatically on
+every `git commit`. It applies ESLint (with `--fix`) to all staged `.ts` files
+under `src/` and `tests/`, so you catch and auto-fix lint violations before
+they reach CI.
+
+The configuration lives in the `"lint-staged"` key in `package.json`:
+
+```json
+"lint-staged": {
+  "src/**/*.ts": ["eslint --fix --ext .ts"],
+  "tests/**/*.ts": ["eslint --fix --ext .ts"]
+}
+```
+
+Husky is set up automatically when you run `npm install` (via the `prepare`
+lifecycle hook). If the hook does not run after cloning, enable it manually:
+
+```bash
+npx husky install
+```
+
+You can also run lint-staged on your current staged files at any time:
+
+```bash
+npx lint-staged
+```
+
 ### Required Checks
 
 - **Tests**: New features must include unit or integration tests
@@ -133,9 +262,18 @@ Fixes #123
 
 ### Coverage Goals
 
-- Target ≥ 80% code coverage for new code
-- Focus on critical paths: auth, payments, data validation
-- See `tests/` directory for examples
+Jest enforces minimum coverage thresholds automatically when running `npm run test:coverage`. The thresholds are configured in the `jest.coverageThreshold` block in `package.json`:
+
+| Metric     | Minimum |
+| ---------- | ------- |
+| Branches   | 70%     |
+| Functions  | 75%     |
+| Lines      | 80%     |
+| Statements | 80%     |
+
+Running `npm run test:coverage` below these thresholds will fail the suite. CI enforces coverage on every pull request via the `test` job in `.github/workflows/ci.yml`, which calls `npm run test:coverage` and uploads the `lcov` report to Codecov. The default `npm test` command does **not** collect coverage and will not fail on threshold violations — use `npm run test:coverage` locally when you want threshold enforcement.
+
+Focus coverage on critical paths: auth, payments, and data validation.
 
 ### Naming Conventions
 
@@ -162,6 +300,40 @@ npm audit
 - 🔴 **Moderate/High/Critical**: **Must fix before merging**
   - Moderate: Fix unless infeasible; document trade-offs
   - High/Critical: Fix immediately or block the PR
+
+### CI Enforcement & Exception Process
+
+CI runs `npm audit --omit=dev --audit-level=high` as a required job (`audit` in
+`.github/workflows/ci.yml`, alongside `lint`/`test`/`contracts`) and fails the
+build on any high/critical finding in **production** dependencies. Dev-only
+tooling (eslint, jest, autocannon, etc.) is excluded via `--omit=dev` so
+findings that never ship don't block merges.
+
+If this job fails on a finding that is genuinely not yet fixable:
+
+1. **Check for a non-breaking fix first.** Most high/critical findings are in
+   transitive dependencies — run `npm audit fix` (no `--force`) to pick up
+   anything resolvable within the existing semver ranges, then check whether
+   the direct dependency has a newer patch version. If the vulnerable package
+   is only pulled in transitively and the maintainer hasn't released a fix
+   yet, add an [`overrides`](https://docs.npmjs.com/cli/v10/configuring-npm/package-json#overrides)
+   entry in `package.json` to force the patched transitive version — this is
+   usually enough and doesn't require touching the direct dependency at all.
+2. **If no fix exists upstream** (no patched version published, or the only
+   fix is a major/breaking bump that needs its own dedicated PR): open a
+   tracking issue documenting the advisory (GHSA/CVE id), the affected
+   package and version, why it can't be resolved right now, and a re-check
+   date no more than 60 days out.
+3. **Get a second maintainer's sign-off** to merge despite the red `audit`
+   check for that one PR (a repo admin can override a single required status
+   check on a PR-by-PR basis — this is not a permanent CI change). Reference
+   the tracking issue from step 2 in both the override and the PR
+   description, e.g. `[audit-exception: GHSA-xxxx-xxxx-xxxx, tracked in #NNN,
+   re-check by YYYY-MM-DD]`.
+4. Do **not** work around the gate by lowering `--audit-level`, adding
+   `--omit` for a production package, or piping the command through
+   `|| true` — those changes are permanent and silently widen the gate for
+   every future PR, not just the one with the known exception.
 
 ### Dependency Update Process
 
@@ -210,6 +382,28 @@ The following dependencies require extra scrutiny during updates due to their se
 - Run security audit: `npm audit`
 - Test integration points manually
 - Verify no secrets are logged
+
+### Automated Dependency Updates
+
+Dependabot is configured in `.github/dependabot.yml` to open pull requests for outdated dependencies automatically, once per week on Mondays.
+
+**npm (Node.js backend)**
+
+- Directory: `/` (project root)
+- Label: `dependencies`, `infrastructure`, `javascript`
+- Limit: 5 open PRs at a time
+
+**Cargo (Rust smart contracts)**
+
+- Directory: `/contracts`
+- Label: `infra`, `easy`
+- Limit: 5 open PRs at a time
+- Grouped: all `soroban-*` crates are bundled into a single PR via the `soroban-deps` group, reducing noise from Soroban SDK patch releases.
+
+When Dependabot opens a Cargo PR, verify:
+1. Review the Cargo.lock diff and the crate's CHANGELOG for breaking changes.
+2. Run `cd contracts && cargo test --target x86_64-unknown-linux-gnu` locally to confirm the contracts still build and pass tests.
+3. Merge or close the PR — do **not** leave stale Dependabot PRs open longer than one sprint.
 
 ### Supply Chain Security
 
@@ -335,43 +529,14 @@ We track ~125 active issues. Use these guidelines to help us prioritize efficien
    Related to #456
    ```
 
-### Issue Template
+### Issue Templates
 
-```markdown
-## Summary
-One-line description.
-
-## Category
-[ ] Bug [ ] Feature [ ] Performance [ ] Documentation
-[ ] Refactor [ ] Infra [ ] Security [ ] Test
-
-## Priority (Estimated)
-[ ] P0 – Critical [ ] P1 – High [ ] P2 – Medium [ ] P3 – Low
-
-## Environment
-- OS: [macOS/Linux/Windows]
-- Node: [version]
-- npm: [version]
-- Network: [testnet/mainnet/local]
-
-## Description
-Detailed explanation of the issue or proposal.
-
-## Steps (for bugs)
-1.
-2.
-3.
-
-## Expected vs. Actual (for bugs)
-- Expected: …
-- Actual: …
-
-## Proposed Solution (for features)
-How would this be implemented?
-
-## Related Issues
-Fixes #XXX / Related to #YYY
-```
+Structured issue templates are available at `.github/ISSUE_TEMPLATE/`.
+When you click **New issue** on GitHub, choose the appropriate template
+— **Bug report** for bugs, **Feature request** for new capabilities.
+The templates prompt for the sections outlined above (repro steps,
+environment, acceptance criteria, etc.) so issues arrive with
+consistent detail.
 
 ## Getting Help
 

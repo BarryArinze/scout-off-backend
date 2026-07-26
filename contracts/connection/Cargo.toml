@@ -7,10 +7,11 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-soroban-sdk = { workspace = true }
+soroban-sdk = { workspace = true, features = ["testutils"] }
 scout-off-shared = { path = "../shared" }
 
-[dev-dependencies]
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 register = { path = "../register" }
 subscription = { path = "../subscription" }
+proptest = { workspace = true }
