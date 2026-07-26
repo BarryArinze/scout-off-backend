@@ -143,4 +143,71 @@ describe('errorHandler', () => {
     const body = getBody(res);
     expect(body.success).toBe(false);
   });
+
+  // ── issue #882: unexpected error shapes ────────────────────────────────────
+
+  it('returns 404 with message when error has status: 404 and message: "Resource not found"', () => {
+    const req = makeReq();
+    const res = makeRes();
+    const err = Object.assign(new Error('Resource not found'), { status: 404 });
+    errorHandler(err, req, res, next);
+    expect((res.status as jest.Mock)).toHaveBeenCalledWith(404);
+    const body = getBody(res);
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Resource not found');
+  });
+
+  it('returns 500 when error has no status property', () => {
+    const req = makeReq();
+    const res = makeRes();
+    const err = new Error('something unexpected');
+    // Confirm no status property exists
+    expect((err as unknown as Record<string, unknown>).status).toBeUndefined();
+    errorHandler(err, req, res, next);
+    expect((res.status as jest.Mock)).toHaveBeenCalledWith(500);
+    const body = getBody(res);
+    expect(body.success).toBe(false);
+  });
+
+  it('returns 500 with "Internal Server Error" when error has no message property', () => {
+    const req = makeReq();
+    const res = makeRes();
+    // Error object with message cleared
+    const err = new Error('');
+    Object.defineProperty(err, 'message', { value: '' });
+    errorHandler(err, req, res, next);
+    expect((res.status as jest.Mock)).toHaveBeenCalledWith(500);
+    const body = getBody(res);
+    expect(body.success).toBe(false);
+    expect(body.error).toBe('Internal Server Error');
+  });
+
+  it('returns 500 when a non-Error plain object is passed ({ code: "BROKEN" })', () => {
+    const req = makeReq();
+    const res = makeRes();
+    const plainErr = { code: 'BROKEN' } as unknown as Error;
+    expect(() => errorHandler(plainErr, req, res, next)).not.toThrow();
+    expect((res.status as jest.Mock)).toHaveBeenCalledWith(500);
+    const body = getBody(res);
+    expect(body.success).toBe(false);
+  });
+
+  it('returns 500 without crashing when null is passed as error', () => {
+    const req = makeReq();
+    const res = makeRes();
+    expect(() => errorHandler(null as unknown as Error, req, res, next)).not.toThrow();
+    expect((res.status as jest.Mock)).toHaveBeenCalledWith(500);
+    const body = getBody(res);
+    expect(body.success).toBe(false);
+  });
+
+  it('returns 500 when error has status: 200 (non-error status treated as unexpected)', () => {
+    const req = makeReq();
+    const res = makeRes();
+    const err = Object.assign(new Error('ok but wrong'), { status: 200 });
+    errorHandler(err, req, res, next);
+    expect((res.status as jest.Mock)).toHaveBeenCalledWith(500);
+    const body = getBody(res);
+    expect(body.success).toBe(false);
+  });
 });

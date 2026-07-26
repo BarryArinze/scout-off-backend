@@ -176,6 +176,95 @@ export DB_PATH=scout-off.db
 
 **Note:** If you made changes to data in PostgreSQL after switching, those changes will not be reflected in SQLite. Only rollback if the migration completed but you encounter unexpected issues during testing.
 
+## SSL / TLS Configuration
+
+Most managed PostgreSQL providers — including **AWS RDS**, **Heroku Postgres**, **Supabase**,
+**Neon**, and **Railway** — require or strongly recommend SSL for external connections.  The
+backend exposes the `DATABASE_SSL` environment variable to control TLS behaviour.
+
+### DATABASE_SSL values
+
+| Value | Effect |
+|---|---|
+| `true` (or `1`, `yes`) | Enable SSL with full certificate verification (**recommended for production**) |
+| `no-verify` | Enable SSL transport but skip certificate verification (dev/staging with self-signed certs) |
+| `false` / unset | Disable SSL entirely (local or private-network Postgres without TLS) |
+
+### Provider-specific examples
+
+#### AWS RDS / Aurora
+
+RDS requires SSL and provides a CA bundle.  For simple setups, `DATABASE_SSL=true` is enough
+because the RDS CA is in the system trust store used by the `pg` library.
+
+```bash
+DATABASE_SSL=true
+DATABASE_URL="postgresql://scout_user:password@your-rds-host.region.rds.amazonaws.com:5432/scout_off"
+```
+
+If you need to specify the CA bundle explicitly, do so via `PGSSLROOTCERT` (a standard `libpq`
+environment variable respected by the underlying `pg` library):
+
+```bash
+DATABASE_SSL=true
+PGSSLROOTCERT=/path/to/rds-combined-ca-bundle.pem
+```
+
+#### Heroku Postgres
+
+Heroku Postgres runs on AWS and uses a self-signed CA that is not in the system trust store.
+Use `no-verify` in review apps and `true` with `PGSSLROOTCERT` in production:
+
+```bash
+# Review apps / staging — acceptable shortcut
+DATABASE_SSL=no-verify
+DATABASE_URL="$DATABASE_URL"   # Heroku auto-sets this
+
+# Production — download the CA cert from the Heroku dashboard
+DATABASE_SSL=true
+PGSSLROOTCERT=/path/to/heroku-server-ca.pem
+```
+
+> **Note**: Heroku recommends disabling `rejectUnauthorized` only in ephemeral environments.
+> Use a pinned CA cert in production.
+
+#### Supabase
+
+Supabase uses a valid certificate signed by a trusted CA.  `DATABASE_SSL=true` works out of the
+box:
+
+```bash
+DATABASE_SSL=true
+DATABASE_URL="postgresql://postgres:password@db.your-project-ref.supabase.co:5432/postgres"
+```
+
+#### Neon / Railway
+
+Both Neon and Railway provision certificates through Let's Encrypt (trusted by default):
+
+```bash
+DATABASE_SSL=true
+DATABASE_URL="postgresql://user:password@your-host/dbname?sslmode=require"
+```
+
+#### Local development (no TLS)
+
+When running Postgres locally or inside a private Docker network with no TLS configured:
+
+```bash
+DATABASE_SSL=false   # or leave unset
+DATABASE_URL="postgresql://scout_user:password@localhost:5432/scout_off"
+```
+
+### How it works internally
+
+`DATABASE_SSL` is parsed in `src/config.ts` and passed to `PostgresDriver` in
+`src/db/postgres-driver.ts`:
+
+- `DATABASE_SSL=true` → `{ rejectUnauthorized: true }` (full verification)
+- `DATABASE_SSL=no-verify` → `{ rejectUnauthorized: false }` (transport only)
+- `DATABASE_SSL=false` / unset → no `ssl` option passed (plaintext)
+
 ## PostgreSQL Connection Pooling (Optional)
 
 For high-concurrency deployments, use PgBouncer or pgpool2:

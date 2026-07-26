@@ -1,13 +1,19 @@
 import { Router } from 'express';
 import express from 'express';
-import { getStats, getAllEvents, getFeeSummary, listValidators, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, introspectToken, revokeTokenController, reindex, getValidatorStatsEndpoint, getAuditLog, getAuditChainVerification, importValidators, getPendingActions, getPendingActionById, approvePendingAction } from '../controllers/adminController';
+import { getStats, getAllEvents, getFeeSummary, listValidators, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, introspectToken, revokeTokenController, reindex, getValidatorStatsEndpoint, getAuditLog, getAuditChainVerification, importValidators, getPendingActions, getPendingActionById, approvePendingAction, getAuditTrail } from '../controllers/adminController';
 import { importPlayers } from '../controllers/adminPlayerImportController';
+import { adminDeactivatePlayer, adminReactivatePlayer } from '../controllers/adminPlayerDeactivationController';
 import { getFeatureFlags, updateFeatureFlag } from '../controllers/featureFlagsController';
 import { exportEvents } from '../controllers/exportController';
 import { listDeadLetters, replayDeadLetter } from '../controllers/webhookAdminController';
+import { setIpReputationController, getIpReputationController } from '../controllers/ipReputationController';
 import { requireRole } from '../middleware/auth';
 import { ipAllowlistMiddleware } from '../middleware/ipAllowlist';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
+import { rateLimit } from '../middleware/rateLimit';
+
+/** Stricter rate limit for bulk import — 5 requests per minute per IP. */
+const importRateLimit = rateLimit({ windowMs: 60_000, max: 5 });
 
 const router = Router();
 
@@ -97,6 +103,22 @@ router.route('/fees')
  */
 router.route('/audit')
   .get(requireRole('admin'), getAuditLog)
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * GET /api/admin/audit/trail
+ *
+ * Returns a paginated, event-type-filtered audit trail in the canonical
+ * AuditEntry shape { id, event_type, actor_wallet, target_id, metadata,
+ * created_at, hash }. Accepts ?eventType=, ?from=, ?to= (ISO 8601),
+ * ?page=, ?pageSize= (#832).
+ *
+ * @response 200 { success: true, data: AuditEntry[], total, page, pageSize }
+ * @response 400 { success: false, error: string } - Invalid eventType or date range
+ * @auth Bearer (admin role required)
+ */
+router.route('/audit/trail')
+  .get(requireRole('admin'), getAuditTrail)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
 /**
@@ -210,10 +232,45 @@ router.post(
  */
 router.post(
   '/players/import',
+  importRateLimit,
   requireRole('admin'),
   express.text({ type: ['text/csv', 'text/plain'], limit: '1mb' }),
   importPlayers,
 );
+
+/**
+ * POST /api/admin/players/:playerId/deactivate
+ *
+ * Admin soft-delete of a player. Requires { reason } in the request body.
+ * Cancels all pending milestones and emits player_deactivated SSE events to
+ * every scout who has unlocked the player's contact details.
+ *
+ * @body { reason: string } — required, max 500 chars
+ * @response 200 { success: true, data: { playerId, cancelledMilestones, notifiedScouts } }
+ * @response 400 { success: false, error } — missing/invalid reason or playerId
+ * @response 404 { success: false, error } — player not found
+ * @response 409 { success: false, error } — player already deactivated
+ * @auth Bearer (admin role required)
+ */
+router.route('/players/:playerId/deactivate')
+  .post(requireRole('admin'), adminDeactivatePlayer)
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * POST /api/admin/players/:playerId/reactivate
+ *
+ * Restore a previously deactivated player. Clears deactivated_at and
+ * deactivation_reason, emits a player_reactivated SSE event, and writes
+ * a player_reactivated audit entry.
+ *
+ * @response 200 { success: true, data: { playerId } }
+ * @response 404 { success: false, error } — player not found
+ * @response 409 { success: false, error } — player already active
+ * @auth Bearer (admin role required)
+ */
+router.route('/players/:playerId/reactivate')
+  .post(requireRole('admin'), adminReactivatePlayer)
+  .all(methodNotAllowed(['POST']));
 
 /**
  * POST /api/admin/contract/pause
@@ -353,10 +410,53 @@ router.route('/actions/:id/approve')
   .all(methodNotAllowed(['POST']));
 
 /**
+ * POST /api/admin/reindex
+ *
+ * Trigger a background event backfill for a specific ledger range.
+ * The job fetches events in batches of 100 ledgers with a 50 ms inter-batch
+ * delay. Duplicate events are silently discarded via the UNIQUE constraint on
+ * tx_hash. The job status is available via GET /api/admin/reindex/status.
+ *
+ * @body { fromLedger: number, toLedger: number }
+ * @response 202 { success: true, data: { fromLedger, toLedger, status: 'running' } }
+ * @response 409 { success: false, error: string } - job already running
+ * @response 422 { success: false, error: string } - range > 10 000 ledgers or invalid range
+ * @auth Bearer (admin role required)
+ */
+router.route('/reindex')
+  .post(requireRole('admin'), triggerReindex)
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * GET /api/admin/reindex/status
+ *
+ * Return the current state of the background reindex job (live progress).
+ *
+ * @response 200 {
+ *   success: true,
+ *   data: {
+ *     status: 'idle' | 'running' | 'complete' | 'error',
+ *     from_ledger, to_ledger,
+ *     ledgers_processed, ledgers_total,
+ *     events_inserted,
+ *     started_at, completed_at, error_message
+ *   }
+ * }
+ * @auth Bearer (admin role required)
+ */
+router.route('/reindex/status')
+  .get(requireRole('admin'), reindexStatusHandler)
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
  * GET /api/admin/webhooks/dead-letters
  *
- * Lists webhook deliveries that exhausted their retry attempts, most recent first.
- * Query params: page (default 1), pageSize (default 20, max 100)
+ * Paginated list of dead-lettered webhook deliveries.
+ * Each entry includes url, payload_preview, retry_count, last_error, created_at.
+ *
+ * DELETE /api/admin/webhooks/dead-letters
+ *
+ * Purge all dead letters older than `olderThanDays` query param (default: 7 days).
  *
  * @response 200 { success: true, data: DeadLetterView[], total, page, pageSize }
  * @response 400 { success: false, error: string } - Invalid page/pageSize
@@ -364,25 +464,66 @@ router.route('/actions/:id/approve')
  */
 router.route('/webhooks/dead-letters')
   .get(requireRole('admin'), listDeadLetters)
-  .all(methodNotAllowed(['GET', 'HEAD']));
+  .delete(requireRole('admin'), purgeOldDeadLetters)
+  .all(methodNotAllowed(['GET', 'DELETE', 'HEAD']));
 
 /**
- * POST /api/admin/webhooks/:id/replay
+ * POST /api/admin/webhooks/dead-letters/:id/requeue
  *
- * Manually re-attempts delivery of a single dead-lettered webhook, re-signing
- * the payload with the subscription's current secret. Marks the row as
- * replayed on success; on failure, updates the attempt count/reason and
- * leaves it dead-lettered.
+ * Manually trigger an immediate retry of a specific dead-lettered webhook.
  *
- * @response 200 { success: true, message: string, data: { id, status } } - Replayed
- * @response 400 { success: false, error: string } - Invalid id
- * @response 404 { success: false, error: string } - No such dead letter
- * @response 409 { success: false, error: string } - Already replayed
- * @response 502 { success: false, error: string, data: { id, status, attempts } } - Replay failed
+ * DELETE /api/admin/webhooks/dead-letters/:id
+ *
+ * Purge a specific dead-letter row.
+ *
+ * @response 200 { success: true, message, data: { id, status } }
+ * @response 404 { success: false, error } - Not found
+ * @response 409 { success: false, error } - Already replayed
+ * @response 502 { success: false, error } - Delivery failed
  * @auth Bearer (admin role required)
+ */
+router.route('/webhooks/dead-letters/:id/requeue')
+  .post(requireRole('admin'), requeueDeadLetter)
+  .all(methodNotAllowed(['POST']));
+
+router.route('/webhooks/dead-letters/:id')
+  .delete(requireRole('admin'), purgeDeadLetter)
+  .all(methodNotAllowed(['DELETE']));
+
+/**
+ * POST /api/admin/webhooks/:id/replay  (legacy alias — kept for backwards compat)
  */
 router.route('/webhooks/:id/replay')
   .post(requireRole('admin'), replayDeadLetter)
   .all(methodNotAllowed(['POST']));
+
+/**
+ * POST /api/admin/ip-allowlist
+ *
+ * Manually set an IP's reputation score.
+ * - body { ip, score: 0 }   → whitelist the IP (score pinned at 0, immune to decay)
+ * - body { ip, score: 100 } → blacklist the IP (immediate 429 for all requests)
+ * - body { ip, score: N }   → any 0–100 value (admin override)
+ *
+ * @body { ip: string, score: number }
+ * @response 200 { success: true, data: { ip, score } }
+ * @response 400 { success: false, error: string } - Validation error
+ * @auth Bearer (admin role required)
+ */
+router.route('/ip-allowlist')
+  .post(requireRole('admin'), setIpReputationController)
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * GET /api/admin/ip-reputation/:ip
+ *
+ * Returns the current reputation record (score, lastSeen, pinned) for a given IP.
+ *
+ * @response 200 { success: true, data: IpReputation | null }
+ * @auth Bearer (admin role required)
+ */
+router.route('/ip-reputation/:ip')
+  .get(requireRole('admin'), getIpReputationController)
+  .all(methodNotAllowed(['GET', 'HEAD']));
 
 export default router;

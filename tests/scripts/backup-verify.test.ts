@@ -145,4 +145,57 @@ const isWindows = process.platform === 'win32';
 
     expect(output).toContain('players row count mismatch');
   });
+
+  // ── Issue #716: table_count() must fail loudly on query errors ─────────────
+
+  it('fails loudly when the source DB is inaccessible (table_count failure)', () => {
+    // Simulate an inaccessible database by pointing DB_PATH at a
+    // plain text file that SQLite cannot open.  sqlite-cli.sh will exit
+    // non-zero, and the updated table_count() must propagate that as a
+    // hard failure rather than silently recording "0".
+    const notADb = path.join(tmpDir, 'not-a-db.db');
+    fs.writeFileSync(notADb, 'this is not a sqlite database\n');
+
+    const output = runScriptExpectFailure(BACKUP_SCRIPT, [], {
+      DB_PATH: notADb,
+      BACKUP_DEST: backupDir,
+    });
+
+    // The script must exit non-zero (runScriptExpectFailure guarantees that)
+    // and must emit an error message — NOT silently create a "successful" backup.
+    expect(output).toMatch(/ERROR|table_count|query failed/i);
+    // No backup file should have been created.
+    const backups = fs.existsSync(backupDir)
+      ? fs.readdirSync(backupDir).filter((n) => n.endsWith('.db'))
+      : [];
+    expect(backups).toHaveLength(0);
+  });
+
+  it('correctly records a genuine zero-row count without treating it as a failure', () => {
+    // Create a valid database with an empty (zero-row) players table so we
+    // can confirm that a real 0 still works — only query *errors* should fail.
+    const emptyDbPath = path.join(tmpDir, 'empty-players.db');
+    runSql(emptyDbPath, fs.readFileSync(INITIAL_SCHEMA, 'utf8'));
+    // Add migrations table but leave players empty.
+    runSql(emptyDbPath, `
+      CREATE TABLE migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL);
+      INSERT INTO migrations (id, applied_at) VALUES ('001_initial.sql', 1);
+      INSERT INTO events (type, ledger, tx_hash, payload)
+      VALUES ('register', 1, 'txhash1', '{}');
+    `);
+
+    const emptyBackupDir = path.join(tmpDir, 'empty-backups');
+    const output = runScript(BACKUP_SCRIPT, [], {
+      DB_PATH: emptyDbPath,
+      BACKUP_DEST: emptyBackupDir,
+    });
+
+    // Should succeed — 0 players is a valid state.
+    expect(output).toContain('Backup verified successfully');
+    const countsPath = path.join(
+      emptyBackupDir,
+      fs.readdirSync(emptyBackupDir).find((n) => n.endsWith('.counts'))!
+    );
+    expect(fs.readFileSync(countsPath, 'utf8')).toContain('players=0');
+  });
 });

@@ -43,7 +43,19 @@ pub struct ProgressContract;
 
 #[contractimpl]
 impl ProgressContract {
-    /// One-time setup. Stores admin and register contract address.
+    /// One-time contract setup. Stores the admin address and the register contract address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The address authorized to register and revoke validators.
+    /// * `register_contract` - Address of the deployed [`RegisterContract`] used to
+    ///   increment player progress levels when milestones are approved.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::AlreadyInitialized`] — Contract has already been initialized.
     pub fn initialize(env: Env, admin: Address, register_contract: Address) -> Result<(), Error> {
         if is_initialized(&env) {
             return Err(Error::AlreadyInitialized);
@@ -61,7 +73,21 @@ impl ProgressContract {
         Ok(())
     }
 
-    /// Admin-only: add a validator to the registry.
+    /// Add a validator address to the on-chain registry. Admin-only.
+    ///
+    /// Registered validators are the only accounts permitted to call
+    /// [`submit_milestone`] and [`approve_milestone`].
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `validator_address` - The Stellar address to approve as a validator.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::Unauthorized`] — Caller is not the admin.
     pub fn register_validator(env: Env, validator_address: Address) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
@@ -79,7 +105,21 @@ impl ProgressContract {
         Ok(())
     }
 
-    /// Admin-only: remove a validator from the registry.
+    /// Remove a validator from the on-chain registry. Admin-only.
+    ///
+    /// After revocation the address can no longer submit or approve milestones.
+    /// Any milestones already approved before revocation remain on-chain unchanged.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `validator_address` - The Stellar address to remove from the validator registry.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::Unauthorized`] — Caller is not the admin.
     pub fn revoke_validator(env: Env, validator_address: Address) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
@@ -97,8 +137,25 @@ impl ProgressContract {
         Ok(())
     }
 
-    /// Validator submits a milestone for a player. Returns the new milestone_id.
-    /// Only registered validators may call this. Emits milestone_submitted.
+    /// Submit a new milestone for a player, pending approval.
+    ///
+    /// Only registered validators may call this. Assigns a sequential `milestone_id`,
+    /// stores the milestone in a `pending` (unapproved) state, appends it to the
+    /// player's milestone list, and emits a `milestone_submitted` event.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `validator` - The registered validator's address (must authorize this call).
+    /// * `player_id` - The unique player identifier the milestone relates to.
+    /// * `milestone_type` - Type string: `"identity"` or `"performance"`.
+    /// * `evidence_uri` - IPFS/Arweave URI pointing to supporting evidence.
+    ///
+    /// # Returns
+    /// `Ok(milestone_id)` — the newly assigned unique milestone identifier (`u64`).
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::NotFound`] — Caller (`validator`) is not in the validator registry.
     pub fn submit_milestone(
         env: Env,
         validator: Address,
@@ -164,11 +221,30 @@ impl ProgressContract {
         Ok(milestone_id)
     }
 
-    /// Validator approves a pending milestone.
-    /// Sets the player's progress level based on milestone type:
-    ///   "identity"    → level 1  (Level 0 → 1)
-    ///   "performance" → level 2  (Level 1 → 2)
-    /// Emits milestone_approved.
+    /// Approve a pending milestone, incrementing the player's progress level.
+    ///
+    /// Only registered validators may approve. The level assigned depends on the
+    /// milestone type:
+    /// - `"identity"`    → player progress level set to at least `1`
+    /// - `"performance"` → player progress level set to at least `2`
+    ///
+    /// Calls `update_progress_level` on the [`RegisterContract`] via cross-contract
+    /// invocation and emits a `milestone_approved` event.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `validator` - The registered validator's address (must authorize this call).
+    /// * `milestone_id` - The identifier of the milestone to approve.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::NotFound`] — Caller (`validator`) is not in the validator registry.
+    /// * [`Error::InvalidInput`] — No milestone exists with the given `milestone_id`, or
+    ///   the milestone type is not `"identity"` or `"performance"`.
+    /// * [`Error::AlreadyVerified`] — The milestone has already been approved.
     pub fn approve_milestone(
         env: Env,
         validator: Address,
@@ -237,7 +313,17 @@ impl ProgressContract {
         Ok(())
     }
 
-    /// Read-only: returns the full milestone history for a player.
+    /// Return the complete, tamper-proof milestone history for a player.
+    ///
+    /// Includes both approved and pending milestones in submission order.
+    /// This is a read-only function; it requires no authorization and does not modify state.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `player_id` - The unique player identifier whose milestones to retrieve.
+    ///
+    /// # Returns
+    /// A `Vec<MilestoneData>` of all milestones for the player (may be empty). Never errors.
     pub fn get_milestones(env: Env, player_id: u64) -> Vec<MilestoneData> {
         let milestone_ids: Vec<u64> = env
             .storage()

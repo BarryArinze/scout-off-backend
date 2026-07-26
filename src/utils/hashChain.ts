@@ -60,6 +60,7 @@ export interface AuditChainFields {
   eventSource: string;
 }
 
+/** Maps an AuditChainFields object to the snake_case shape hashed into the audit log chain. */
 export function auditChainContent(f: AuditChainFields): Record<string, string> {
   return {
     action: f.action,
