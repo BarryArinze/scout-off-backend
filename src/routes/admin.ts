@@ -2,6 +2,8 @@ import { Router } from 'express';
 import { getStats, getAllEvents, getFeeSummary, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, introspectToken, reindex, getValidatorStatsEndpoint, getAuditLog } from '../controllers/adminController';
 import { exportEvents } from '../controllers/exportController';
 import { requireRole } from '../middleware/auth';
+import { validateQuery, validateBody } from '../middleware/validate';
+import { adminDateRangeSchema, paginationSchema, auditQuerySchema, ledgerRangeSchema, reindexSchema, validatorWalletSchema, withdrawFeesSchema, introspectSchema, updatePlatformFeeSchema } from '../validators/admin';
 
 const router = Router();
 
@@ -19,13 +21,13 @@ router.get('/stats', requireRole('admin'), getStats);
  * GET /api/admin/events
  *
  * Returns all indexed Soroban contract events in insertion order.
- * Query params: startDate, endDate (ISO 8601), eventType
+ * Query params: startDate, endDate (ISO 8601), eventType, fromLedger, toLedger, page, pageSize
  *
  * @response 200 { success: true, data: AdminEvent[] }
  * @response 400 { success: false, error: string } - Invalid date range
  * @auth Bearer (any authenticated user)
  */
-router.get('/events', requireRole('admin'), getAllEvents);
+router.get('/events', requireRole('admin'), validateQuery(adminDateRangeSchema), validateQuery(paginationSchema), validateQuery(ledgerRangeSchema), getAllEvents);
 
 /**
  * GET /api/admin/events/export
@@ -49,7 +51,7 @@ router.get('/events/export', requireRole('admin'), exportEvents);
  * @response 200 { success: true, data: FeeHistoryItem[] }
  * @auth Bearer (admin role required)
  */
-router.get('/fees', requireRole('admin'), getFeeSummary);
+router.get('/fees', requireRole('admin'), validateQuery(adminDateRangeSchema), getFeeSummary);
 
 /**
  * GET /api/admin/audit
@@ -60,7 +62,7 @@ router.get('/fees', requireRole('admin'), getFeeSummary);
  * @response 200 { success: true, data: AuditLogRow[], total, limit, offset }
  * @auth Bearer (admin role required)
  */
-router.get('/audit', requireRole('admin'), getAuditLog);
+router.get('/audit', requireRole('admin'), validateQuery(auditQuerySchema), getAuditLog);
 
 /**
  * POST /api/admin/fees
@@ -75,7 +77,7 @@ router.get('/audit', requireRole('admin'), getAuditLog);
  * @response 409 { success: false, error: string } - No fees available
  * @auth Bearer (admin role required)
  */
-router.post('/fees', requireRole('admin'), withdrawFeesController);
+router.post('/fees', requireRole('admin'), validateBody(withdrawFeesSchema), withdrawFeesController);
 
 /**
  * POST /api/admin/validators/register
@@ -90,7 +92,7 @@ router.post('/fees', requireRole('admin'), withdrawFeesController);
  * @response 403 { success: false, error: string } - Non-admin role
  * @auth Bearer (admin role required)
  */
-router.post('/validators/register', requireRole('admin'), registerValidator);
+router.post('/validators/register', requireRole('admin'), validateBody(validatorWalletSchema), registerValidator);
 
 /**
  * POST /api/admin/validators/revoke
@@ -105,7 +107,7 @@ router.post('/validators/register', requireRole('admin'), registerValidator);
  * @response 403 { success: false, error: string } - Non-admin role
  * @auth Bearer (admin role required)
  */
-router.post('/validators/revoke', requireRole('admin'), revokeValidator);
+router.post('/validators/revoke', requireRole('admin'), validateBody(validatorWalletSchema), revokeValidator);
 
 /**
  * POST /api/admin/contract/pause
@@ -144,7 +146,7 @@ router.post('/contract/unpause', requireRole('admin'), unpauseContract);
  * @response 400 { success: false, error: string } - Missing token or invalid/expired JWT
  * @auth Bearer (admin role required)
  */
-router.post('/introspect', requireRole('admin'), introspectToken);
+router.post('/introspect', requireRole('admin'), validateBody(introspectSchema), introspectToken);
 
 /**
  * POST /api/admin/indexer/reindex
@@ -157,7 +159,7 @@ router.post('/introspect', requireRole('admin'), introspectToken);
  * @response 400 { success: false, error: string } - Invalid fromLedger
  * @auth Bearer (admin role required)
  */
-router.post('/indexer/reindex', requireRole('admin'), reindex);
+router.post('/indexer/reindex', requireRole('admin'), validateBody(reindexSchema), reindex);
 
 router.get('/validators/:wallet/stats', requireRole('admin'), getValidatorStatsEndpoint);
 

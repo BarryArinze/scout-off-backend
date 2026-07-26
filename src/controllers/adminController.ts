@@ -44,12 +44,13 @@ const auditQuerySchema = z.object({
 /** GET /api/admin/audit */
 export async function getAuditLog(req: Request, res: Response, next: NextFunction) {
   try {
-    const parsed = auditQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid query parameters' });
-      return;
-    }
-    const { startDate, endDate, action, limit, offset } = parsed.data;
+    const { startDate, endDate, action, limit, offset } = req.query as {
+      startDate?: string;
+      endDate?: string;
+      action?: string;
+      limit: number;
+      offset: number;
+    };
     const rows = getAuditLogs({ action, startDate, endDate, limit, offset });
     const total = getAuditLogsCount({ action, startDate, endDate });
     res.json({
@@ -84,18 +85,17 @@ const paginationSchema = z.object({
 /** GET /api/admin/events */
 export async function getAllEvents(req: Request, res: Response, next: NextFunction) {
   try {
-    const dateResult = adminDateRangeSchema.safeParse(req.query);
-    if (!dateResult.success) {
-      res.status(400).json({ success: false, error: dateResult.error.errors[0]?.message ?? 'Invalid query parameters', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const pageResult = paginationSchema.safeParse(req.query);
-    if (!pageResult.success) {
-      res.status(400).json({ success: false, error: pageResult.error.errors[0]?.message ?? 'Invalid pagination parameters', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const { startDate, endDate, eventType } = dateResult.data;
-    const { limit: requestedLimit, offset: requestedOffset, page, pageSize } = pageResult.data;
+    const { startDate, endDate, eventType } = req.query as {
+      startDate?: Date;
+      endDate?: Date;
+      eventType?: string;
+    };
+    const { limit: requestedLimit, offset: requestedOffset, page, pageSize } = req.query as {
+      limit?: number;
+      offset?: number;
+      page?: number;
+      pageSize?: number;
+    };
     const limit = requestedLimit ?? pageSize ?? 20;
     const offset = requestedOffset ?? ((page ?? 1) - 1) * limit;
 
@@ -116,11 +116,6 @@ export async function getAllEvents(req: Request, res: Response, next: NextFuncti
 /** GET /api/admin/fees — returns fees_withdrawn event payloads */
 export async function getFeeSummary(req: Request, res: Response, next: NextFunction) {
   try {
-    const dateResult = adminDateRangeSchema.safeParse(req.query);
-    if (!dateResult.success) {
-      res.status(400).json({ success: false, error: dateResult.error.errors[0]?.message ?? 'Invalid query parameters', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
     const adminWallet = req.account ?? 'unknown';
     logAuditEvent({
       action: 'fee_history_query',
@@ -140,13 +135,7 @@ export async function getFeeSummary(req: Request, res: Response, next: NextFunct
 export async function registerValidator(req: Request, res: Response, next: NextFunction) {
   try {
     const adminWallet = req.account ?? 'unknown';
-    const { validatorWallet } = req.body as { validatorWallet?: string };
-
-    if (!validatorWallet || !STELLAR_ADDRESS_RE.test(validatorWallet)) {
-      logger.warn(`[admin] register_validator rejected — invalid address | admin=${adminWallet} target=${validatorWallet}`);
-      res.status(400).json({ success: false, error: 'validatorWallet must be a valid Stellar address', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
+    const { validatorWallet } = req.body as { validatorWallet: string };
 
     logger.info(`[admin] action=register_validator admin=${adminWallet} target=${validatorWallet}`);
     // TODO: invoke register_validator on Soroban contract
@@ -160,13 +149,7 @@ export async function registerValidator(req: Request, res: Response, next: NextF
 export async function revokeValidator(req: Request, res: Response, next: NextFunction) {
   try {
     const adminWallet = req.account ?? 'unknown';
-    const { validatorWallet } = req.body as { validatorWallet?: string };
-
-    if (!validatorWallet || !STELLAR_ADDRESS_RE.test(validatorWallet)) {
-      logger.warn(`[admin] revoke_validator rejected — invalid address | admin=${adminWallet} target=${validatorWallet}`);
-      res.status(400).json({ success: false, error: 'validatorWallet must be a valid Stellar address', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
+    const { validatorWallet } = req.body as { validatorWallet: string };
 
     logger.info(`[admin] action=revoke_validator admin=${adminWallet} target=${validatorWallet}`);
     // TODO: invoke revoke_validator on Soroban contract
@@ -255,15 +238,11 @@ const introspectSchema = z.object({
 /** POST /api/admin/introspect */
 export async function introspectToken(req: Request, res: Response, next: NextFunction) {
   try {
-    const parsed = introspectSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0].message, code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
+    const { token } = req.body as { token: string };
 
     let payload: jwt.JwtPayload;
     try {
-      payload = jwt.verify(parsed.data.token, config.jwtSecret) as jwt.JwtPayload;
+      payload = jwt.verify(token, config.jwtSecret) as jwt.JwtPayload;
     } catch {
       res.status(400).json({ success: false, error: 'Invalid or expired token', code: ErrorCode.TOKEN_INVALID });
       return;
@@ -328,20 +307,8 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
     res.status(403).json({ success: false, error: 'High-value operation requires multiple admin signatures' });
     return;
   }
-  const parsed = withdrawFeesSchema.safeParse(req.body);
 
-  if (!parsed.success) {
-    logAuditEvent({
-      action: 'fee_withdrawal_attempt',
-      adminWallet,
-      queryParams: { error: 'validation_failed', reason: parsed.error.errors[0]?.message },
-      timestamp: new Date().toISOString(),
-    });
-    res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body', code: ErrorCode.VALIDATION_ERROR });
-    return;
-  }
-
-  const { recipient } = parsed.data;
+  const { recipient } = req.body as { recipient: string };
 
   // Concurrency guard: reject duplicate simultaneous withdrawals.
   if (withdrawalInProgress) {
@@ -470,12 +437,7 @@ export async function getValidatorStatsEndpoint(req: Request, res: Response, nex
  */
 export async function reindex(req: Request, res: Response, next: NextFunction) {
   try {
-    const parsed = reindexSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'fromLedger must be a non-negative integer', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const { fromLedger } = parsed.data;
+    const { fromLedger } = req.body as { fromLedger: number };
     const previous = getLastLedger();
     setLastLedger(fromLedger);
     res.json({ success: true, data: { fromLedger, previous } });
