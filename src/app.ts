@@ -198,9 +198,11 @@ for (const prefix of prefixes) {
 // Must be registered before the 404 catch-all.
 mountGraphQL(app);
 
-// Catch-all 404 handler for unmatched routes
-app.use((_req, res) => {
-  res.status(404).json({ success: false, error: 'Not Found' });
+// Catch-all 404 handler for unmatched routes.
+// Returns JSON so API clients never receive an HTML error page.
+// Must be registered after all other routes and before the error handler.
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not Found', path: req.path });
 });
 
 app.use(errorHandler);
