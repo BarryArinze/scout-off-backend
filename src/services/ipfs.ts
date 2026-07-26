@@ -242,14 +242,33 @@ export async function checkHealth(): Promise<void> {
   }
 }
 
+const MAX_RETRIES = 5;
+const DEBOUNCE_MS = 60 * 1000; // 1 minute
+
 /**
- * Retry queued pending_pins entries. Called periodically when IPFS recovers.
+ * Retry queued pending_pins entries. Called periodically by the background worker.
  * Successfully pinned entries are removed from the queue.
+ * Failed retries are backed off exponentially.
+ * Rows exceeding MAX_RETRIES are skipped and considered permanently failed.
  */
 export async function retryPendingPins(): Promise<void> {
   if (!isPinataConfigured()) return;
   const pending = getPendingPins();
+  const now = Date.now();
+
   for (const row of pending) {
+    if (row.attempts >= MAX_RETRIES) {
+      continue; // Permanently failed
+    }
+
+    if (row.last_tried) {
+      const lastTried = new Date(row.last_tried).getTime();
+      const backoffMs = Math.pow(2, row.attempts) * DEBOUNCE_MS;
+      if (now - lastTried < backoffMs) {
+        continue; // Still in backoff window
+      }
+    }
+
     try {
       const body = JSON.parse(row.payload) as object;
       const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
@@ -257,6 +276,7 @@ export async function retryPendingPins(): Promise<void> {
       deletePendingPin(row.id);
     } catch {
       incrementPendingPinAttempts(row.id);
+      logger.warn(`[ipfs] retry failed for pending pin id=${row.id}, attempt=${row.attempts + 1}`);
     }
   }
 }
