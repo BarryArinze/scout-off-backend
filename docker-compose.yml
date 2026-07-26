@@ -52,6 +52,7 @@ services:
       # even when CONTRACT_ID is not yet set
       STELLAR_HEALTH_CHECK: "false"
       JSON_PAYLOAD_LIMIT: 1mb
+      UPLOAD_PAYLOAD_LIMIT: 10mb
 
       # ── Rate limiting ─────────────────────────────────────────────
       RATE_LIMIT_ENABLED: "true"

@@ -7,11 +7,9 @@ import { pinJson, pinFile } from '../services/ipfs';
 import { getPendingMilestones as getPendingMilestonesFromDb, getDb, removePendingMilestone, incrementValidatorApproved, queryEvents, updatePlayerProgress } from '../db';
 import { invalidateMilestoneCache } from '../services/cache';
 import { recordAudit } from '../utils/audit';
-import { isValidEvidenceUri } from '../utils/uriValidator';
+import { isValidMetadataUri, URI_VALIDATION_ERROR } from '../utils/uriValidator';
 import { tierForApprovedMilestones } from '../services/tierPromotion';
 import config from '../config';
-
-export { isValidMetadataUri as isValidEvidenceUri };
 
 /** MIME types accepted as evidence. */
 const ALLOWED_CONTENT_TYPE_PREFIXES = ['video/', 'image/', 'application/pdf', 'text/plain'];
