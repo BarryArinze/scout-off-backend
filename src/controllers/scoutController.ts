@@ -5,6 +5,7 @@ import { submitContactPayment, isSubscribed, purchaseSubscription, PaymentError 
 
 import { logger } from '../utils/logger';
 import config from '../config';
+import { inFlightLock } from '../utils/inflightLock';
 
 // ─── Validation schemas ────────────────────────────────────────────────────────
 
@@ -159,7 +160,11 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
       return;
     }
     const { tier, duration } = parsed.data;
-    const result = await purchaseSubscription(wallet, tier, duration);
+
+    // Use in-flight lock to prevent concurrent subscription requests for the same wallet
+    const result = await inFlightLock.withLock(`subscribe:${wallet}`, async () => {
+      return await purchaseSubscription(wallet, tier, duration);
+    });
 
     // Persist locally
     insertSubscription({

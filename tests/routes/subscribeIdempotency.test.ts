@@ -27,6 +27,14 @@ jest.mock('../../src/services/stellar', () => ({
   },
 }));
 
+jest.mock('../../src/utils/inflightLock', () => {
+  const actual = jest.requireActual('../../src/utils/inflightLock');
+  return {
+    ...actual,
+    inFlightLock: actual.inFlightLock,
+  };
+});
+
 jest.mock('../../src/services/indexer', () => ({
   indexEvents: jest.fn(),
   normalizeEventId: jest.fn(),
@@ -59,6 +67,7 @@ jest.mock('../../src/db', () => {
 import app from '../../src/app';
 import { purchaseSubscription } from '../../src/services/stellar';
 import { getIdempotencyRecord, saveIdempotencyRecord } from '../../src/db';
+import { inFlightLock } from '../../src/utils/inflightLock';
 
 const mockPurchase = purchaseSubscription as jest.Mock;
 const mockGetRecord = getIdempotencyRecord as jest.Mock;
@@ -75,6 +84,7 @@ beforeEach(() => {
   mockGetRecord.mockClear();
   mockSaveRecord.mockClear();
   idempotencyStore.clear();
+  inFlightLock.clear();
 });
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -208,5 +218,43 @@ describe('POST /api/scouts/:wallet/subscribe — idempotency', () => {
     expect(second.status).toBe(402);
     expect(second.body).toEqual(first.body);
     expect(mockPurchase).toHaveBeenCalledTimes(1);
+  });
+
+  it('prevents concurrent subscription requests for the same wallet (in-flight lock)', async () => {
+    const expiresAt = Math.floor(Date.now() / 1000) + 30 * 86400;
+    let callCount = 0;
+    
+    // Mock purchaseSubscription to track calls
+    mockPurchase.mockImplementation(async () => {
+      callCount++;
+      // Simulate a delay to ensure concurrent requests overlap
+      await new Promise(resolve => setTimeout(resolve, 50));
+      return { transactionId: `tx-concurrent-${callCount}`, tier: 'basic', expiresAt, status: 'active' };
+    });
+
+    const token = makeToken(WALLET);
+
+    // Fire two concurrent requests without idempotency keys
+    const [first, second] = await Promise.all([
+      request(app)
+        .post(`/api/scouts/${WALLET}/subscribe`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(VALID_BODY),
+      request(app)
+        .post(`/api/scouts/${WALLET}/subscribe`)
+        .set('Authorization', `Bearer ${token}`)
+        .send(VALID_BODY),
+    ]);
+
+    // Both should succeed
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+
+    // Only one purchaseSubscription call should have been made due to in-flight lock
+    expect(mockPurchase).toHaveBeenCalledTimes(1);
+
+    // Both should return the same transaction ID from the single call
+    expect(first.body.data.transactionId).toBe('tx-concurrent-1');
+    expect(second.body.data.transactionId).toBe('tx-concurrent-1');
   });
 });
