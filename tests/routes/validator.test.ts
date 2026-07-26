@@ -9,8 +9,12 @@ jest.mock('../../src/services/ipfs', () => ({
 }));
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn(),
+  queryEvents: jest.fn(),
   getPendingMilestones: jest.fn(),
+  getDb: jest.fn(),
+  removePendingMilestone: jest.fn(),
+  incrementValidatorApproved: jest.fn(),
+  updatePlayerProgress: jest.fn(),
 }));
 
 jest.mock('../../src/services/indexer', () => ({
@@ -22,9 +26,13 @@ jest.mock('../../src/services/cache', () => ({
   invalidateMilestoneCache: jest.fn(),
 }));
 
-import { getEvents, getPendingMilestones } from '../../src/db';
-const mockGetEvents = getEvents as jest.Mock;
+import { queryEvents, getPendingMilestones, getDb, removePendingMilestone, incrementValidatorApproved, updatePlayerProgress } from '../../src/db';
+const mockGetEvents = queryEvents as jest.Mock;
 const mockGetPendingMilestones = getPendingMilestones as jest.Mock;
+const mockGetDb = getDb as jest.Mock;
+const mockRemovePendingMilestone = removePendingMilestone as jest.Mock;
+const mockIncrementValidatorApproved = incrementValidatorApproved as jest.Mock;
+const mockUpdatePlayerProgress = updatePlayerProgress as jest.Mock;
 
 function makeToken(wallet: string, role: string): string {
   return jwt.sign({ sub: wallet, role }, SECRET, { expiresIn: '1h' });
@@ -39,6 +47,10 @@ beforeEach(() => {
   mockGetEvents.mockReset();
   mockGetPendingMilestones.mockReset();
   mockGetPendingMilestones.mockReturnValue({ data: [], total: 0 });
+  mockGetDb.mockReset();
+  mockRemovePendingMilestone.mockReset();
+  mockIncrementValidatorApproved.mockReset();
+  mockUpdatePlayerProgress.mockReset();
 });
 
 // ─── POST /api/validators/milestone ───────────────────────────────────────────
@@ -245,3 +257,64 @@ describe('GET /api/validators/milestones/pending', () => {
     );
   });
 });
+
+// ─── POST /api/validators/milestones/approve-bulk ─────────────────────────────
+
+describe('POST /api/validators/milestones/approve-bulk', () => {
+  it('returns 401 when no token is provided', async () => {
+    const res = await request(app).post('/api/validators/milestones/approve-bulk').send({ milestoneIds: ['m1'] });
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 403 when user is not a validator', async () => {
+    const playerToken = makeToken(PLAYER_WALLET, 'player');
+    const res = await request(app)
+      .post('/api/validators/milestones/approve-bulk')
+      .set('Authorization', `Bearer ${playerToken}`)
+      .send({ milestoneIds: ['m1'] });
+    expect(res.status).toBe(403);
+  });
+
+  it('returns 200 and processes valid, invalid, and unauthorized IDs', async () => {
+    const validatorToken = makeToken(VALIDATOR_WALLET, 'validator');
+    
+    const mockPrepare = jest.fn().mockImplementation((query) => {
+      return {
+        get: jest.fn().mockImplementation((id) => {
+          if (id === 'm1') {
+            return { milestone_id: 'm1', player_id: 'player-1', validator_wallet: VALIDATOR_WALLET };
+          }
+          if (id === 'm2') {
+            return { milestone_id: 'm2', player_id: 'player-2', validator_wallet: 'OTHER_VALIDATOR' };
+          }
+          return undefined; // m3 is not found
+        })
+      };
+    });
+    mockGetDb.mockReturnValue({ prepare: mockPrepare });
+    mockGetEvents.mockReturnValue([]);
+
+    const res = await request(app)
+      .post('/api/validators/milestones/approve-bulk')
+      .set('Authorization', `Bearer ${validatorToken}`)
+      .send({ milestoneIds: ['m1', 'm2', 'm3'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data).toHaveLength(3);
+    
+    const m1Result = res.body.data.find((r: any) => r.milestoneId === 'm1');
+    expect(m1Result.status).toBe('approved');
+
+    const m2Result = res.body.data.find((r: any) => r.milestoneId === 'm2');
+    expect(m2Result.status).toBe('unauthorized');
+
+    const m3Result = res.body.data.find((r: any) => r.milestoneId === 'm3');
+    expect(m3Result.status).toBe('invalid');
+
+    expect(mockRemovePendingMilestone).toHaveBeenCalledWith('m1');
+    expect(mockIncrementValidatorApproved).toHaveBeenCalledWith(VALIDATOR_WALLET);
+    expect(mockUpdatePlayerProgress).toHaveBeenCalledWith('player-1', expect.any(Number));
+  });
+});
+

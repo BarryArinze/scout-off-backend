@@ -17,15 +17,17 @@
  * so every call site must `await` these calls (they returned void
  * synchronously before this module supported a Redis backend).
  */
-import Redis from 'ioredis';
+import { getRedisClient } from './redis';
 import config from '../config';
 import { CacheStore } from './cacheStore';
 import { InMemoryCacheStore } from './inMemoryCacheStore';
 import { RedisCacheStore } from './redisCacheStore';
+import { recordCacheHit, recordCacheMiss } from '../middleware/metrics';
 
 function createStore(): CacheStore {
-  if (config.redisUrl) {
-    return new RedisCacheStore(new Redis(config.redisUrl));
+  const client = getRedisClient();
+  if (client) {
+    return new RedisCacheStore(client);
   }
   return new InMemoryCacheStore();
 }
@@ -34,7 +36,13 @@ const store: CacheStore = createStore();
 
 /** Fetch a cached value. Returns undefined if missing or expired. */
 export async function cacheGet<T>(key: string): Promise<T | undefined> {
-  return store.get<T>(key);
+  const value = await store.get<T>(key);
+  if (value !== undefined) {
+    recordCacheHit();
+  } else {
+    recordCacheMiss();
+  }
+  return value;
 }
 
 /** Store a value under `key`, expiring after `ttlMs` (default: config.playerCacheTtlMs). */

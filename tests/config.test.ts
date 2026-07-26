@@ -160,3 +160,103 @@ describe('config required env vars', () => {
     await expect(import('../src/config')).resolves.toBeDefined();
   });
 });
+
+describe('config DB_DRIVER validation', () => {
+  const savedDbDriver = process.env.DB_DRIVER;
+  const savedContractId = process.env.CONTRACT_ID;
+  const savedJwtSecret = process.env.JWT_SECRET;
+
+  beforeEach(() => {
+    process.env.CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
+    process.env.JWT_SECRET = 'test-secret';
+  });
+
+  afterEach(() => {
+    if (savedDbDriver !== undefined) {
+      process.env.DB_DRIVER = savedDbDriver;
+    } else {
+      delete process.env.DB_DRIVER;
+    }
+    process.env.CONTRACT_ID = savedContractId;
+    process.env.JWT_SECRET = savedJwtSecret;
+    jest.resetModules();
+  });
+
+  it('accepts DB_DRIVER=sqlite without throwing', async () => {
+    process.env.DB_DRIVER = 'sqlite';
+    jest.resetModules();
+    await expect(import('../src/config')).resolves.toBeDefined();
+  });
+
+  it('accepts DB_DRIVER=postgres without throwing', async () => {
+    process.env.DB_DRIVER = 'postgres';
+    jest.resetModules();
+    await expect(import('../src/config')).resolves.toBeDefined();
+  });
+
+  it('throws on a typo like "Postgres" (wrong case)', async () => {
+    process.env.DB_DRIVER = 'Postgres';
+    jest.resetModules();
+    await expect(import('../src/config')).rejects.toThrow(/DB_DRIVER="Postgres" is invalid/);
+  });
+
+  it('throws on "postgresql" and names the valid values', async () => {
+    process.env.DB_DRIVER = 'postgresql';
+    jest.resetModules();
+    let message = '';
+    try {
+      await import('../src/config');
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain('postgresql');
+    expect(message).toContain('sqlite');
+    expect(message).toContain('postgres');
+  });
+});
+
+describe('config PINATA_GATEWAY validation', () => {
+  const savedPinataGateway = process.env.PINATA_GATEWAY;
+  const savedContractId = process.env.CONTRACT_ID;
+  const savedJwtSecret = process.env.JWT_SECRET;
+
+  beforeEach(() => {
+    process.env.CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
+    process.env.JWT_SECRET = 'test-secret';
+  });
+
+  afterEach(() => {
+    if (savedPinataGateway !== undefined) {
+      process.env.PINATA_GATEWAY = savedPinataGateway;
+    } else {
+      delete process.env.PINATA_GATEWAY;
+    }
+    process.env.CONTRACT_ID = savedContractId;
+    process.env.JWT_SECRET = savedJwtSecret;
+    jest.resetModules();
+  });
+
+  it('accepts a valid HTTPS PINATA_GATEWAY without throwing', async () => {
+    process.env.PINATA_GATEWAY = 'https://gateway.pinata.cloud';
+    jest.resetModules();
+    await expect(import('../src/config')).resolves.toBeDefined();
+  });
+
+  it('accepts an unset PINATA_GATEWAY without throwing', async () => {
+    delete process.env.PINATA_GATEWAY;
+    jest.resetModules();
+    await expect(import('../src/config')).resolves.toBeDefined();
+  });
+
+  it('throws on an HTTP (non-HTTPS) PINATA_GATEWAY', async () => {
+    process.env.PINATA_GATEWAY = 'http://gateway.pinata.cloud';
+    jest.resetModules();
+    await expect(import('../src/config')).rejects.toThrow(/Invalid PINATA_GATEWAY/);
+  });
+
+  it('throws on a malformed PINATA_GATEWAY URL', async () => {
+    process.env.PINATA_GATEWAY = 'not-a-url';
+    jest.resetModules();
+    await expect(import('../src/config')).rejects.toThrow(/Invalid PINATA_GATEWAY/);
+  });
+});

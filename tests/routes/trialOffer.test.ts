@@ -9,7 +9,7 @@ const OTHER = 'GOTHERWALLET2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const PLAYER_ID = 'player-trial-123';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn(),
   getPlayerById: jest.fn(),
@@ -37,10 +37,10 @@ jest.mock('../../src/services/stellar', () => ({
   },
 }));
 
-import { getEvents, hasContactUnlock, getLatestSubscription } from '../../src/db';
+import { queryEvents, hasContactUnlock, getLatestSubscription } from '../../src/db';
 import { isSubscribed, logTrialOffer } from '../../src/services/stellar';
 
-const mockGetEvents = getEvents as jest.Mock;
+const mockGetEvents = queryEvents as jest.Mock;
 const mockHasContactUnlock = hasContactUnlock as jest.Mock;
 const mockIsSubscribed = isSubscribed as jest.Mock;
 const mockLogTrialOffer = logTrialOffer as jest.Mock;

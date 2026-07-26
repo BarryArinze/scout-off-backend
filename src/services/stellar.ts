@@ -13,13 +13,25 @@ import {
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 
+import { stellarBreaker } from '../utils/circuitBreaker';
+
 const tracer = trace.getTracer('scout-off-backend');
 
-const server = new SorobanRpc.Server(config.sorobanRpcUrl, {
+const rawServer = new SorobanRpc.Server(config.sorobanRpcUrl, {
   allowHttp: config.sorobanRpcUrl.startsWith('http://'),
 });
 
-export { server };
+const server = new Proxy(rawServer, {
+  get(target, prop, receiver) {
+    const value = Reflect.get(target, prop, receiver);
+    if (typeof value === 'function') {
+      return (...args: any[]) => stellarBreaker.execute(() => value.apply(target, args));
+    }
+    return value;
+  }
+});
+
+export { server, stellarBreaker };
 
 export function networkPassphrase(): string {
   return config.network === 'mainnet'
@@ -141,21 +153,123 @@ export async function isSubscribed(
 }
 
 /**
- * Stub: submit a pay-to-contact micro-fee on Stellar.
- * Replace with real Soroban invocation when ready.
+ * Invoke `pay_to_contact(scout, player_id)` on the Soroban contract to unlock
+ * direct contact with a player by paying the platform's micro-fee.
+ *
+ * Flow mirrors purchaseSubscription() / logTrialOffer():
+ *   getAccount → build tx → simulateTransaction → assembleTransaction
+ *   → sign → sendTransaction → poll getTransaction until final status.
+ *
+ * On success returns the confirmed transaction hash and a 'submitted' status.
+ * Throws PaymentError with code 'INSUFFICIENT_FUNDS' when the contract
+ * reports error #7 (InsufficientFee) — see contracts/subscription/src/lib.rs.
  */
 export async function submitContactPayment(
   scoutWallet: string,
   playerId: string,
 ): Promise<ContactPaymentResult> {
-  if (!scoutWallet || !playerId) {
-    throw new PaymentError('Missing scoutWallet or playerId', 'INVALID_ACCOUNT');
-  }
-  // TODO: build and submit pay_to_contact Soroban transaction
-  return {
-    transactionId: `stub-txid-${Date.now()}`,
-    status: 'submitted',
-  };
+  return tracer.startActiveSpan('stellar.submitContactPayment', async (span): Promise<ContactPaymentResult> => {
+    span.setAttribute('stellar.contract_function', 'pay_to_contact');
+    span.setAttribute('stellar.player_id', playerId);
+    try {
+      if (!scoutWallet || !playerId) {
+        throw new PaymentError('Missing scoutWallet or playerId', 'INVALID_ACCOUNT');
+      }
+
+      const { getPlatformKeypair } = await import('../utils/signer');
+      const keypair = getPlatformKeypair();
+
+      let account;
+      try {
+        account = await server.getAccount(keypair.publicKey());
+      } catch (err) {
+        throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      const contract = new Contract(config.contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: networkPassphrase(),
+      })
+        .addOperation(
+          contract.call(
+            'pay_to_contact',
+            Address.fromString(scoutWallet).toScVal(),
+            nativeToScVal(playerId, { type: 'string' }),
+          ),
+        )
+        .setTimeout(30)
+        .build();
+
+      let simResult;
+      try {
+        simResult = await server.simulateTransaction(tx);
+      } catch (err) {
+        throw new PaymentError(`Simulation request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        const errMsg = simResult.error ?? '';
+        if (isInsufficientFeeError(errMsg)) {
+          throw new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
+        }
+        throw new PaymentError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
+      }
+
+      const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+      preparedTx.sign(keypair);
+
+      let sendResult;
+      try {
+        sendResult = await server.sendTransaction(preparedTx);
+      } catch (err) {
+        throw new PaymentError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+      if (sendResult.status === 'ERROR') {
+        const errMsg = String(sendResult.errorResult ?? '');
+        if (isInsufficientFeeError(errMsg)) {
+          throw new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
+        }
+        throw new PaymentError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
+      }
+
+      const hash = sendResult.hash;
+      span.setAttribute('stellar.tx_hash', hash);
+
+      let getResult;
+      try {
+        getResult = await server.getTransaction(hash);
+        while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+          await new Promise((r) => setTimeout(r, 1000));
+          getResult = await server.getTransaction(hash);
+        }
+      } catch (err) {
+        throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+      }
+
+      if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+        const resultMeta = ((getResult as unknown) as { resultMetaXdr?: string }).resultMetaXdr ?? '';
+        if (isInsufficientFeeError(resultMeta)) {
+          throw new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
+        }
+        throw new PaymentError('pay_to_contact transaction failed on-chain', 'NETWORK_ERROR');
+      }
+
+      span.setAttribute('stellar.status', 'submitted');
+      return {
+        transactionId: hash,
+        status: 'submitted',
+      };
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.setAttribute('error.type', (err as Error).name);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
 }
 
 // ─── Trial offer ──────────────────────────────────────────────────────────────
@@ -1111,6 +1225,82 @@ export async function registerValidatorOnChain(
   });
 }
 
+export async function revokeValidatorOnChain(
+  validatorWallet: string,
+): Promise<RegisterValidatorResult> {
+  return tracer.startActiveSpan('stellar.revokeValidatorOnChain', async (span) => {
+    span.setAttribute('stellar.contract_function', 'revoke_validator');
+    try {
+      if (!validatorWallet) {
+        throw new PaymentError('Missing validatorWallet', 'INVALID_ACCOUNT');
+      }
+
+      const { getPlatformKeypair } = await import('../utils/signer');
+      const keypair = getPlatformKeypair();
+
+      const account = await server.getAccount(keypair.publicKey());
+      const contract = new Contract(config.contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: networkPassphrase(),
+      })
+        .addOperation(
+          contract.call('revoke_validator', Address.fromString(validatorWallet).toScVal()),
+        )
+        .setTimeout(30)
+        .build();
+
+      const simResult = await server.simulateTransaction(tx);
+
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        const errMsg = simResult.error ?? '';
+        if (errMsg.includes('#14') || /not.?registered/i.test(errMsg) || /already.?revoked/i.test(errMsg)) {
+          throw new ValidatorActionError('Validator is not registered or already revoked', 'ALREADY_REVOKED');
+        }
+        if (/unauthorized/i.test(errMsg)) {
+          throw new ValidatorActionError('Unauthorized: platform account cannot revoke this validator', 'UNAUTHORIZED');
+        }
+        throw new ValidatorActionError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
+      }
+
+      const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+      preparedTx.sign(keypair);
+
+      const sendResult = await server.sendTransaction(preparedTx);
+      if (sendResult.status === 'ERROR') {
+        throw new ValidatorActionError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
+      }
+
+      const hash = sendResult.hash;
+      span.setAttribute('stellar.tx_hash', hash);
+
+      let getResult = await server.getTransaction(hash);
+      while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+        await new Promise((r) => setTimeout(r, 1000));
+        getResult = await server.getTransaction(hash);
+      }
+
+      if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+        const resultMeta = ((getResult as unknown) as { resultMetaXdr?: string }).resultMetaXdr ?? '';
+        if (resultMeta.includes('#14') || /not.?registered/i.test(resultMeta) || /already.?revoked/i.test(resultMeta)) {
+          throw new ValidatorActionError('Validator is not registered or already revoked', 'ALREADY_REVOKED');
+        }
+        throw new ValidatorActionError('revoke_validator transaction failed on-chain', 'NETWORK_ERROR');
+      }
+
+      return { transactionId: hash };
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.setAttribute('error.type', (err as Error).name);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+
 /**
  * Invoke the contract's `pause()` function via the platform keypair.
  * Returns the transaction hash on success.
@@ -1398,6 +1588,103 @@ export async function queryMilestones(playerId: string): Promise<OnChainMileston
           'NETWORK_ERROR',
         );
       }
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.setAttribute('error.type', (err as Error).name);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
+
+/**
+ * Invoke `revoke_validator(validator: Address)` on the Soroban contract
+ * via the platform keypair.
+ *
+ * Flow mirrors registerValidatorOnChain():
+ *   getAccount → build tx → simulateTransaction → assembleTransaction
+ *   → sign → sendTransaction → poll getTransaction until final status.
+ *
+ * On success returns the confirmed transaction hash.
+ * Maps contract error codes to ValidatorActionError:
+ *   ALREADY_REVOKED  — validator already revoked
+ *   NOT_REGISTERED   — wallet was never a validator
+ *   UNAUTHORIZED     — platform account lacks permission
+ *   NETWORK_ERROR    — any RPC/transport failure
+ */
+export async function revokeValidatorOnChain(
+  validatorWallet: string,
+): Promise<RegisterValidatorResult> {
+  return tracer.startActiveSpan('stellar.revokeValidatorOnChain', async (span) => {
+    span.setAttribute('stellar.contract_function', 'revoke_validator');
+    try {
+      if (!validatorWallet) {
+        throw new PaymentError('Missing validatorWallet', 'INVALID_ACCOUNT');
+      }
+
+      const { getPlatformKeypair } = await import('../utils/signer');
+      const keypair = getPlatformKeypair();
+
+      const account = await server.getAccount(keypair.publicKey());
+      const contract = new Contract(config.contractId);
+
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: networkPassphrase(),
+      })
+        .addOperation(
+          contract.call('revoke_validator', Address.fromString(validatorWallet).toScVal()),
+        )
+        .setTimeout(30)
+        .build();
+
+      const simResult = await server.simulateTransaction(tx);
+
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        const errMsg = simResult.error ?? '';
+        if (errMsg.includes('#14') || /already.?revoked/i.test(errMsg)) {
+          throw new ValidatorActionError('Validator is already revoked on-chain', 'ALREADY_REVOKED');
+        }
+        if (errMsg.includes('#15') || /not.?registered/i.test(errMsg)) {
+          throw new ValidatorActionError('Wallet is not a registered validator on-chain', 'NOT_REGISTERED');
+        }
+        if (/unauthorized/i.test(errMsg)) {
+          throw new ValidatorActionError('Unauthorized: platform account cannot revoke this validator', 'UNAUTHORIZED');
+        }
+        throw new ValidatorActionError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
+      }
+
+      const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+      preparedTx.sign(keypair);
+
+      const sendResult = await server.sendTransaction(preparedTx);
+      if (sendResult.status === 'ERROR') {
+        throw new ValidatorActionError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
+      }
+
+      const hash = sendResult.hash;
+      span.setAttribute('stellar.tx_hash', hash);
+
+      let getResult = await server.getTransaction(hash);
+      while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+        await new Promise((r) => setTimeout(r, 1000));
+        getResult = await server.getTransaction(hash);
+      }
+
+      if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+        const resultMeta = ((getResult as unknown) as { resultMetaXdr?: string }).resultMetaXdr ?? '';
+        if (resultMeta.includes('#14') || /already.?revoked/i.test(resultMeta)) {
+          throw new ValidatorActionError('Validator is already revoked on-chain', 'ALREADY_REVOKED');
+        }
+        if (resultMeta.includes('#15') || /not.?registered/i.test(resultMeta)) {
+          throw new ValidatorActionError('Wallet is not a registered validator on-chain', 'NOT_REGISTERED');
+        }
+        throw new ValidatorActionError('revoke_validator transaction failed on-chain', 'NETWORK_ERROR');
+      }
+
+      return { transactionId: hash };
     } catch (err) {
       span.recordException(err as Error);
       span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });

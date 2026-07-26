@@ -4,6 +4,8 @@ import {
   getPendingMilestones,
   milestoneSchema,
   pendingQuerySchema,
+  approveBulkMilestones,
+  bulkApproveSchema,
 } from '../controllers/validatorController';
 import { requireRole } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
@@ -28,5 +30,9 @@ router.route('/milestones/pending')
 router.route('/:wallet/milestones/pending')
   .get(requireRole('validator'), validateQuery(pendingQuerySchema), getPendingMilestones)
   .all(methodNotAllowed(['GET', 'HEAD']));
+
+router.route('/milestones/approve-bulk')
+  .post(requireRole('validator'), validateBody(bulkApproveSchema), approveBulkMilestones)
+  .all(methodNotAllowed(['POST']));
 
 export default router;

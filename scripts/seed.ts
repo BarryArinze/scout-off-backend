@@ -39,7 +39,7 @@ if (!process.env.CONTRACT_ID)
   process.env.CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
 if (!process.env.JWT_SECRET) process.env.JWT_SECRET = 'seed-script';
 
-import { initDb, getDb, upsertPlayer, updatePlayerProgress } from '../src/db';
+import { initDb, getDb, insertOrUpdatePlayer, updatePlayerProgress } from '../src/db';
 import { runMigrations } from '../src/db/migrate';
 
 // ─── Sample data ──────────────────────────────────────────────────────────────
@@ -359,6 +359,17 @@ function seed(): void {
       updatePlayerProgress(p.player_id, p.progress_level);
       insertedPlayers.push(p.player_id);
     }
+    insertOrUpdatePlayer({
+      player_id: p.player_id,
+      wallet: p.wallet,
+      position: p.position,
+      region: p.region,
+      metadata_uri: p.metadata_uri,
+      created_at: p.created_at,
+    });
+    updatePlayerProgress(p.player_id, p.progress_level);
+    insertedPlayers.push(p.player_id);
+  }
 
     console.log(`  Players   inserted=${insertedPlayers.length}  skipped=${skippedPlayers.length}`);
     if (insertedPlayers.length) console.log(`    + ${insertedPlayers.join(', ')}`);

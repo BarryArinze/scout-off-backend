@@ -22,6 +22,9 @@ const REQUIRED_RUNTIME_VARS = ['CONTRACT_ID', 'JWT_SECRET'];
 // Valid NODE_ENV values; defaults to 'development' when unset.
 const VALID_NODE_ENVS = ['development', 'test', 'production'];
 
+// Valid DB_DRIVER values; defaults to 'sqlite' when unset.
+const VALID_DB_DRIVERS = ['sqlite', 'postgres'];
+
 function validateRuntimeEnv(env = process.env) {
   const errors = [];
 
@@ -35,6 +38,31 @@ function validateRuntimeEnv(env = process.env) {
   for (const key of REQUIRED_RUNTIME_VARS) {
     if (!env[key]) {
       errors.push(`Missing required environment variable: ${key}`);
+    }
+  }
+
+  // Validate DB_DRIVER if specified — reject typos so they don't silently fall back to SQLite
+  if (env.DB_DRIVER !== undefined) {
+    if (!VALID_DB_DRIVERS.includes(env.DB_DRIVER)) {
+      errors.push(
+        `DB_DRIVER="${env.DB_DRIVER}" is invalid. Must be one of: ${VALID_DB_DRIVERS.join(', ')}. ` +
+        `Check for typos — an unrecognised value does NOT fall back to SQLite; it fails fast instead.`
+      );
+    }
+  }
+
+  // Validate PINATA_GATEWAY if specified — must be a valid HTTPS URL, since
+  // IPFS content resolution over plain HTTP is both insecure and, on most
+  // gateways, unsupported.
+  if (env.PINATA_GATEWAY !== undefined && env.PINATA_GATEWAY.trim() !== '') {
+    let isValidHttpsUrl = false;
+    try {
+      isValidHttpsUrl = new URL(env.PINATA_GATEWAY).protocol === 'https:';
+    } catch {
+      isValidHttpsUrl = false;
+    }
+    if (!isValidHttpsUrl) {
+      errors.push(`PINATA_GATEWAY="${env.PINATA_GATEWAY}" is invalid. Must be a valid HTTPS URL.`);
     }
   }
 
@@ -160,6 +188,7 @@ if (require.main === module) {
 module.exports = {
   REQUIRED_RUNTIME_VARS,
   VALID_NODE_ENVS,
+  VALID_DB_DRIVERS,
   validateRuntimeEnv,
   findStaleExampleKeys,
 };

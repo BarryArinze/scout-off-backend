@@ -6,15 +6,36 @@
  * which is called by the refactored initDb() function.
  */
 
-import { Client } from 'pg';
+import { Client, type ClientConfig } from 'pg';
 import { DbDriver } from './driver';
+
+/** SSL option accepted by the PostgresDriver constructor. */
+export type PostgresSslOption =
+  /** Enable SSL with full certificate verification (recommended for managed providers). */
+  | true
+  /** Enable SSL but skip certificate verification (dev/staging with self-signed certs). */
+  | 'no-verify'
+  /** Disable SSL entirely (local / private-network Postgres without TLS). */
+  | false;
 
 export class PostgresDriver implements DbDriver {
   private client: Client;
   private inTransaction = false;
 
-  constructor(connectionString: string) {
-    this.client = new Client({ connectionString });
+  constructor(connectionString: string, ssl: PostgresSslOption = false) {
+    const clientConfig: ClientConfig = { connectionString };
+
+    if (ssl === true) {
+      // Full certificate verification — the default secure mode for production.
+      clientConfig.ssl = { rejectUnauthorized: true };
+    } else if (ssl === 'no-verify') {
+      // SSL transport enabled, but certificate not verified.  Use only in dev/staging
+      // with self-signed certificates — never in production.
+      clientConfig.ssl = { rejectUnauthorized: false };
+    }
+    // When ssl === false, no ssl property is set — pg connects without TLS.
+
+    this.client = new Client(clientConfig);
   }
 
   /**
@@ -57,12 +78,25 @@ export class PostgresDriver implements DbDriver {
 
     const result = this.querySync(sql, params);
 
-    // Extract lastId from RETURNING id clause
+    // Extract lastId from the first column of the first returned row.
+    //
+    // When a statement includes a RETURNING clause (e.g. "RETURNING id" or
+    // "RETURNING wallet"), Postgres returns the requested value(s) in
+    // result.rows.  We take the *first column of the first row* rather than
+    // looking for a column specifically named "id", so tables whose primary
+    // key has a different name (player_id, wallet, composite keys, etc.)
+    // work correctly instead of silently producing lastId: 0.
+    //
+    // If no RETURNING clause is present (result.rows is empty) we leave
+    // lastId as 0 — that is expected and not misleading, because callers
+    // that care about the inserted key should include RETURNING in their SQL.
     let lastId = 0;
     if (result.rows && result.rows.length > 0) {
       const firstRow = result.rows[0] as Record<string, unknown>;
-      if ('id' in firstRow) {
-        lastId = Number(firstRow.id);
+      const firstValue = Object.values(firstRow)[0];
+      if (firstValue !== null && firstValue !== undefined) {
+        const numeric = Number(firstValue);
+        lastId = Number.isFinite(numeric) ? numeric : 0;
       }
     }
 
@@ -107,11 +141,18 @@ export class PostgresDriver implements DbDriver {
     }
   }
 
-  close(): void {
+  /**
+   * Close the PostgreSQL connection.
+   * Returns a Promise that resolves only after client.end() has genuinely
+   * completed so the caller's shutdown sequence can await it before exiting.
+   */
+  async close(): Promise<void> {
     if (this.client) {
-      this.client.end().catch((err) => {
+      try {
+        await this.client.end();
+      } catch (err) {
         console.error('[db] Error closing PostgreSQL connection:', err);
-      });
+      }
     }
   }
 

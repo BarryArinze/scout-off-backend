@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import config from './config';
 
 interface PackageJson {
   version: string;
@@ -25,6 +26,11 @@ function resolveCommit(): string {
 
 const commit = resolveCommit();
 
-export function getVersionInfo(): { version: string; commit: string } {
-  return { version: pkg.version, commit };
+export function getVersionInfo(): { version: string; commit: string; node: string; environment: string } {
+  return {
+    version: pkg.version,
+    commit,
+    node: process.version,
+    environment: config.nodeEnv,
+  };
 }
