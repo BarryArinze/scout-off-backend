@@ -61,6 +61,84 @@ describe('tierForApprovedMilestones (promotion criteria)', () => {
       expect(tier).toBeLessThanOrEqual(3);
     }
   });
+
+  // ── Exact threshold boundary tests ────────────────────────────────────────
+
+  describe('exact threshold boundaries', () => {
+    it('0 approved milestones → tier 0 (initial / unverified state)', () => {
+      expect(tierForApprovedMilestones(0)).toBe(0);
+    });
+
+    it('exactly 1 approved milestone → tier 1 (lower boundary for tier 1)', () => {
+      expect(tierForApprovedMilestones(1)).toBe(1);
+    });
+
+    it('exactly 2 approved milestones → tier 1 (upper boundary for tier 1)', () => {
+      expect(tierForApprovedMilestones(2)).toBe(1);
+    });
+
+    it('exactly 3 approved milestones → tier 2 (lower boundary for tier 2)', () => {
+      expect(tierForApprovedMilestones(3)).toBe(2);
+    });
+
+    it('exactly 5 approved milestones → tier 2 (upper boundary for tier 2)', () => {
+      expect(tierForApprovedMilestones(5)).toBe(2);
+    });
+
+    it('exactly 6 approved milestones → tier 3 (lower boundary for tier 3 / max tier)', () => {
+      expect(tierForApprovedMilestones(6)).toBe(3);
+    });
+  });
+
+  // ── Already-at-max-tier tests ──────────────────────────────────────────────
+
+  describe('already at max tier (tier 3)', () => {
+    it('player with 6 milestones is at tier 3 — stays at tier 3', () => {
+      expect(tierForApprovedMilestones(6)).toBe(3);
+    });
+
+    it('player with 7 milestones stays at tier 3 (no tier 4)', () => {
+      expect(tierForApprovedMilestones(7)).toBe(3);
+    });
+
+    it('player with 100 milestones stays at tier 3 regardless of count', () => {
+      expect(tierForApprovedMilestones(100)).toBe(3);
+    });
+
+    it('player with Number.MAX_SAFE_INTEGER milestones stays at tier 3', () => {
+      expect(tierForApprovedMilestones(Number.MAX_SAFE_INTEGER)).toBe(3);
+    });
+  });
+
+  // ── TIER_THRESHOLDS data integrity tests ──────────────────────────────────
+
+  describe('TIER_THRESHOLDS data integrity', () => {
+    it('thresholds are ordered highest-tier-first', () => {
+      for (let i = 0; i < TIER_THRESHOLDS.length - 1; i++) {
+        expect(TIER_THRESHOLDS[i].tier).toBeGreaterThan(TIER_THRESHOLDS[i + 1].tier);
+      }
+    });
+
+    it('all tier values are valid ProgressLevel integers (0–3)', () => {
+      for (const { tier } of TIER_THRESHOLDS) {
+        expect(tier).toBeGreaterThanOrEqual(0);
+        expect(tier).toBeLessThanOrEqual(3);
+        expect(Number.isInteger(tier)).toBe(true);
+      }
+    });
+
+    it('minApprovedMilestones values are non-negative', () => {
+      for (const { minApprovedMilestones } of TIER_THRESHOLDS) {
+        expect(minApprovedMilestones).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it('tier 0 threshold has minApprovedMilestones of 0 (always reachable)', () => {
+      const tier0 = TIER_THRESHOLDS.find(t => t.tier === 0);
+      expect(tier0).toBeDefined();
+      expect(tier0!.minApprovedMilestones).toBe(0);
+    });
+  });
 });
 
 describe('indexEvents — player tier in DB matches approved-milestone count (#359)', () => {
@@ -127,5 +205,32 @@ describe('indexEvents — player tier in DB matches approved-milestone count (#3
 
     expect(getPlayerById(alice)?.progress_level).toBe(2); // 3 milestones → tier 2
     expect(getPlayerById(bob)?.progress_level).toBe(1); // 1 milestone → tier 1
+  });
+
+  it('player already at tier 3 stays at tier 3 when additional milestones are approved', async () => {
+    const player = 'tier-maxed-player';
+    let ledger = 1200;
+    let seq = 0;
+    const nextHash = () => `tx-maxed-${seq++}`;
+
+    // Register and immediately give 6 milestones (→ tier 3).
+    const events = [
+      rawEvent('player_registered', { player_id: player, wallet: 'GWMAX' }, nextHash(), ledger++),
+    ];
+    for (let i = 0; i < 6; i++) {
+      events.push(rawEvent('milestone_approved', { player_id: player }, nextHash(), ledger++));
+    }
+    server.queryEvents.mockResolvedValue({ latestLedger: ledger, events });
+    await indexEvents();
+    expect(getPlayerById(player)?.progress_level).toBe(3);
+
+    // Approve 3 more milestones — player must remain at tier 3.
+    const moreEvents = [];
+    for (let i = 0; i < 3; i++) {
+      moreEvents.push(rawEvent('milestone_approved', { player_id: player }, nextHash(), ledger++));
+    }
+    server.queryEvents.mockResolvedValue({ latestLedger: ledger, events: moreEvents });
+    await indexEvents();
+    expect(getPlayerById(player)?.progress_level).toBe(3);
   });
 });

@@ -51,6 +51,21 @@ function validateRuntimeEnv(env = process.env) {
     }
   }
 
+  // Validate PINATA_GATEWAY if specified — must be a valid HTTPS URL, since
+  // IPFS content resolution over plain HTTP is both insecure and, on most
+  // gateways, unsupported.
+  if (env.PINATA_GATEWAY !== undefined && env.PINATA_GATEWAY.trim() !== '') {
+    let isValidHttpsUrl = false;
+    try {
+      isValidHttpsUrl = new URL(env.PINATA_GATEWAY).protocol === 'https:';
+    } catch {
+      isValidHttpsUrl = false;
+    }
+    if (!isValidHttpsUrl) {
+      errors.push(`PINATA_GATEWAY="${env.PINATA_GATEWAY}" is invalid. Must be a valid HTTPS URL.`);
+    }
+  }
+
   // Validate CORS_ALLOWED_ORIGINS if specified
   const corsOriginsVal = env.CORS_ALLOWED_ORIGINS ?? env.ALLOWED_ORIGINS;
   if (corsOriginsVal !== undefined) {

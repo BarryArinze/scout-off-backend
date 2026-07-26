@@ -6,10 +6,10 @@ import config from "./config";
 import { logger } from "./utils/logger";
 import { initDb, closeDb } from "./db";
 import { stellarHealth } from "./services/stellar";
-import { checkHealth } from "./services/ipfs";
+import { checkHealth, retryPendingPins } from "./services/ipfs";
 import { indexEvents } from "./services/indexer";
 import { fetchLastIndexedLedger, persistLastIndexedLedger } from "./db";
-import { startDeadLetterRetryJob, stopDeadLetterRetryJob } from "./services/webhookDeadLetterJob";
+import { initBlocklist } from "./services/tokenBlocklist";
 
 // Database initialization is now async - must be awaited
 async function start() {
@@ -19,6 +19,10 @@ async function start() {
     logger.error("Failed to initialize database:", err);
     process.exit(1);
   }
+
+  // Initialise the token revocation blocklist (prune expired rows, schedule
+  // background pruning, and kick off a non-blocking Redis warm-up sync).
+  initBlocklist();
 
   // If INDEXER_BACKFILL_FROM_LEDGER is set and is less than the stored last_ledger,
   // reset last_ledger so the next poll replays from that point.
@@ -81,8 +85,16 @@ async function startServer() {
   poll();
   const pollInterval = setInterval(poll, 5_000);
 
-  // Start the webhook dead-letter background retry job (every 5 min).
-  startDeadLetterRetryJob();
+  // Poll for IPFS retries every 30 seconds
+  const retryPins = async () => {
+    try {
+      await retryPendingPins();
+    } catch (err) {
+      logger.error("IPFS retry worker error:", (err as Error).message);
+    }
+  };
+
+  const retryInterval = setInterval(retryPins, 30_000);
 
   const SHUTDOWN_TIMEOUT_MS = 10_000;
   let isShuttingDown = false;
@@ -101,7 +113,7 @@ async function startServer() {
     forceExitTimer.unref();
 
     clearInterval(pollInterval);
-    stopDeadLetterRetryJob();
+    clearInterval(retryInterval);
 
     server.close(async (err) => {
       if (err) {

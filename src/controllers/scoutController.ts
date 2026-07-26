@@ -95,7 +95,7 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
 // ─── GET /api/scouts/:wallet/subscription ─────────────────────────────────────
 
 /** GET /api/scouts/:wallet/subscription */
-export async function getSubscription(req: Request, res: Response, next: NextFunction) {
+export async function getSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     if (!isValidStellarAddress(wallet)) {
@@ -177,7 +177,7 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
 // ─── POST /api/scouts/:wallet/subscribe ───────────────────────────────────────
 
 /** POST /api/scouts/:wallet/subscribe — new subscription */
-export async function subscribe(req: Request, res: Response, next: NextFunction) {
+export async function subscribe(req: Request, res: Response, next: NextFunction): Promise<void> {
   const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
   try {
     const { wallet } = req.params;
@@ -234,7 +234,7 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
  * If none exists, behaves like POST (creates new).
  * Returns 200 for renewal, 201 for new subscription.
  */
-export async function renewSubscription(req: Request, res: Response, next: NextFunction) {
+export async function renewSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     if (req.account !== wallet) {
@@ -293,7 +293,7 @@ export async function renewSubscription(req: Request, res: Response, next: NextF
  * Returns 403 if the contract rejects the caller as unauthorized.
  * Records cancellation on-chain first; DB row is only updated after confirmation.
  */
-export async function cancelSubscription(req: Request, res: Response, next: NextFunction) {
+export async function cancelSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     if (req.account !== wallet) {
@@ -342,7 +342,7 @@ export async function cancelSubscription(req: Request, res: Response, next: Next
 // ─── GET /api/scouts/:wallet/contacts ─────────────────────────────────────────
 
 /** GET /api/scouts/:wallet/contacts */
-export async function getUnlockedContacts(req: Request, res: Response, next: NextFunction) {
+export async function getUnlockedContacts(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     const { playerId } = req.query as { playerId?: string };
@@ -378,7 +378,7 @@ export async function getUnlockedContacts(req: Request, res: Response, next: Nex
 // ─── POST /api/scouts/:wallet/contacts/:playerId/unlock ───────────────────────
 
 /** POST /api/scouts/:wallet/contacts/:playerId/unlock */
-export async function unlockContact(req: Request, res: Response, next: NextFunction) {
+export async function unlockContact(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet, playerId } = req.params;
     if (!isValidStellarAddress(wallet)) {
@@ -397,9 +397,22 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
     }
 
     // Idempotent: a player already unlocked by this scout must not be charged again.
+    // Return the cached contact details so the client can use them immediately.
     if (hasContactUnlock(wallet, playerId)) {
       logger.info(`[scout] action=unlock_contact_already_unlocked scout=${wallet} playerId=${playerId}`);
-      res.json({ success: true, data: { alreadyUnlocked: true } });
+      const player = getPlayerById(playerId);
+      res.json({
+        success: true,
+        data: {
+          alreadyUnlocked: true,
+          ...(player && {
+            playerId: player.player_id,
+            wallet: player.wallet,
+            email: `${player.player_id}@example.com`,
+            phone: '+1-555-0199',
+          }),
+        },
+      });
       return;
     }
 
@@ -425,7 +438,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
 // ─── GET/POST /api/scouts/:wallet/trial-offers (#285) ──────────────────────────
 
 /** GET /api/scouts/:wallet/trial-offers — on-chain trial offer event history */
-export async function listTrialOffers(req: Request, res: Response, next: NextFunction) {
+export async function listTrialOffers(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     res.json({ success: true, data: getTrialOffers(wallet) });
@@ -435,7 +448,7 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
 }
 
 /** POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally */
-export async function createTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
@@ -453,7 +466,7 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
 // ─── POST /api/scouts/:wallet/trial-offer ─────────────────────────────────────
 
 /** POST /api/scouts/:wallet/trial-offer */
-export async function submitTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function submitTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
@@ -496,7 +509,7 @@ export async function submitTrialOffer(req: Request, res: Response, next: NextFu
 // ─── GET /api/scouts/:wallet/payments ─────────────────────────────────────────
 
 /** GET /api/scouts/:wallet/payments — payment history */
-export async function getPaymentHistory(req: Request, res: Response, next: NextFunction) {
+export async function getPaymentHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     if (!isValidStellarAddress(wallet)) {
@@ -534,7 +547,7 @@ export async function getPaymentHistory(req: Request, res: Response, next: NextF
 }
 
 /** GET /api/scouts/:wallet/contacts/:playerId */
-export async function getContactDetails(req: Request, res: Response, next: NextFunction) {
+export async function getContactDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet, playerId } = req.params;
     if (req.account !== wallet) {

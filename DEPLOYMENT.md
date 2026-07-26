@@ -24,7 +24,7 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `LOG_LEVEL` | — | `debug` / `info` / `warn` / `error` |
 | `LOG_SKIP_PATHS` | — | Comma-separated paths requestLogger silences (default: health + metrics probes) |
 | `LOG_SAMPLE_RATE` | — | Float 0–1 sample rate for non-skipped paths (default: `1` = log all) |
-| `STELLAR_HEALTH_CHECK_ENABLED` | — | Set `false` in staging to skip Stellar RPC check |
+| `STELLAR_HEALTH_CHECK` | — | Set `false` in staging to skip Stellar RPC check |
 | `TRUSTED_PROXY_COUNT` | — | Number of trusted reverse proxies (default: `1`). Set to the exact number of proxy hops between the internet and this server. **Fail-safe**: if the observed `X-Forwarded-For` chain has fewer entries than this value implies, `extractClientIp()` falls back to the raw socket address rather than trusting the attacker-controlled leftmost value. A chain shorter than expected (direct connection bypassing a proxy, or a client crafting a short header) will therefore appear to come from the connecting IP, not a spoofed address. |
 | `ADMIN_WALLET` | — | Single admin wallet address (for backward compatibility) |
 | `ADMIN_WALLETS` | — | Comma-separated list of admin wallet addresses (e.g., `GABC...,GDEF...`) |
@@ -324,7 +324,7 @@ healthcheck:
   start_period: 15s
 ```
 
-Docker marks the container `(healthy)` once the first probe succeeds. The `start_period` of 15 seconds gives the Express server time to initialise before probes are counted as failures. The `--spider` flag tells `wget` to perform a HEAD-only request without downloading the response body, keeping healthcheck logs quiet. Run `docker compose ps` to confirm the container status shows `(healthy)` after startup.
+Docker marks the container `(healthy)` once the first probe succeeds. The `start_period` of 15 seconds gives the Express server time to initialize before probes are counted as failures. The `--spider` flag tells `wget` to perform a HEAD-only request without downloading the response body, keeping healthcheck logs quiet. Run `docker compose ps` to confirm the container status shows `(healthy)` after startup.
 
 ## Multi-Sig Admin Operations
 
@@ -357,6 +357,46 @@ If any check fails, roll back to the previous build immediately.
 2. Tag the release: `git tag v<semver> && git push --tags`
 3. Build the Docker image (or run `npm run build` on the target server)
 4. Apply any pending DB migrations
-5. Restart the server process / redeploy the container
-6. Run smoke tests (see above)
+5. The deploy script handles starting the new process and flipping traffic automatically.
+6. Run smoke tests (see above) - this happens automatically in the staging pipeline.
 7. Monitor logs for 10 minutes post-deploy
+
+## Blue-Green Deployment Topology
+
+Staging uses a local blue-green deployment strategy to eliminate restart downtime.
+
+### Topology
+- **Process Manager**: PM2 manages two identical Node.js services named `scout-off-backend-blue` (port 4000) and `scout-off-backend-green` (port 4001).
+- **Reverse Proxy**: Nginx routes traffic to the active slot.
+- **State**: The currently active slot is stored in a `.active-slot` file in the deployment root.
+
+### Nginx Configuration Requirement
+To support dynamic traffic flipping, Nginx must be configured to use a dedicated upstream config block located at `/etc/nginx/conf.d/scout-off-upstream.conf`.
+
+1. Create the upstream config file:
+   ```bash
+   sudo touch /etc/nginx/conf.d/scout-off-upstream.conf
+   sudo chmod 666 /etc/nginx/conf.d/scout-off-upstream.conf
+   echo "upstream scout_off_backend { server 127.0.0.1:4000; }" > /etc/nginx/conf.d/scout-off-upstream.conf
+   ```
+2. In your main Nginx site config (e.g., `/etc/nginx/sites-available/scout-off`), use the upstream:
+   ```nginx
+   location / {
+       proxy_pass http://scout_off_backend;
+       # ... other proxy headers ...
+   }
+   ```
+
+### Manual Override & Rollback
+If you need to manually rollback traffic to the previously active slot:
+```bash
+# From the deployment root path:
+bash scripts/deploy-staging.sh . rollback
+```
+
+To manually view the PM2 processes:
+```bash
+pm2 status
+pm2 logs scout-off-backend-blue
+pm2 logs scout-off-backend-green
+```

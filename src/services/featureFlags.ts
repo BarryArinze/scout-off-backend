@@ -3,6 +3,8 @@ import { getFeatureFlag, upsertFeatureFlag } from '../db';
 /** Named feature flags. Add new constants here as features are gated. */
 export const FeatureFlags = {
   SAVED_SEARCHES: 'saved_searches',
+  /** Fractionalized player-sponsorship via Player Tokens (scaffold stage). */
+  PLAYER_TOKENS: 'player_tokens',
 } as const;
 
 export type FeatureFlagName = (typeof FeatureFlags)[keyof typeof FeatureFlags];

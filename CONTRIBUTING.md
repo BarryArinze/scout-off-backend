@@ -5,9 +5,11 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
 ## Table of Contents
 
 - [Getting Started](#getting-started)
+- [Seeding the Database](#seeding-the-database)
 - [Contribution Workflow](#contribution-workflow)
 - [Code Quality Standards](#code-quality-standards)
 - [Security & Dependency Review](#security--dependency-review)
+- [GitHub Labels and Priority Levels](#github-labels-and-priority-levels)
 - [Filing Issues](#filing-backend-issues)
 - [Getting Help](#getting-help)
 
@@ -45,6 +47,97 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
    - Linting passes: `npm run lint`
    - No security vulnerabilities: `npm audit`
    - Environment is set up: `cp .env.example .env`
+
+## Seeding the Database
+
+New contributors don't need to manually create players, events, or
+subscriptions to start testing the API — `scripts/seed.ts` populates the
+local SQLite database with a realistic sample dataset in one command.
+
+### Running the seed
+
+```bash
+npm run seed
+# or equivalently:
+npx ts-node --project tsconfig.scripts.json scripts/seed.ts
+```
+
+This connects to the database at `DB_PATH` (default: `scout-off.db`),
+runs any pending migrations, and inserts the sample rows described below.
+
+### What gets seeded
+
+| Data                 | Count | Details                                                                          |
+| -------------------- | ----- | --------------------------------------------------------------------------------- |
+| Players               | 5     | One per region (West Africa, East Africa, South America, Europe, Southeast Asia) |
+| Positions             | 5     | Forward, Midfielder, Defender, Goalkeeper, Winger                                |
+| Progress tiers        | 0–3   | One player at each tier level (0, 1, 1, 2, 3), showcasing the full tier model     |
+| Milestone events      | 3     | `performance`, `identity`, and `trial_offer` milestones (`milestone_approved`)   |
+| Scout subscriptions   | 2     | One `premium` (90 days) and one `basic` (30 days), both active                   |
+| Contact unlocks       | 2     | Scout Alpha → `seed-player-001`, Scout Beta → `seed-player-003`                  |
+
+The full player/scout wallet list (with the exact seed values) lives in
+the comment block and constant declarations at the top of
+[`scripts/seed.ts`](scripts/seed.ts). At the time of writing, the seeded
+wallets used for manual API testing are:
+
+| Role                   | Wallet                                                    |
+| ----------------------- | ---------------------------------------------------------- |
+| `seed-player-001` (Forward, West Africa)   | `GAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZFAZQXNK3BFMN7XRVGB` |
+| `seed-player-003` (Defender, South America) | `GCRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZFAZQXNK3BFMN7X` |
+| Scout Alpha (`premium` subscription)        | `GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE` |
+| Scout Beta (`basic` subscription)           | `GHAJBGZFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVB` |
+
+### Example requests against seeded data
+
+Once seeded, the server (`npm run dev`) exposes the sample data through
+the normal API — no manual setup required for read endpoints:
+
+```bash
+# List all players
+curl http://localhost:4000/api/players
+
+# Filter by region and minimum tier
+curl "http://localhost:4000/api/players?region=West%20Africa&minTier=2"
+
+# Fetch a specific seeded player and their milestone history
+curl http://localhost:4000/api/players/seed-player-003
+curl http://localhost:4000/api/players/seed-player-001/milestones
+```
+
+Scout-facing endpoints require a Bearer token for the seeded scout wallet
+(see `POST /auth/challenge` and `POST /auth/token` in
+[`BACKEND_API_DOCS.md`](BACKEND_API_DOCS.md) for how to mint one locally),
+for example:
+
+```bash
+# Scout Alpha's subscription status (premium, seeded active)
+curl http://localhost:4000/api/scouts/GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE/subscription \
+  -H "Authorization: Bearer <scout-jwt-for-GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE>"
+
+# Contacts Scout Alpha has already unlocked (seed-player-001)
+curl http://localhost:4000/api/scouts/GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE/contacts \
+  -H "Authorization: Bearer <scout-jwt-for-GFAZQXNK3BFMN7XRVGBAEZI3BYWDXHZVJBDG5AXBLYMN6VJXVHAJBGZE>"
+```
+
+### Idempotency
+
+The seed script is **idempotent** — every player is keyed by a stable
+`player_id` and every event by a stable `tx_hash`, both enforced by
+`UNIQUE`/primary-key constraints. Re-running `npm run seed` against an
+already-seeded database skips rows that already exist instead of creating
+duplicates or erroring, so it's always safe to run again (e.g. after
+pulling `main` or restarting your dev environment).
+
+### Resetting the seed
+
+To start from a clean slate, delete the SQLite database file and re-run
+the seed:
+
+```bash
+rm scout-off.db   # or whatever DB_PATH points at in your .env
+npm run seed
+```
 
 ## Contribution Workflow
 
@@ -370,6 +463,81 @@ Instead:
 1. Email maintainers privately
 2. Include proof of concept (if safe to share)
 3. Allow 7 days for maintainers to respond before public disclosure
+
+## GitHub Labels and Priority Levels
+
+Every GitHub issue should be labelled at creation time so maintainers can triage
+and route it instantly. This section is the single source of truth for the label
+taxonomy used across the ScoutOff backend repository.
+
+> **Cross-reference:** The README's [Issue Categories](README.md#issue-categories)
+> and [Priority Levels](README.md#priority-levels) tables summarise the same
+> information at a glance. This section adds the detail you need when choosing
+> the right labels for your issue.
+
+---
+
+### Issue Category Labels
+
+Apply **exactly one** category label when you open an issue. If your issue
+genuinely spans two categories, pick the one that best describes the *primary*
+work required.
+
+| Label | Description | Example issues |
+|-------|-------------|----------------|
+| `bug` | Unintended behaviour or a crash in an existing feature. The system did something it should not have done, or failed to do something it should. | IPFS upload times out; SEP-10 challenge returns 500; milestone approval emits duplicate event |
+| `feature` | A new capability or a meaningful enhancement to an existing behaviour. No existing code is broken — you are adding something that does not exist yet. | Add player region filter to `/api/players`; support trial-offer logging; expose scout payment history endpoint |
+| `performance` | The system works correctly but is too slow, uses too much memory, or makes unnecessary network/database calls. | Cache milestone query results in Redis; reduce indexer latency by batching ledger reads; add DB index on `player_id` |
+| `documentation` | Changes to README, CONTRIBUTING.md, API docs, inline code comments, or the `docs/` directory. No production code changes. | Clarify SEP-10 error codes; add SDK usage examples; fix broken links in DEPLOYMENT.md |
+| `refactor` | Restructuring existing code **without** changing observable behaviour. Tests should still pass before and after. | Consolidate request-validation middleware; extract retry logic into a shared helper; rename internal variables for clarity |
+| `infra` | Deployment pipelines, CI/CD configuration, Docker setup, database migrations, or other DevOps concerns. | Optimise GitHub Actions matrix; add Postgres migration tooling; update `docker-compose.yml` health-check interval |
+| `security` | Vulnerability fixes, input hardening, rate-limit tuning, or any change whose primary motivation is reducing attack surface. Always follow the [Security & Dependency Review](#security--dependency-review) process. | Validate JSON payloads with Zod schemas; tighten CORS allowed-origins; add rate limit to `/auth/token` |
+| `test` | Additions or improvements to the test suite — new test files, improved assertions, better test isolation, or coverage fixes. No production code changes required. | Add edge-case tests for `tierPromotion.ts`; improve IPFS serialiser coverage; replace fragile integration fixture |
+
+---
+
+### Priority Level Labels
+
+Priority labels are **set by maintainers** after triage. When you open an issue
+you should **estimate** the priority and note it in the issue body — maintainers
+will confirm or adjust it. Do not add a `P*` label yourself at creation time;
+wait for maintainer confirmation.
+
+| Label | Severity | Expected response | Examples |
+|-------|----------|-------------------|----------|
+| `P0` — Critical | Blocks a production deployment or causes data loss / security breach. Everything else stops until this is resolved. | **Fix immediately** — same day if possible | Contract initialisation fails; database corruption; JWT secret exposed in logs |
+| `P1` — High | Breaks a core user flow or affects many users simultaneously. A workaround may exist but it is not acceptable long-term. | **Fix within the current sprint** | Milestone approval returns 500; payment processing hangs indefinitely; scout filter returns wrong results |
+| `P2` — Medium | Degrades the experience but a reasonable workaround exists. Users can still complete their core tasks. | **Schedule for the next sprint** | Scout search is noticeably slow; validator list becomes stale after 10 minutes; error messages are misleading |
+| `P3` — Low | Nice-to-have improvement or an issue that affects very few users. No workaround needed because the impact is minimal. | **Plan in the backlog** | Improve wording in a rarely-seen error message; refactor an unused module; add an optional query-string alias |
+
+---
+
+### Difficulty Labels
+
+Difficulty labels help new contributors find issues that match their experience
+level. They are assigned by maintainers at triage time, not by the reporter.
+
+| Label | Description |
+|-------|-------------|
+| `easy` | Self-contained change in a single file or module. No deep knowledge of the codebase or Stellar/Soroban required. Good first issues. Examples: add a missing test case, fix a typo in docs, add a helper function. |
+| `medium` | Requires understanding two or more modules, or involves a non-trivial algorithm / data-model change. Some prior exposure to the project is helpful. Examples: extend the indexer to handle a new event type, add a new API route with validation. |
+| `hard` | Spans multiple layers of the stack (contract + backend + docs), requires deep domain knowledge (Soroban, SEP-10), or has significant performance or security implications. Examples: implement pay-to-contact flow end-to-end; introduce distributed caching; harden auth middleware against timing attacks. |
+
+---
+
+### Applying Labels — Quick Reference
+
+| Who | When | What |
+|-----|------|------|
+| **Reporter** (you) | At issue creation | One `category` label (e.g. `bug`, `test`). Estimated priority written in the issue body (not as a label). |
+| **Maintainer** | During triage | Confirms or changes the category label; adds the official `P0`–`P3` priority label; adds the `easy`/`medium`/`hard` difficulty label. |
+
+> **Tip:** If you are unsure which category applies, pick the closest one and
+> explain your reasoning in the issue body. Maintainers will adjust if needed —
+> a labelled issue that needs a small correction is always better than an
+> unlabelled issue that sits in the triage queue.
+
+---
 
 ## Filing Backend Issues
 

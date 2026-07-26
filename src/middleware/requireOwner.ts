@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import { sendForbidden } from '../utils/authError';
+import { sendForbidden, sendUnauthorized } from '../utils/authError';
 
 /**
  * Typed helper: returns true when the authenticated account matches the target id.
@@ -20,5 +20,38 @@ export function requireOwner(req: Request, res: Response, next: NextFunction): v
     sendForbidden(res, 'Forbidden: not the profile owner');
     return;
   }
+  next();
+}
+
+/**
+ * Middleware that ensures the authenticated user (JWT sub) matches req.params.wallet.
+ * Admins bypass the ownership check.
+ * Must be used after requireAuth so that req.account is already set.
+ *
+ * - No req.account (unauthenticated) → 401 Unauthorized
+ * - req.role === 'admin' → calls next() regardless of wallet match
+ * - req.account matches req.params.wallet → calls next()
+ * - Mismatch or missing req.params.wallet → 403 Forbidden
+ */
+export function requireWalletOwner(req: Request, res: Response, next: NextFunction): void {
+  const account = req.account;
+
+  if (!account) {
+    sendUnauthorized(res, 'Unauthorized');
+    return;
+  }
+
+  // Admins may act on behalf of any wallet.
+  if (req.role === 'admin') {
+    next();
+    return;
+  }
+
+  const { wallet } = req.params;
+  if (!wallet || account !== wallet) {
+    sendForbidden(res, 'Forbidden');
+    return;
+  }
+
   next();
 }

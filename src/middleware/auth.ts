@@ -80,14 +80,25 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   }
   try {
     const payload = verifyToken(header.slice(7));
-    if (payload.jti && isTokenRevoked(payload.jti)) {
-      logger.warn({ method: req.method, path: req.path, error: 'Token revoked' });
-      sendUnauthorized(res, 'Token has been revoked');
-      return;
-    }
-    req.account = payload.sub;
-    req.role = payload.role;
-    next();
+    // isTokenRevoked is async; we must chain into a Promise to avoid blocking
+    // the event loop while still sending the 401 on the same request lifecycle.
+    isTokenRevoked(payload.jti).then((revoked) => {
+      if (revoked) {
+        logger.warn({ method: req.method, path: req.path, error: 'Token revoked' });
+        sendUnauthorized(res, 'Token has been revoked');
+        return;
+      }
+      req.account = payload.sub;
+      req.role = payload.role;
+      next();
+    }).catch(() => {
+      // Revocation check failed — fail open (allow request) to avoid blocking
+      // legitimate traffic when the blocklist store is temporarily unavailable.
+      logger.warn({ method: req.method, path: req.path, error: 'Revocation check failed, allowing request' });
+      req.account = payload.sub;
+      req.role = payload.role;
+      next();
+    });
   } catch {
     logger.warn({ method: req.method, path: req.path, error: 'Invalid or expired token' });
     logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Invalid or expired token', timestamp: new Date().toISOString() });
@@ -175,15 +186,20 @@ export function requireRole(role: string) {
         return;
       }
 
-      if (payload.jti && isTokenRevoked(payload.jti)) {
-        logger.warn({ method: req.method, path: req.path, error: 'Token revoked', requiredRole: role });
-        sendUnauthorized(res, 'Token has been revoked');
-        return;
-      }
-
-      req.account = payload.sub;
-      req.role = payload.role;
-      next();
+      isTokenRevoked(payload.jti).then((revoked) => {
+        if (revoked) {
+          logger.warn({ method: req.method, path: req.path, error: 'Token revoked', requiredRole: role });
+          sendUnauthorized(res, 'Token has been revoked');
+          return;
+        }
+        req.account = payload.sub;
+        req.role = payload.role;
+        next();
+      }).catch(() => {
+        req.account = payload.sub;
+        req.role = payload.role;
+        next();
+      });
     } catch {
       logger.warn({ method: req.method, path: req.path, error: 'Invalid or expired token', requiredRole: role });
       logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Invalid or expired token', requiredRole: role, timestamp: new Date().toISOString() });

@@ -35,6 +35,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `cache: npm` caches ~/.npm keyed on Node.js version + package-lock.json
+      # hash, so `npm ci` below is fast on a cache hit and self-invalidates
+      # whenever dependencies change.
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
@@ -151,6 +154,21 @@ jobs:
           done
           echo "Smoke test failed: GET /health did not return status ok"
           exit 1
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_PATH: ${{ secrets.STAGING_DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+          envs: DEPLOY_PATH
+          script: |
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+            bash scripts/deploy-staging.sh "$DEPLOY_PATH" rollback
 
   notify-failure:
     name: Notify on failure

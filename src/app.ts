@@ -14,14 +14,18 @@ import { securityHeaders } from './middleware/securityHeaders';
 import { correlationId } from './middleware/correlationId';
 import { traceId } from './middleware/traceId';
 import { responseTime } from './middleware/responseTime';
-import { stellarHealth } from './services/stellar';
+import { stellarHealth, stellarBreaker } from './services/stellar';
 import { checkHealth } from './services/ipfs';
 import { API_PREFIX, API_V1_PREFIX } from './config';
+import { mountGraphQL } from './graphql';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
+import { ipReputationMiddleware } from './middleware/ipReputation';
 import { requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
 import { getDb } from './db';
 import { getVersionInfo } from './version';
+import { apiVersion } from './middleware/apiVersion';
+import docsRouter from './routes/docs';
 
 /** Probe the SQLite database with a lightweight SELECT 1.
  *  Resolves 'ok' or 'error'; never rejects.
@@ -65,6 +69,9 @@ async function probeDbWritable(timeoutMs = 2_000): Promise<'ok' | 'error'> {
 }
 
 const app = express();
+// Disable Express's default X-Powered-By header. helmet() also does this, but
+// being explicit here ensures it is suppressed regardless of middleware order.
+app.disable('x-powered-by');
 // Disable Express's automatic ETag on every response — it would also tag
 // error bodies (e.g. 404s). ETags are set explicitly where conditional GET
 // support is actually implemented (see getPlayer).
@@ -84,12 +91,17 @@ app.use(traceId);
 app.use(helmet());
 app.use(securityHeaders);
 app.use(responseTime);
+// Set X-API-Version on every response before route handlers run
+app.use(apiVersion);
 // Configure Express body parser with JSON payload size limit
 // Returns 413 Payload Too Large if exceeded
 app.use(express.json({ limit: config.bodyLimit.json }));
 app.use(requestLogger);
 // Collect per-route request counts, latency, and error counts for /metrics.
 app.use(metricsMiddleware);
+// IP reputation layer — runs after metrics so the finish hook in
+// metricsMiddleware is registered first, keeping score increments in order.
+app.use(ipReputationMiddleware);
 
 app.get('/version', (_req, res) => {
   res.json(getVersionInfo());
@@ -123,11 +135,15 @@ async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | '
   }
 
   if (config.stellarHealthCheckEnabled) {
-    try {
-      const stellarOk = await stellarHealth();
-      services.stellar = stellarOk ? 'ok' : 'unavailable';
-    } catch {
+    if (stellarBreaker.state === 'OPEN') {
       services.stellar = 'unavailable';
+    } else {
+      try {
+        const stellarOk = await stellarHealth();
+        services.stellar = stellarOk ? 'ok' : 'unavailable';
+      } catch {
+        services.stellar = 'unavailable';
+      }
     }
   } else {
     services.stellar = 'disabled';
@@ -171,15 +187,22 @@ app.use('/auth', authRoutes);
 // Mount API routes under both /api (backwards-compatible alias) and /api/v1
 const prefixes = [API_PREFIX, API_V1_PREFIX];
 for (const prefix of prefixes) {
+  app.use(`${prefix}/docs`, docsRouter);
   app.use(`${prefix}/players`, playerRoutes);
   app.use(`${prefix}/scouts`, scoutRoutes);
   app.use(`${prefix}/validators`, validatorRoutes);
   app.use(`${prefix}/admin`, adminRoutes);
 }
 
-// Catch-all 404 handler for unmatched routes
-app.use((_req, res) => {
-  res.status(404).json({ success: false, error: 'Not Found' });
+// Mount the GraphQL endpoint alongside the REST API.
+// Must be registered before the 404 catch-all.
+mountGraphQL(app);
+
+// Catch-all 404 handler for unmatched routes.
+// Returns JSON so API clients never receive an HTML error page.
+// Must be registered after all other routes and before the error handler.
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not Found', path: req.path });
 });
 
 app.use(errorHandler);

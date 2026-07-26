@@ -11,7 +11,12 @@ jest.mock('../../src/services/stellar', () => ({
   },
 }));
 
-jest.mock('../../src/db', () => ({ queryEvents: jest.fn(), insertContactUnlock: jest.fn() }));
+jest.mock('../../src/db', () => ({
+  queryEvents: jest.fn(),
+  insertContactUnlock: jest.fn(),
+  hasContactUnlock: jest.fn().mockReturnValue(false),
+  getPlayerById: jest.fn().mockReturnValue(null),
+}));
 
 import { unlockContact } from '../../src/controllers/scoutController';
 import { submitContactPayment } from '../../src/services/stellar';

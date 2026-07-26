@@ -242,7 +242,7 @@ Filter players by region, position, and minimum verified tier. No auth required.
 ```json
 {
   "success": false,
-  "error": "minTier 5 is out of range. Valid values: 0, 1, 2, 3."
+  "error": "minTier must be a number; valid values are 0=Unverified, 1=Verified, 2=Performance, 3=Elite"
 }
 ```
 

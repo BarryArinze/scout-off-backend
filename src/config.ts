@@ -29,8 +29,23 @@ if (!adminWalletValue) {
     throw new Error('ADMIN_WALLET is required in production but is not set. Set the ADMIN_WALLET environment variable to the platform admin Stellar address.');
   }
   if (nodeEnv === 'staging') {
-    // eslint-disable-next-line no-console
     console.warn('[config] WARNING: ADMIN_WALLET is not set in staging. Admin-seeding will be disabled. Set ADMIN_WALLET to suppress this warning.');
+  }
+}
+
+// Validate PINATA_GATEWAY when set — it must be a valid HTTPS URL. An invalid
+// gateway would otherwise only surface as a runtime failure when resolving
+// IPFS content, with no clear indication of the misconfiguration.
+const pinataGatewayValue = process.env.PINATA_GATEWAY ?? '';
+if (pinataGatewayValue) {
+  let pinataGatewayIsHttps = false;
+  try {
+    pinataGatewayIsHttps = new URL(pinataGatewayValue).protocol === 'https:';
+  } catch {
+    pinataGatewayIsHttps = false;
+  }
+  if (!pinataGatewayIsHttps) {
+    throw new Error(`Invalid PINATA_GATEWAY: "${pinataGatewayValue}". Must be a valid HTTPS URL.`);
   }
 }
 
@@ -129,7 +144,9 @@ const config = {
     xFrameOptions: process.env.SECURITY_X_FRAME_OPTIONS ?? 'DENY',
     referrerPolicy: process.env.SECURITY_REFERRER_POLICY ?? 'no-referrer',
     /** Content-Security-Policy value. Override via SECURITY_CSP env var. */
-    csp: process.env.SECURITY_CSP ?? "default-src 'none'",
+    csp: process.env.SECURITY_CSP ?? "default-src 'none'; frame-ancestors 'none'",
+    /** Permissions-Policy value. Override via SECURITY_PERMISSIONS_POLICY env var. */
+    permissionsPolicy: process.env.SECURITY_PERMISSIONS_POLICY ?? 'camera=(), microphone=(), geolocation=()',
   },
   webhook: {
     enabled: process.env.WEBHOOK_ENABLED === 'true',
@@ -197,6 +214,9 @@ const config = {
 
   /** TTL for pinJson deduplication cache entries in milliseconds (default: 5 min). */
   pinJsonCacheTtlMs: parseInt(process.env.PIN_JSON_CACHE_TTL_MS ?? '300000', 10),
+
+  /** Maximum evidence file size in bytes (default: 50 MB). */
+  evidenceMaxBytes: parseInt(process.env.EVIDENCE_MAX_BYTES ?? String(50 * 1024 * 1024), 10),
 
   /** TTL for multi-admin action proposals in milliseconds (default: 1 hour). */
   adminActionTtlMs: parseInt(process.env.ADMIN_ACTION_TTL_MS ?? '3600000', 10),

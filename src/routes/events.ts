@@ -1,6 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth } from '../middleware/auth';
-import { broadcaster, SseSubscriber, BroadcastEvent } from '../services/eventBroadcaster';
+import {
+  broadcaster,
+  SseSubscriber,
+  SseFilterCriteria,
+  BroadcastEvent,
+} from '../services/eventBroadcaster';
+import { ContractEventType } from '../types';
 import { logger } from '../utils/logger';
 
 const router = Router();
@@ -18,6 +24,18 @@ const MAX_SSE_CONNECTIONS = parseInt(
   process.env.SSE_MAX_CONNECTIONS ?? '0',
   10,
 );
+
+// ─── Valid event type set (for query param validation) ────────────────────────
+
+const VALID_EVENT_TYPES = new Set<ContractEventType>([
+  'player_registered',
+  'milestone_submitted',
+  'milestone_approved',
+  'scout_subscribed',
+  'contact_unlocked',
+  'trial_offer_logged',
+  'fees_withdrawn',
+]);
 
 // ─── SSE frame helpers ───────────────────────────────────────────────────────
 
@@ -47,7 +65,17 @@ const KEEPALIVE_FRAME = ': ping\n\n';
  * relevant contract events to the authenticated client as they are indexed.
  *
  * Authentication: Bearer JWT (same as all other protected routes).
- * Filtering: only events relevant to the authenticated wallet are sent.
+ *
+ * Query parameters (all optional, combinable):
+ *   - eventType  One event type name to subscribe to (e.g. "milestone_approved").
+ *                When omitted the client receives all event types that pass the
+ *                wallet-relevance filter.  Unknown values are ignored.
+ *   - playerId   Only deliver events whose payload contains this player identifier.
+ *                When omitted no additional player-level filtering is applied.
+ *
+ * Filtering: only events relevant to the authenticated wallet are sent (wallet
+ * isolation is always enforced regardless of query params).  The optional
+ * query params add further narrowing on top.
  *
  * SSE event types sent:
  *   - milestone_approved  (player: their own milestone approvals)
@@ -78,6 +106,23 @@ router.get('/stream', requireAuth, (req: Request, res: Response) => {
     return;
   }
 
+  // ── Parse optional filter query params ────────────────────────────────────
+  const rawEventType = req.query.eventType as string | undefined;
+  const rawPlayerId = req.query.playerId as string | undefined;
+
+  const eventTypes = new Set<ContractEventType>();
+  if (rawEventType && VALID_EVENT_TYPES.has(rawEventType as ContractEventType)) {
+    eventTypes.add(rawEventType as ContractEventType);
+  }
+
+  const filter: SseFilterCriteria | undefined =
+    eventTypes.size > 0 || rawPlayerId !== undefined
+      ? {
+          eventTypes,
+          playerId: rawPlayerId,
+        }
+      : undefined;
+
   // ── SSE response headers ───────────────────────────────────────────────────
   // Disable the request-level timeout middleware for this long-lived connection.
   // Express's requestTimeout sets a 'timeout' on the socket; we clear it here.
@@ -95,6 +140,7 @@ router.get('/stream', requireAuth, (req: Request, res: Response) => {
   // ── Subscriber ─────────────────────────────────────────────────────────────
   const subscriber: SseSubscriber = {
     wallet,
+    filter,
     send(event: BroadcastEvent): void {
       // write() returns false when the kernel buffer is full; we ignore the
       // back-pressure signal here because SSE is fire-and-forget.

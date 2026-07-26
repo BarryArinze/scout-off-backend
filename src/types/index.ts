@@ -205,9 +205,9 @@ export type ContractEventType =
   | 'scout_subscribed'
   | 'contact_unlocked'
   | 'trial_offer_logged'
-  | 'fees_withdrawn'
-  | 'player_deactivated'
-  | 'player_reactivated';
+  | 'trial_offer_accepted'
+  | 'trial_offer_rejected'
+  | 'fees_withdrawn';
 
 export interface ContractEvent {
   type: ContractEventType;
