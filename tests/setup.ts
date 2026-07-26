@@ -3,6 +3,18 @@ process.env.CONTRACT_ID =
   process.env.CONTRACT_ID ??
   "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4";
 process.env.JWT_SECRET = process.env.JWT_SECRET ?? "test-secret";
+// Use an in-memory SQLite database for all tests.
+//
+// WHY :memory:?
+//   • Each test run starts with a clean, empty database — no leftover rows
+//     from previous runs can cause tests to interfere with each other.
+//   • Tests are fast: no disk I/O, no file locking, no cleanup needed.
+//   • The database is automatically destroyed when the process exits.
+//
+// IMPORTANT: never override DB_PATH to a real file path in your local
+// environment when running tests.  Pointing tests at scout-off.db (or any
+// other persistent file) will mix test data with development data, produce
+// non-deterministic results, and may corrupt your local database.
 process.env.DB_PATH = process.env.DB_PATH ?? ":memory:";
 // Use port 0 so each test file's server instance binds to a random
 // available port, preventing EADDRINUSE conflicts across test suites.
