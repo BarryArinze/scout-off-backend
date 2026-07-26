@@ -362,6 +362,15 @@ export async function updatePlayer(
 const milestonesQuerySchema = z.object({
   sortBy: z.enum(["submittedAt", "approvedAt"]).default("submittedAt"),
   order: z.enum(["asc", "desc"]).default("asc"),
+  // `sort` is an accepted alias for `order` — the task spec uses `sort`
+  sort: z.enum(["asc", "desc"]).optional(),
+  status: z.enum(["approved", "pending", "all"]).default("all"),
+  limit: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(50, { message: "limit must not exceed 50" })
+    .default(20),
 });
 
 /** GET /api/players/:playerId/milestones */
@@ -392,6 +401,20 @@ export async function getPlayerMilestones(
       }
     }
 
+    // Validate limit separately first so we can return 400 before parsing the rest
+    const rawLimit = req.query.limit;
+    if (rawLimit !== undefined) {
+      const limitNum = Number(rawLimit);
+      if (!Number.isInteger(limitNum) || limitNum < 1 || limitNum > 50) {
+        res.status(400).json({
+          success: false,
+          error: "limit must not exceed 50",
+          code: ErrorCode.VALIDATION_ERROR,
+        });
+        return;
+      }
+    }
+
     const parsed = milestonesQuerySchema.safeParse(req.query);
     if (!parsed.success) {
       res.status(400).json({
@@ -401,21 +424,47 @@ export async function getPlayerMilestones(
       });
       return;
     }
-    const { sortBy, order } = parsed.data;
-    const indexedMilestones = queryEvents("milestone_approved")
-      .filter((e) => e.payload.player_id === playerId)
-      .map((e) => ({ ...e.payload }));
+
+    // `sort` is an alias for `order`; explicit `sort` takes precedence
+    const { sortBy, status, limit } = parsed.data;
+    const order = parsed.data.sort ?? parsed.data.order;
+
+    // Map status to the event type filter used by queryEvents.
+    // "pending"  → milestone_submitted events
+    // "approved" → milestone_approved events
+    // "all"      → both (fetch approved then layer in submitted)
+    const approvedEvents =
+      status !== "pending"
+        ? queryEvents("milestone_approved")
+            .filter((e) => e.payload.player_id === playerId)
+            .map((e) => ({ ...e.payload, status: "approved" as const }))
+        : [];
+
+    const pendingEvents =
+      status !== "approved"
+        ? queryEvents("milestone_submitted")
+            .filter((e) => e.payload.player_id === playerId)
+            .map((e) => ({ ...e.payload, status: "pending" as const }))
+        : [];
+
     const onChainMilestones = await queryMilestones(playerId);
+
     const combined = [
-      ...indexedMilestones,
+      ...approvedEvents,
+      ...pendingEvents,
       ...(onChainMilestones as unknown as Record<string, unknown>[]),
     ];
+
     combined.sort((a, b) => {
       const av = Number(a[sortBy] ?? 0);
       const bv = Number(b[sortBy] ?? 0);
       return order === "asc" ? av - bv : bv - av;
     });
-    res.json({ success: true, data: combined });
+
+    // Apply limit (parameterised, no interpolation)
+    const paginated = combined.slice(0, limit);
+
+    res.json({ success: true, data: paginated });
   } catch (err) {
     next(err);
   }

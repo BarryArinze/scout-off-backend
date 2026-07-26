@@ -15,13 +15,37 @@ function slowQueryThresholdMs(): number {
   return parseInt(process.env.SLOW_QUERY_THRESHOLD_MS ?? '50', 10);
 }
 
-/** Runs fn(), logs a warn if it takes longer than SLOW_QUERY_THRESHOLD_MS. */
+/**
+ * Runs fn(), logs a structured warning if it takes longer than
+ * SLOW_QUERY_THRESHOLD_MS.
+ *
+ * Structured log fields:
+ *  - query_name:  the SQL statement (used as a human-readable identifier)
+ *  - duration_ms: elapsed time in milliseconds
+ *  - row_count:   number of rows returned (arrays) or affected (RunResult);
+ *                 -1 when the result type carries no row count
+ */
 export function timedQuery<T>(sql: string, fn: () => T): T {
   const start = Date.now();
   const result = fn();
-  const duration = Date.now() - start;
-  if (duration >= slowQueryThresholdMs()) {
-    logger.warn(`[db] slow query ${duration}ms: ${sql}`);
+  const duration_ms = Date.now() - start;
+  if (duration_ms >= slowQueryThresholdMs()) {
+    // Derive a best-effort row count from the return value.
+    let row_count = -1;
+    if (Array.isArray(result)) {
+      row_count = result.length;
+    } else if (
+      result !== null &&
+      typeof result === 'object' &&
+      'changes' in (result as object) &&
+      typeof (result as { changes: unknown }).changes === 'number'
+    ) {
+      row_count = (result as { changes: number }).changes;
+    } else if (result !== null && result !== undefined && !Array.isArray(result) && typeof result !== 'object') {
+      // scalar (number, boolean, string) — treat as 1 row
+      row_count = 1;
+    }
+    logger.warn({ query_name: sql, duration_ms, row_count });
   }
   return result;
 }
