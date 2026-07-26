@@ -4,10 +4,11 @@ import { z } from 'zod';
 import axios from 'axios';
 import { logger } from '../utils/logger';
 import { pinJson, pinFile } from '../services/ipfs';
-import { getPendingMilestones as getPendingMilestonesFromDb } from '../db';
+import { getPendingMilestones as getPendingMilestonesFromDb, getDb, removePendingMilestone, incrementValidatorApproved, queryEvents, updatePlayerProgress } from '../db';
 import { invalidateMilestoneCache } from '../services/cache';
 import { recordAudit } from '../utils/audit';
 import { isValidEvidenceUri } from '../utils/uriValidator';
+import { tierForApprovedMilestones } from '../services/tierPromotion';
 import config from '../config';
 
 export { isValidMetadataUri as isValidEvidenceUri };
@@ -210,6 +211,68 @@ export async function getPendingMilestones(req: Request, res: Response, next: Ne
       page: page || 1, 
       pageSize: pageSize || 20 
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+export const bulkApproveSchema = z.object({
+  milestoneIds: z.array(z.string()).min(1),
+});
+
+export async function approveBulkMilestones(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { milestoneIds } = bulkApproveSchema.parse(req.body);
+    const validatorWallet = req.account ?? 'unknown';
+    const correlationId = getCorrelationId(req);
+    
+    const results = [];
+    const db = getDb();
+    
+    const uniqueIds = Array.from(new Set(milestoneIds));
+
+    for (const milestoneId of uniqueIds) {
+      try {
+        const row = db.prepare('SELECT * FROM pending_milestones WHERE milestone_id = ?').get(milestoneId) as any;
+        if (!row) {
+          results.push({ milestoneId, status: 'invalid', error: 'Not found or already processed' });
+          continue;
+        }
+        
+        if (row.validator_wallet !== validatorWallet) {
+          results.push({ milestoneId, status: 'unauthorized', error: 'Not assigned to this validator' });
+          continue;
+        }
+
+        const playerId = row.player_id;
+        
+        removePendingMilestone(milestoneId);
+        incrementValidatorApproved(validatorWallet);
+        
+        const onChainApprovedCount = queryEvents('milestone_approved').filter(
+          (e) => e.payload.player_id === playerId
+        ).length;
+        
+        // Count this new off-chain approval + existing ones
+        updatePlayerProgress(playerId, tierForApprovedMilestones(onChainApprovedCount + 1));
+        
+        await invalidateMilestoneCache(playerId);
+        
+        recordAudit(
+          validatorWallet,
+          'milestone_approved',
+          { milestoneId, playerId, bulk: true },
+          `correlationId=${correlationId}`
+        );
+        
+        results.push({ milestoneId, status: 'approved' });
+      } catch (err) {
+        logger.error(`[validator] error approving milestone ${milestoneId}:`, err);
+        results.push({ milestoneId, status: 'error', error: String(err) });
+      }
+    }
+
+    res.json({ success: true, data: results });
   } catch (err) {
     next(err);
   }
