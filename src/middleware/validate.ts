@@ -66,6 +66,10 @@ export function validateBody<T>(schema: ZodSchema<T>, options?: ValidationOption
     const result = schema.safeParse(req.body);
     if (!result.success) {
       const correlationId = getCorrelationId(req);
+      const details = result.error.errors.map((err) => ({
+        field: err.path.join('.'),
+        message: err.message,
+      }));
       logger.warn(
         `[validation] ${options?.context ?? 'body'} rejected — error=${
           result.error.errors[0]?.message ?? 'Invalid request body'
@@ -73,7 +77,8 @@ export function validateBody<T>(schema: ZodSchema<T>, options?: ValidationOption
       );
       res.status(400).json({
         success: false,
-        error: result.error.errors[0]?.message ?? 'Invalid request body',
+        error: 'Validation Error',
+        details,
         code: ErrorCode.VALIDATION_ERROR,
         correlationId,
       });
@@ -87,7 +92,7 @@ export function validateBody<T>(schema: ZodSchema<T>, options?: ValidationOption
 /**
  * Middleware factory that validates `req.query` against a Zod schema.
  *
- * On validation failure: returns HTTP 400 with `{ success: false, error: '<message>' }`.
+ * On validation failure: returns HTTP 400 with `{ success: false, error: 'Validation Error', details: [{ field, message }] }`.
  * On success: stores the parsed/coerced result in `req.query` and calls `next()`.
  *
  * Usage: router.get('/route', validateQuery(mySchema), handler)
@@ -97,6 +102,10 @@ export function validateQuery<T>(schema: ZodSchema<T>, options?: ValidationOptio
     const result = schema.safeParse(req.query);
     if (!result.success) {
       const correlationId = getCorrelationId(req);
+      const details = result.error.errors.map((err) => ({
+        field: err.path.join('.'),
+        message: err.message,
+      }));
       logger.warn(
         `[validation] ${options?.context ?? 'query'} rejected — error=${
           result.error.errors[0]?.message ?? 'Invalid query parameters'
@@ -104,7 +113,8 @@ export function validateQuery<T>(schema: ZodSchema<T>, options?: ValidationOptio
       );
       res.status(400).json({
         success: false,
-        error: result.error.errors[0]?.message ?? 'Invalid query parameters',
+        error: 'Validation Error',
+        details,
         code: ErrorCode.VALIDATION_ERROR,
         correlationId,
       });

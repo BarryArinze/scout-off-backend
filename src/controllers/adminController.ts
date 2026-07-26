@@ -124,12 +124,13 @@ const auditQuerySchema = z.object({
 /** GET /api/admin/audit (legacy #345 endpoint — backward-compatible) */
 export async function getAuditLog(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const parsed = auditQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid query parameters' });
-      return;
-    }
-    const { startDate, endDate, action, limit, offset } = parsed.data;
+    const { startDate, endDate, action, limit, offset } = req.query as {
+      startDate?: string;
+      endDate?: string;
+      action?: string;
+      limit: number;
+      offset: number;
+    };
     const rows = getAuditLogs({ action, startDate, endDate, limit, offset });
     const total = getAuditLogsCount({ action, startDate, endDate });
     res.json({
@@ -268,18 +269,17 @@ const paginationSchema = z.object({
 /** GET /api/admin/events */
 export async function getAllEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const dateResult = adminDateRangeSchema.safeParse(req.query);
-    if (!dateResult.success) {
-      res.status(400).json({ success: false, error: dateResult.error.errors[0]?.message ?? 'Invalid query parameters', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const pageResult = paginationSchema.safeParse(req.query);
-    if (!pageResult.success) {
-      res.status(400).json({ success: false, error: pageResult.error.errors[0]?.message ?? 'Invalid pagination parameters', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const { startDate, endDate, eventType } = dateResult.data;
-    const { limit: requestedLimit, offset: requestedOffset, page, pageSize } = pageResult.data;
+    const { startDate, endDate, eventType } = req.query as {
+      startDate?: Date;
+      endDate?: Date;
+      eventType?: string;
+    };
+    const { limit: requestedLimit, offset: requestedOffset, page, pageSize } = req.query as {
+      limit?: number;
+      offset?: number;
+      page?: number;
+      pageSize?: number;
+    };
     const limit = requestedLimit ?? pageSize ?? 20;
     const offset = requestedOffset ?? ((page ?? 1) - 1) * limit;
 
@@ -298,11 +298,6 @@ export async function getAllEvents(req: Request, res: Response, next: NextFuncti
 /** GET /api/admin/fees — returns fees_withdrawn event payloads */
 export async function getFeeSummary(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const dateResult = adminDateRangeSchema.safeParse(req.query);
-    if (!dateResult.success) {
-      res.status(400).json({ success: false, error: dateResult.error.errors[0]?.message ?? 'Invalid query parameters', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
     const adminWallet = req.account ?? 'unknown';
     logAuditEvent({
       action: 'fee_history_query',
@@ -794,20 +789,8 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
     });
     return;
   }
-  const parsed = withdrawFeesSchema.safeParse(req.body);
 
-  if (!parsed.success) {
-    logAuditEvent({
-      action: 'fee_withdrawal_attempt',
-      adminWallet,
-      queryParams: { error: 'validation_failed', reason: parsed.error.errors[0]?.message },
-      timestamp: new Date().toISOString(),
-    });
-    res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body', code: ErrorCode.VALIDATION_ERROR });
-    return;
-  }
-
-  const { recipient } = parsed.data;
+  const { recipient } = req.body as { recipient: string };
 
   // Concurrency guard: reject duplicate simultaneous withdrawals.
   if (withdrawalInProgress) {

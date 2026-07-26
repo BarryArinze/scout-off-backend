@@ -36,7 +36,7 @@ router.route('/stats')
  * GET /api/admin/events
  *
  * Returns all indexed Soroban contract events in insertion order.
- * Query params: startDate, endDate (ISO 8601), eventType
+ * Query params: startDate, endDate (ISO 8601), eventType, fromLedger, toLedger, page, pageSize
  *
  * @response 200 { success: true, data: AdminEvent[] }
  * @response 400 { success: false, error: string } - Invalid date range
