@@ -43,7 +43,20 @@ pub struct RegisterContract;
 
 #[contractimpl]
 impl RegisterContract {
-    /// One-time setup. Stores admin, payment token, and platform fee config.
+    /// One-time contract setup. Stores the admin address, payment token, and platform fee config.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The address that will own admin-only operations such as
+    ///   [`set_authorized_updater`].
+    /// * `token` - The XLM or platform-token contract address used for payments.
+    /// * `platform_fee_bps` - Platform fee expressed in basis points (e.g. `500` = 5 %).
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::AlreadyInitialized`] — Contract has already been initialized.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -68,8 +81,24 @@ impl RegisterContract {
         Ok(())
     }
 
-    /// Register a new player. Each wallet may only register once.
-    /// Returns the generated player_id.
+    /// Register a new player profile on-chain. Each wallet address may only register once.
+    ///
+    /// Assigns a sequential `player_id`, stores the player's metadata URI (IPFS CID),
+    /// position, region, and initial progress level of `0`. Emits a `player_rg` event.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `wallet` - The player's Stellar wallet address (must authorize this call).
+    /// * `metadata_uri` - IPFS/Arweave content URI containing the player's off-chain profile.
+    /// * `position` - Playing position string, e.g. `"forward"`, `"midfielder"`.
+    /// * `region` - Geographic region string, e.g. `"europe"`, `"west africa"`.
+    ///
+    /// # Returns
+    /// `Ok(player_id)` — the newly assigned unique player identifier (`u64`).
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — [`initialize`] has not been called yet.
+    /// * [`Error::InvalidInput`] — The calling wallet is already registered.
     pub fn register_player(
         env: Env,
         wallet: Address,
@@ -131,8 +160,22 @@ impl RegisterContract {
         Ok(player_id)
     }
 
-    /// Update the IPFS metadata URI for an existing player.
-    /// Only the wallet that originally registered may call this.
+    /// Update the IPFS metadata URI for an existing player profile.
+    ///
+    /// Only the wallet that originally registered the player may call this function.
+    /// The wallet must authorize the call.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `player_id` - The unique identifier returned by [`register_player`].
+    /// * `metadata_uri` - New IPFS/Arweave content URI for the updated player profile.
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::PlayerNotFound`] — No player exists with the given `player_id`.
     pub fn update_profile(
         env: Env,
         player_id: u64,
@@ -161,7 +204,19 @@ impl RegisterContract {
         Ok(())
     }
 
-    /// Fetch a player's full profile. Returns PlayerNotFound(3) if unknown.
+    /// Retrieve a player's full profile, including current progress tier.
+    ///
+    /// This is a read-only function; it does not require authorization or modify state.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `player_id` - The unique identifier assigned at registration.
+    ///
+    /// # Returns
+    /// `Ok(PlayerData)` — the player's stored profile struct.
+    ///
+    /// # Errors
+    /// * [`Error::PlayerNotFound`] — No player exists with the given `player_id`.
     pub fn get_player(env: Env, player_id: u64) -> Result<PlayerData, Error> {
         env.storage()
             .instance()
@@ -169,8 +224,22 @@ impl RegisterContract {
             .ok_or(Error::PlayerNotFound)
     }
 
-    /// Authorize an external contract (e.g. connection) to update player progress levels.
-    /// Admin-only.
+    /// Authorize an external contract to call [`update_progress_level`] on behalf of the platform.
+    ///
+    /// Typically called once after deploying the progress or connection contracts so they
+    /// can increment a player's tier when a milestone or trial offer is approved.
+    /// Only the admin address set during [`initialize`] may call this function.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `updater` - The contract address that will be permitted to call [`update_progress_level`].
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::Unauthorized`] — Caller is not the admin.
     pub fn set_authorized_updater(env: Env, updater: Address) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
@@ -188,7 +257,25 @@ impl RegisterContract {
         Ok(())
     }
 
-    /// Set a player's progress level. Only the authorized updater contract may call this.
+    /// Set a player's progress level to at least `level` (monotonically increasing).
+    ///
+    /// Only the address registered via [`set_authorized_updater`] may call this.
+    /// If the player's current level is already ≥ `level`, the call is a no-op for state
+    /// but still succeeds (the stored value uses `max(current, level)`).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `player_id` - The unique player identifier to update.
+    /// * `level` - The minimum progress level to assign (0 = unverified, 3 = elite tier).
+    ///
+    /// # Returns
+    /// `Ok(())` on success.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::Unauthorized`] — No authorized updater has been set, or the caller is
+    ///   not the authorized updater.
+    /// * [`Error::PlayerNotFound`] — No player exists with the given `player_id`.
     pub fn update_progress_level(env: Env, player_id: u64, level: u32) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
@@ -213,7 +300,20 @@ impl RegisterContract {
         Ok(())
     }
 
-    /// Return all players matching region, position, and minimum progress tier.
+    /// Return all registered players matching the given region, position, and minimum progress tier.
+    ///
+    /// Performs a full scan of the player list and filters by exact-match on `region`
+    /// and `position` and a `>=` check on `progress_level`. For large player sets, the
+    /// off-chain indexer should be preferred for performance.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `region` - Region string to match exactly, e.g. `"europe"`.
+    /// * `position` - Position string to match exactly, e.g. `"forward"`.
+    /// * `min_tier` - Minimum `progress_level` a player must have to be included.
+    ///
+    /// # Returns
+    /// A `Vec<PlayerData>` of matching players (may be empty). Never errors.
     pub fn filter_players(
         env: Env,
         region: String,

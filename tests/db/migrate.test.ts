@@ -15,6 +15,12 @@ import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../src/db/migrate';
+import { SqliteDriver } from '../../src/db/sqlite-driver';
+
+/** Wrap a raw better-sqlite3 Database in the SqliteDriver adapter that runMigrations expects. */
+function migrate(db: Database.Database): void {
+  runMigrations(new SqliteDriver(db));
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -68,7 +74,7 @@ describe('runMigrations — integration suite (#508)', () => {
 
   beforeAll(() => {
     sharedDb = new Database(':memory:');
-    runMigrations(sharedDb);
+    migrate(sharedDb);
   });
 
   afterAll(() => {
@@ -93,7 +99,7 @@ describe('runMigrations — integration suite (#508)', () => {
 
     it('all discovered migration files are recorded in the migrations table after a fresh run', () => {
       const db = new Database(':memory:');
-      runMigrations(db);
+      migrate(db);
 
       const appliedRows = db
         .prepare('SELECT id FROM migrations ORDER BY id')
@@ -120,13 +126,13 @@ describe('runMigrations — integration suite (#508)', () => {
   describe('clean application against a fresh empty database', () => {
     it('runMigrations() completes without throwing on a brand-new in-memory DB', () => {
       const db = new Database(':memory:');
-      expect(() => runMigrations(db)).not.toThrow();
+      expect(() => migrate(db)).not.toThrow();
       db.close();
     });
 
     it('applies migrations in lexicographic filename order', () => {
       const db = new Database(':memory:');
-      runMigrations(db);
+      migrate(db);
 
       const appliedRows = db
         .prepare('SELECT id, applied_at FROM migrations ORDER BY applied_at, id')
@@ -485,7 +491,7 @@ describe('runMigrations — integration suite (#508)', () => {
   describe('same-numeric-prefix migrations do not conflict', () => {
     it('all four 002_* migrations apply cleanly together in a single fresh DB', () => {
       const db = new Database(':memory:');
-      expect(() => runMigrations(db)).not.toThrow();
+      expect(() => migrate(db)).not.toThrow();
 
       const tables = getTables(db);
       expect(tables).toContain('validators');              // 002_validators
@@ -509,7 +515,7 @@ describe('runMigrations — integration suite (#508)', () => {
 
     it('all four 003_* migrations apply cleanly together without duplicate-table errors', () => {
       const db = new Database(':memory:');
-      expect(() => runMigrations(db)).not.toThrow();
+      expect(() => migrate(db)).not.toThrow();
 
       const tables = getTables(db);
       expect(tables).toContain('idempotency_keys');   // 003_idempotency_keys
@@ -533,7 +539,7 @@ describe('runMigrations — integration suite (#508)', () => {
 
     it('both 004_* migrations apply cleanly — 004_validators is a safe no-op', () => {
       const db = new Database(':memory:');
-      expect(() => runMigrations(db)).not.toThrow();
+      expect(() => migrate(db)).not.toThrow();
 
       const tables = getTables(db);
       expect(tables).toContain('revoked_tokens');  // 004_token_revocation
@@ -555,7 +561,7 @@ describe('runMigrations — integration suite (#508)', () => {
 
     it('subscriptions table is created exactly once despite two 003_* files defining it', () => {
       const db = new Database(':memory:');
-      runMigrations(db);
+      migrate(db);
 
       // If a duplicate CREATE TABLE (without IF NOT EXISTS) had been executed,
       // the migration would have thrown and the table would be missing or the
@@ -573,7 +579,7 @@ describe('runMigrations — integration suite (#508)', () => {
 
     it('validators table is created exactly once despite 002_validators.sql and 004_validators.sql both defining it', () => {
       const db = new Database(':memory:');
-      runMigrations(db);
+      migrate(db);
 
       const rows = db
         .prepare(
@@ -594,8 +600,8 @@ describe('runMigrations — integration suite (#508)', () => {
     it('running migrations twice applies each file exactly once', () => {
       const db = new Database(':memory:');
 
-      runMigrations(db);
-      runMigrations(db);
+      migrate(db);
+      migrate(db);
 
       const rows = db
         .prepare('SELECT id FROM migrations')
@@ -618,9 +624,9 @@ describe('runMigrations — integration suite (#508)', () => {
       const db = new Database(':memory:');
 
       expect(() => {
-        runMigrations(db);
-        runMigrations(db);
-        runMigrations(db);
+        migrate(db);
+        migrate(db);
+        migrate(db);
       }).not.toThrow();
 
       const rows = db
@@ -663,4 +669,168 @@ describe('runMigrations — integration suite (#508)', () => {
       });
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #885: full DB migration sequence integration test
+// ---------------------------------------------------------------------------
+//
+// Verifies that applying all migrations in sequence from scratch (empty DB)
+// succeeds without errors and produces the expected final schema.
+// ---------------------------------------------------------------------------
+
+describe('full migration sequence from scratch (#885)', () => {
+  let db: Database.Database;
+
+  beforeAll(() => {
+    db = new Database(':memory:');
+    migrate(db);
+  });
+
+  afterAll(() => {
+    db.close();
+  });
+
+  // ── Helper ─────────────────────────────────────────────────────────────────
+
+  function tables(): Set<string> {
+    const rows = db
+      .prepare(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+      )
+      .all() as { name: string }[];
+    return new Set(rows.map((r) => r.name));
+  }
+
+  function columns(table: string): Set<string> {
+    const rows = db.pragma(`table_info(${table})`) as { name: string }[];
+    return new Set(rows.map((r) => r.name));
+  }
+
+  // ── 1. No errors on a fresh in-memory DB ───────────────────────────────────
+
+  it('runMigrations() completes without throwing on a fresh in-memory DB', () => {
+    const freshDb = new Database(':memory:');
+    expect(() => migrate(freshDb)).not.toThrow();
+    freshDb.close();
+  });
+
+  // ── 2. All expected tables are present ────────────────────────────────────
+
+  const expectedTables = [
+    'events',
+    'players',
+    'subscriptions',
+    'contact_unlocks',
+    'validators',
+    'audit_log',
+    'api_keys',
+    'webhook_subscriptions',
+    'feature_flags',
+    // tables also covered by earlier suites but required by issue spec
+    'indexer_state',
+    'pending_milestones',
+  ];
+
+  for (const table of expectedTables) {
+    it(`expected table '${table}' exists after full migration sequence`, () => {
+      expect(tables()).toContain(table);
+    });
+  }
+
+  // ── 3. Key columns from later migrations ──────────────────────────────────
+
+  it("players table has 'is_active' column added by migration 011_player_deactivation", () => {
+    // Migration 011 adds is_active via ALTER TABLE players ADD COLUMN is_active
+    expect(columns('players')).toContain('is_active');
+  });
+
+  it("api_keys table has expected columns from migration 007_api_keys", () => {
+    const cols = columns('api_keys');
+    expect(cols).toContain('id');
+    expect(cols).toContain('key_hash');
+    expect(cols).toContain('scout_wallet');
+    expect(cols).toContain('label');
+    expect(cols).toContain('created_at');
+    expect(cols).toContain('last_used_at');
+    expect(cols).toContain('revoked_at');
+  });
+
+  it("webhook_subscriptions table has expected columns from migration 012_webhook_subscriptions", () => {
+    const cols = columns('webhook_subscriptions');
+    expect(cols).toContain('id');
+    expect(cols).toContain('url');
+    expect(cols).toContain('secret');
+    expect(cols).toContain('created_at');
+  });
+
+  it("feature_flags table has expected columns from migration 010_feature_flags", () => {
+    const cols = columns('feature_flags');
+    expect(cols).toContain('name');
+    expect(cols).toContain('enabled');
+    expect(cols).toContain('updated_at');
+    expect(cols).toContain('updated_by');
+  });
+
+  it("contact_unlocks table has expected columns from migration 005_contact_unlocks", () => {
+    const cols = columns('contact_unlocks');
+    expect(cols).toContain('scout_wallet');
+    expect(cols).toContain('player_id');
+    expect(cols).toContain('tx_hash');
+    expect(cols).toContain('unlocked_at');
+  });
+
+  // ── 4. schema_migrations (migrations) table records all applied migrations ─
+
+  it("'migrations' table exists and records every applied migration file", () => {
+    expect(tables()).toContain('migrations');
+
+    const appliedRows = db
+      .prepare('SELECT id FROM migrations ORDER BY id')
+      .all() as { id: string }[];
+    const appliedIds = new Set(appliedRows.map((r) => r.id));
+
+    // runMigrations skips _postgres files — match its filter exactly
+    const expectedFiles = fs
+      .readdirSync(path.resolve(__dirname, '../../db'))
+      .filter((f) => f.endsWith('.sql') && !f.includes('_postgres'))
+      .sort();
+
+    for (const file of expectedFiles) {
+      expect(appliedIds).toContain(file);
+    }
+
+    // No extra phantom rows
+    expect(appliedRows.length).toBe(expectedFiles.length);
+  });
+
+  it("each migration in 'migrations' table has a non-null applied_at timestamp", () => {
+    const rows = db
+      .prepare('SELECT id, applied_at FROM migrations')
+      .all() as { id: string; applied_at: number }[];
+    for (const row of rows) {
+      expect(typeof row.applied_at).toBe('number');
+      expect(row.applied_at).toBeGreaterThan(0);
+    }
+  });
+
+  // ── 5. All tables are queryable (smoke test) ───────────────────────────────
+
+  const smokeTables = [
+    'events',
+    'players',
+    'subscriptions',
+    'contact_unlocks',
+    'validators',
+    'audit_log',
+    'api_keys',
+    'webhook_subscriptions',
+    'feature_flags',
+  ];
+
+  for (const table of smokeTables) {
+    it(`'${table}' is queryable with SELECT * LIMIT 0 after full migration`, () => {
+      expect(() => db.prepare(`SELECT * FROM ${table} LIMIT 0`).all()).not.toThrow();
+    });
+  }
 });

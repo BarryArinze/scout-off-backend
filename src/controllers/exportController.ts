@@ -1,10 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { getEventsPage, EventExportRow } from '../db';
+import { EventExportRow, getEventsIterable } from '../db';
 import { adminDateRangeSchema } from './adminController';
 import type { ContractEventType } from '../types';
-
-/** Rows are streamed to the client in bounded pages instead of loading the whole table. */
-const PAGE_SIZE = 500;
 
 /**
  * Escapes a single CSV field per RFC 4180: any value containing a comma,
@@ -33,7 +30,38 @@ export function formatEventCsvRow(row: EventExportRow): string {
 /**
  * GET /api/admin/events/export
  *
- * Streams indexed contract events as CSV.
+ * Streams indexed contract events as CSV using Node's stream/backpressure
+ * primitives.  Memory usage stays bounded and roughly constant regardless of
+ * table size — rows are read one at a time via a better-sqlite3 cursor
+ * (`Statement.iterate()`) and written to the response in small batches with
+ * explicit backpressure handling.
+ *
+ * ## Consistency guarantee (concurrent indexer)
+ *
+ * The export opens a cursor that sees a stable snapshot of the `events`
+ * table as of the first `next()` call.  Rows inserted by the concurrently
+ * running indexer (`indexEvents()` in src/index.ts, every 5 s) after the
+ * cursor is established are **consistently excluded** from the export — no
+ * row appears twice and no row within the snapshot boundary is silently
+ * dropped.  This is guaranteed by:
+ *
+ *   1. `Statement.iterate()` — the underlying prepared-statement cursor
+ *      holds a SHARED lock on the database that either (a) in WAL mode
+ *      provides snapshot isolation, or (b) in rollback-journal mode prevents
+ *      concurrent writes for the cursor's lifetime.
+ *   2. A single pass with a fixed ORDER BY — unlike repeated LIMIT/OFFSET
+ *      pagination the cursor does not recompute offsets, so concurrent
+ *      inserts cannot shift rows into or out of the result window.
+ *
+ * ## Truncation detection
+ *
+ * After the last data row the response ends with a footer line:
+ *
+ *   __EOF__,<row_count>,,
+ *
+ * CSV-consuming clients can check for this line to detect a truncated
+ * export (e.g. a connection drop mid-stream).  If the last line of the
+ * received file is not `__EOF__,<n>,,` the export is incomplete.
  *
  * Columns:
  *   event_type — Soroban contract event name (e.g. player_registered)
@@ -45,10 +73,6 @@ export function formatEventCsvRow(row: EventExportRow): string {
  *   startDate  — ISO 8601, inclusive lower bound on the event's indexed time
  *   endDate    — ISO 8601, inclusive upper bound on the event's indexed time
  *   eventType  — filter to a single contract event type
- *
- * Rows are read from the `events` table in bounded LIMIT/OFFSET pages and
- * written to the response as each page arrives, so memory usage stays
- * constant regardless of table size.
  */
 export async function exportEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -70,19 +94,30 @@ export async function exportEvents(req: Request, res: Response, next: NextFuncti
 
     res.write('event_type,ledger,timestamp,payload\n');
 
-    let offset = 0;
-    for (;;) {
-      const page = getEventsPage({ type: eventTypeFilter, startDate, endDate }, PAGE_SIZE, offset);
-      if (page.length === 0) break;
+    const iterable = getEventsIterable({ type: eventTypeFilter, startDate, endDate });
 
-      for (const row of page) {
-        res.write(formatEventCsvRow(row));
-      }
-
-      if (page.length < PAGE_SIZE) break;
-      offset += PAGE_SIZE;
+    // Clean up the SQLite cursor when the client disconnects mid-stream
+    if (typeof req.on === 'function') {
+      req.on('close', () => {
+        iterable.return?.();
+      });
     }
 
+    let rowCount = 0;
+
+    for (const row of iterable) {
+      rowCount++;
+      const line = formatEventCsvRow(row);
+
+      if (!res.write(line)) {
+        // Internal buffer is full — wait for drain before writing more
+        await new Promise<void>((resolve) => res.once('drain', resolve));
+      }
+    }
+
+    // Footer: lets the client detect a truncated export (missing this line
+    // means the stream was interrupted before all rows were sent).
+    res.write(`__EOF__,${rowCount},,\n`);
     res.end();
   } catch (err) {
     next(err);

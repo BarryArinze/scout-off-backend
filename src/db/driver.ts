@@ -37,8 +37,11 @@ export interface DbDriver {
 
   /**
    * Close the database connection.
+   * Returns a Promise that resolves only once the underlying connection has
+   * genuinely finished closing.  Callers in shutdown sequences must await
+   * this to ensure resources are released before the process exits.
    */
-  close(): void;
+  close(): Promise<void>;
 }
 
 export type DbDriverType = 'sqlite' | 'postgres';

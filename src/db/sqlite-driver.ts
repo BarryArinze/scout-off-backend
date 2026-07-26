@@ -44,7 +44,7 @@ export class SqliteDriver implements DbDriver {
     return this.db.transaction(fn)();
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.db.close();
   }
 }

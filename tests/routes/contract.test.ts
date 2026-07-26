@@ -16,16 +16,16 @@ const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 // ─── Mocks ────────────────────────────────────────────────────────────────────
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   queryPlayers: jest.fn().mockReturnValue([]),
   countPlayers: jest.fn().mockReturnValue(0),
   getPlayerById: jest.fn().mockReturnValue(null),
   getEventsCount: jest.fn().mockReturnValue(0),
-  getLastLedger: jest.fn().mockReturnValue(0),
-  setLastLedger: jest.fn(),
+  fetchLastIndexedLedger: jest.fn().mockReturnValue(0),
+  persistLastIndexedLedger: jest.fn(),
   insertPlayerProfileHistory: jest.fn(),
   getPlayerProfileHistory: jest.fn().mockReturnValue([]),
-  upsertPlayer: jest.fn(),
+  insertOrUpdatePlayer: jest.fn(),
   getPendingMilestones: jest.fn().mockReturnValue({ data: [], total: 0 }),
   getContactUnlocksByScout: jest.fn().mockReturnValue([]),
   hasContactUnlock: jest.fn().mockReturnValue(true),

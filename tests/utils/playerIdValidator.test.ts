@@ -48,6 +48,36 @@ describe('isValidPlayerId', () => {
   });
 });
 
+describe('edge cases — numeric and boundary inputs', () => {
+  it('accepts string "1" as a valid player ID (positive integer as string)', () => {
+    expect(isValidPlayerId('1')).toBe(true);
+  });
+
+  it('accepts string "9999" as a valid player ID (positive integer as string)', () => {
+    expect(isValidPlayerId('9999')).toBe(true);
+  });
+
+  it('rejects number 0 — zero is not a valid player ID', () => {
+    expect(isValidPlayerId(0 as unknown as string)).toBe(false);
+  });
+
+  it('rejects number -1 — negative integer is not a valid player ID', () => {
+    expect(isValidPlayerId(-1 as unknown as string)).toBe(false);
+  });
+
+  it('rejects number 3.14 — floating-point value is not a valid player ID', () => {
+    expect(isValidPlayerId(3.14 as unknown as string)).toBe(false);
+  });
+
+  it('rejects Number.MAX_SAFE_INTEGER + 1 — exceeds safe integer range', () => {
+    expect(isValidPlayerId((Number.MAX_SAFE_INTEGER + 1) as unknown as string)).toBe(false);
+  });
+
+  it('rejects integer 42 where a string is expected', () => {
+    expect(isValidPlayerId(42 as unknown as string)).toBe(false);
+  });
+});
+
 describe('playerIdSchema', () => {
   it('parses a valid playerId successfully', () => {
     const result = playerIdSchema.safeParse('valid-player_1');

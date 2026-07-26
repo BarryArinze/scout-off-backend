@@ -20,7 +20,9 @@ export type AdminActionType =
   | 'pause_contract'
   | 'unpause_contract'
   | 'withdraw_fees'
-  | 'update_platform_fee';
+  | 'update_platform_fee'
+  | 'register_validator'
+  | 'revoke_validator';
 
 export interface ProposalResult {
   actionId: string;

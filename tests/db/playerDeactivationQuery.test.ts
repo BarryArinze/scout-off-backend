@@ -1,4 +1,4 @@
-import { getDb, queryPlayers, countPlayers, upsertPlayer, deactivatePlayer, reactivatePlayer } from '../../src/db';
+import { getDb, queryPlayers, countPlayers, insertOrUpdatePlayer, deactivatePlayer, reactivatePlayer } from '../../src/db';
 
 describe('Player Query Deactivation Filtering', () => {
   beforeEach(() => {
@@ -6,8 +6,8 @@ describe('Player Query Deactivation Filtering', () => {
   });
 
   it('excludes deactivated players by default in queryPlayers and countPlayers', () => {
-    upsertPlayer({ player_id: 'p-active', wallet: 'G-wallet-active', position: 'striker', region: 'europe', created_at: 100 });
-    upsertPlayer({ player_id: 'p-deactivated', wallet: 'G-wallet-deactivated', position: 'striker', region: 'europe', created_at: 200 });
+    insertOrUpdatePlayer({ player_id: 'p-active', wallet: 'G-wallet-active', position: 'striker', region: 'europe', created_at: 100 });
+    insertOrUpdatePlayer({ player_id: 'p-deactivated', wallet: 'G-wallet-deactivated', position: 'striker', region: 'europe', created_at: 200 });
 
     deactivatePlayer('p-deactivated');
 
@@ -20,8 +20,8 @@ describe('Player Query Deactivation Filtering', () => {
   });
 
   it('includes deactivated players in queryPlayers when includeDeactivated is true', () => {
-    upsertPlayer({ player_id: 'p-active', wallet: 'G-wallet-active', position: 'striker', region: 'europe', created_at: 100 });
-    upsertPlayer({ player_id: 'p-deactivated', wallet: 'G-wallet-deactivated', position: 'striker', region: 'europe', created_at: 200 });
+    insertOrUpdatePlayer({ player_id: 'p-active', wallet: 'G-wallet-active', position: 'striker', region: 'europe', created_at: 100 });
+    insertOrUpdatePlayer({ player_id: 'p-deactivated', wallet: 'G-wallet-deactivated', position: 'striker', region: 'europe', created_at: 200 });
 
     deactivatePlayer('p-deactivated');
 
@@ -32,7 +32,7 @@ describe('Player Query Deactivation Filtering', () => {
   });
 
   it('makes reactivated players visible again', () => {
-    upsertPlayer({ player_id: 'p-reactivated', wallet: 'G-wallet-reactivated', position: 'striker', region: 'europe', created_at: 100 });
+    insertOrUpdatePlayer({ player_id: 'p-reactivated', wallet: 'G-wallet-reactivated', position: 'striker', region: 'europe', created_at: 100 });
     
     deactivatePlayer('p-reactivated');
     expect(queryPlayers({ region: 'europe' })).toHaveLength(0);

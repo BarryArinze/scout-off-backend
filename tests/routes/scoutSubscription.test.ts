@@ -19,7 +19,7 @@ jest.mock('../../src/db', () => {
   let idSeq = 1;
 
   return {
-    getEvents: jest.fn().mockReturnValue([]),
+    queryEvents: jest.fn().mockReturnValue([]),
     getLatestSubscription: jest.fn().mockImplementation((wallet: string) => {
       const rows = subscriptions
         .filter((s) => s.scout_wallet === wallet && s.cancelled_at === null)
