@@ -6,7 +6,7 @@ import config from "./config";
 import { logger } from "./utils/logger";
 import { initDb, closeDb } from "./db";
 import { stellarHealth } from "./services/stellar";
-import { checkHealth } from "./services/ipfs";
+import { checkHealth, retryPendingPins } from "./services/ipfs";
 import { indexEvents } from "./services/indexer";
 import { fetchLastIndexedLedger, persistLastIndexedLedger } from "./db";
 import { initBlocklist } from "./services/tokenBlocklist";
@@ -85,6 +85,17 @@ async function startServer() {
   poll();
   const pollInterval = setInterval(poll, 5_000);
 
+  // Poll for IPFS retries every 30 seconds
+  const retryPins = async () => {
+    try {
+      await retryPendingPins();
+    } catch (err) {
+      logger.error("IPFS retry worker error:", (err as Error).message);
+    }
+  };
+
+  const retryInterval = setInterval(retryPins, 30_000);
+
   const SHUTDOWN_TIMEOUT_MS = 10_000;
   let isShuttingDown = false;
 
@@ -102,6 +113,7 @@ async function startServer() {
     forceExitTimer.unref();
 
     clearInterval(pollInterval);
+    clearInterval(retryInterval);
 
     server.close(async (err) => {
       if (err) {
