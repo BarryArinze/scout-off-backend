@@ -92,7 +92,7 @@ function rowToAuditEntry(row: AuditLogRow): AuditEntryResponse {
 // Use shared validator for Stellar public keys
 
 /** GET /api/admin/stats */
-export async function getStats(req: Request, res: Response, next: NextFunction) {
+export async function getStats(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     res.json({
       success: true,
@@ -122,7 +122,7 @@ const auditQuerySchema = z.object({
 });
 
 /** GET /api/admin/audit (legacy #345 endpoint — backward-compatible) */
-export async function getAuditLog(req: Request, res: Response, next: NextFunction) {
+export async function getAuditLog(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = auditQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -189,7 +189,7 @@ const auditTrailQuerySchema = z.object({
  * @response 400 { success: false, error: string } - Invalid query parameters
  * @auth Bearer (admin role required)
  */
-export async function getAuditTrail(req: Request, res: Response, next: NextFunction) {
+export async function getAuditTrail(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = auditTrailQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -239,7 +239,7 @@ export async function getAuditTrail(req: Request, res: Response, next: NextFunct
  * result means a historical row was edited, deleted, or reordered outside
  * the application (e.g. direct DB access).
  */
-export async function getAuditChainVerification(req: Request, res: Response, next: NextFunction) {
+export async function getAuditChainVerification(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const result = verifyAuditChain();
     res.json({ success: true, data: result });
@@ -266,7 +266,7 @@ const paginationSchema = z.object({
 });
 
 /** GET /api/admin/events */
-export async function getAllEvents(req: Request, res: Response, next: NextFunction) {
+export async function getAllEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const dateResult = adminDateRangeSchema.safeParse(req.query);
     if (!dateResult.success) {
@@ -296,7 +296,7 @@ export async function getAllEvents(req: Request, res: Response, next: NextFuncti
 }
 
 /** GET /api/admin/fees — returns fees_withdrawn event payloads */
-export async function getFeeSummary(req: Request, res: Response, next: NextFunction) {
+export async function getFeeSummary(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const dateResult = adminDateRangeSchema.safeParse(req.query);
     if (!dateResult.success) {
@@ -319,7 +319,7 @@ export async function getFeeSummary(req: Request, res: Response, next: NextFunct
 }
 
 /** GET /api/admin/validators */
-export async function listValidators(req: Request, res: Response, next: NextFunction) {
+export async function listValidators(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     res.json({ success: true, data: getAllValidators() });
   } catch (err) {
@@ -334,7 +334,7 @@ export async function listValidators(req: Request, res: Response, next: NextFunc
  * on-chain confirmation, so a failed/rejected chain call never leaves a
  * local row that doesn't reflect contract state.
  */
-export async function registerValidator(req: Request, res: Response, next: NextFunction) {
+export async function registerValidator(req: Request, res: Response, next: NextFunction): Promise<void> {
   const adminWallet = req.account ?? 'unknown';
   const { validatorWallet } = req.body as { validatorWallet?: string };
 
@@ -433,7 +433,7 @@ export async function registerValidator(req: Request, res: Response, next: NextF
  * on-chain confirmation, so a failed/rejected chain call never leaves the
  * local row out of sync with contract state.
  */
-export async function revokeValidator(req: Request, res: Response, next: NextFunction) {
+export async function revokeValidator(req: Request, res: Response, next: NextFunction): Promise<void> {
   const adminWallet = req.account ?? 'unknown';
   const { validatorWallet } = req.body as { validatorWallet?: string };
 
@@ -544,7 +544,7 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
  * Invokes pause() on the Soroban contract via the platform keypair.
  * Returns 409 if the contract is already paused.
  */
-export async function pauseContract(req: Request, res: Response, next: NextFunction) {
+export async function pauseContract(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const adminWallet = req.account ?? 'unknown';
     // Check if admin wallet is in allowed admin wallets
@@ -599,7 +599,7 @@ export async function pauseContract(req: Request, res: Response, next: NextFunct
  * Invokes unpause() on the Soroban contract via the platform keypair.
  * Returns 409 if the contract is not currently paused.
  */
-export async function unpauseContract(req: Request, res: Response, next: NextFunction) {
+export async function unpauseContract(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const adminWallet = req.account ?? 'unknown';
     // Check if admin wallet is in allowed admin wallets
@@ -655,7 +655,7 @@ const revokeTokenSchema = z.object({
 }).refine((d) => !!d.jti || !!d.token, { message: 'jti or token is required' });
 
 /** POST /api/admin/tokens/revoke */
-export async function revokeTokenController(req: Request, res: Response, next: NextFunction) {
+export async function revokeTokenController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = revokeTokenSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -692,7 +692,7 @@ export async function revokeTokenController(req: Request, res: Response, next: N
  * an arbitrary token there would let an admin introspect another user's
  * claims (#279).
  */
-export async function introspectToken(req: Request, res: Response, next: NextFunction) {
+export async function introspectToken(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     // requireRole('admin') has already verified this header's token.
     // Any `token` field in the request body is intentionally ignored — accepting
@@ -760,7 +760,7 @@ export function setWithdrawalLockForTesting(): void {
 }
 
 /** POST /api/admin/fees — withdraw accumulated platform fees */
-export async function withdrawFeesController(req: Request, res: Response, next: NextFunction) {
+export async function withdrawFeesController(req: Request, res: Response, next: NextFunction): Promise<void> {
   // Controller-level role guard (defence-in-depth in addition to the route middleware).
   if (req.role !== 'admin') {
     res.status(403).json({ success: false, error: 'Insufficient permissions', code: ErrorCode.FORBIDDEN });
@@ -897,7 +897,7 @@ const reindexSchema = z.object({
  * GET /api/admin/validators/:wallet/stats
  * Returns validator stats: milestones_approved and milestones_rejected.
  */
-export async function getValidatorStatsEndpoint(req: Request, res: Response, next: NextFunction) {
+export async function getValidatorStatsEndpoint(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const wallet = req.params.wallet;
     // Validate wallet address
@@ -934,7 +934,7 @@ export async function getValidatorStatsEndpoint(req: Request, res: Response, nex
  * POST /api/admin/indexer/reindex
  * Resets the indexer's last_ledger to fromLedger so the next poll replays from that point.
  */
-export async function reindex(req: Request, res: Response, next: NextFunction) {
+export async function reindex(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = reindexSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -958,7 +958,7 @@ const updatePlatformFeeSchema = z.object({
  * POST /api/admin/platform-fee
  * Update platform fee configuration on-chain
  */
-export async function updatePlatformFee(req: Request, res: Response, next: NextFunction) {
+export async function updatePlatformFee(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (req.role !== 'admin') {
       res.status(403).json({ success: false, error: 'Insufficient permissions' });
@@ -1005,7 +1005,7 @@ export async function updatePlatformFee(req: Request, res: Response, next: NextF
  * GET /api/admin/actions/pending
  * List all pending multi-admin actions (expired ones are purged on read).
  */
-export async function getPendingActions(req: Request, res: Response, next: NextFunction) {
+export async function getPendingActions(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const actions = listPendingActions().map((a) => ({
       id: a.id,
@@ -1027,7 +1027,7 @@ export async function getPendingActions(req: Request, res: Response, next: NextF
  * GET /api/admin/actions/:id
  * Get details of a specific pending action including collected signers.
  */
-export async function getPendingActionById(req: Request, res: Response, next: NextFunction) {
+export async function getPendingActionById(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const details = getActionDetails(req.params.id);
     if (!details) {
@@ -1058,7 +1058,7 @@ export async function getPendingActionById(req: Request, res: Response, next: Ne
  * POST /api/admin/actions/:id/approve
  * Co-sign a pending multi-admin action.
  */
-export async function approvePendingAction(req: Request, res: Response, next: NextFunction) {
+export async function approvePendingAction(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const adminWallet = req.account ?? 'unknown';
 
@@ -1336,7 +1336,7 @@ export async function processBatch(
  * @response 400 { success: false, error: string } - Unparseable body or no entries
  * @auth Bearer (admin role required)
  */
-export async function importValidators(req: Request, res: Response, next: NextFunction) {
+export async function importValidators(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const adminWallet = req.account ?? 'unknown';
     const contentType = (req.headers['content-type'] ?? '').toLowerCase();

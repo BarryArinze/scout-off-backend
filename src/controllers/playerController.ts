@@ -69,7 +69,7 @@ export async function registerPlayer(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const parsed = registerSchema.parse(req.body);
 
@@ -137,7 +137,7 @@ export async function getPlayer(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {
@@ -224,7 +224,7 @@ export async function filterPlayers(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const tierResult = validateMinTier(req.query.minTier);
     if (!tierResult.valid) {
@@ -326,7 +326,7 @@ export async function updatePlayer(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const playerId = sanitizeInput(req.params.playerId);
     const parsed = updatePlayerSchema.parse(req.body);
@@ -369,7 +369,7 @@ export async function getPlayerMilestones(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {
@@ -426,7 +426,7 @@ export async function deactivatePlayerEndpoint(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {
@@ -452,7 +452,7 @@ export async function reactivatePlayerEndpoint(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {

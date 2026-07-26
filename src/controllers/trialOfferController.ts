@@ -33,7 +33,7 @@ function getPlayerWallet(playerId: string): string | null {
  * - 404: offer not found
  * - 409: offer already responded to
  */
-export async function acceptTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function acceptTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { playerId, offerId } = req.params;
 
@@ -136,7 +136,7 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
  * - 404: offer not found
  * - 409: offer already responded to
  */
-export async function rejectTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function rejectTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { playerId, offerId } = req.params;
 

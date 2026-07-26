@@ -122,7 +122,7 @@ function getCorrelationId(req: Request): string {
   return String(req.headers?.['x-correlation-id'] ?? req.headers?.['correlation-id'] ?? 'none');
 }
 
-export async function submitMilestoneEvidence(req: Request, res: Response, next: NextFunction) {
+export async function submitMilestoneEvidence(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { playerId, milestoneType, evidenceUri } = milestoneSchema.parse(req.body);
 
@@ -168,7 +168,7 @@ export async function submitMilestoneEvidence(req: Request, res: Response, next:
 }
 
 /** GET /api/validators/milestones/pending or /api/validators/:wallet/milestones/pending */
-export async function getPendingMilestones(req: Request, res: Response, next: NextFunction) {
+export async function getPendingMilestones(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { region, position, playerId, page, pageSize } = pendingQuerySchema.parse(req.query);
     const validatorWallet = req.params.wallet || req.account;
