@@ -6,13 +6,22 @@ import {
   persistLastIndexedLedger,
   insertOrUpdatePlayer,
   updatePlayerProgress,
-  queryEvents,
+  getEvents,
   insertPendingMilestone,
+  queryEvents,
   rollbackEventsFromLedger,
 } from '../db';
 import { dispatchEventWebhook } from './webhooks';
 import { logger } from '../utils/logger';
 import { tierForApprovedMilestones } from './tierPromotion';
+
+// Lazy import cache service to avoid circular dependency
+function getCache() {
+  return require('./cache');
+}
+
+// Track approved milestones for webhook dispatch
+const approvedMilestones: Array<{ type: string; payload: unknown }> = [];
 
 /** Current indexer lag in ledgers (latestChainLedger - lastIndexedLedger). Reset after each poll. */
 export let indexerLedgerLag = 0;
@@ -139,14 +148,18 @@ export async function indexEvents(): Promise<void> {
       onAfterInsert(eventId);
 
       if (type === 'player_registered') {
+        const playerId = payload.player_id as string;
         insertOrUpdatePlayer({
-          player_id: payload.player_id as string,
+          player_id: playerId,
           wallet: payload.wallet as string,
           position: payload.position as string | undefined,
           region: payload.region as string | undefined,
           metadata_uri: payload.metadata_uri as string | undefined,
           created_at: raw.ledger,
         });
+        // Invalidate cache after player registration
+        const cache = getCache();
+        cache.invalidatePlayerCache(playerId);
       } else if (type === 'milestone_submitted') {
         const milestoneId = payload.milestone_id as string;
         const playerId = payload.player_id as string;
@@ -165,6 +178,9 @@ export async function indexEvents(): Promise<void> {
             (e) => e.payload.player_id === playerId,
           ).length;
           updatePlayerProgress(playerId, tierForApprovedMilestones(approvedMilestoneCount));
+          // Invalidate cache after player progress update
+          const cache = getCache();
+          cache.invalidatePlayerCache(playerId);
         }
         webhookEvents.push({ type, payload });
       }
