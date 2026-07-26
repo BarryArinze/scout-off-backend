@@ -20,12 +20,54 @@ if (!VALID_ENVS.has(rawNodeEnv)) {
 }
 const nodeEnv = rawNodeEnv as NodeEnv;
 
+// Validate ADMIN_WALLET based on environment:
+// - production: throw immediately so the process never starts without it
+// - staging: emit a console warning (process continues)
+const adminWalletValue = process.env.ADMIN_WALLET ?? '';
+if (!adminWalletValue) {
+  if (nodeEnv === 'production') {
+    throw new Error('ADMIN_WALLET is required in production but is not set. Set the ADMIN_WALLET environment variable to the platform admin Stellar address.');
+  }
+  if (nodeEnv === 'staging') {
+    console.warn('[config] WARNING: ADMIN_WALLET is not set in staging. Admin-seeding will be disabled. Set ADMIN_WALLET to suppress this warning.');
+  }
+}
+
+// Validate PINATA_GATEWAY when set — it must be a valid HTTPS URL. An invalid
+// gateway would otherwise only surface as a runtime failure when resolving
+// IPFS content, with no clear indication of the misconfiguration.
+const pinataGatewayValue = process.env.PINATA_GATEWAY ?? '';
+if (pinataGatewayValue) {
+  let pinataGatewayIsHttps = false;
+  try {
+    pinataGatewayIsHttps = new URL(pinataGatewayValue).protocol === 'https:';
+  } catch {
+    pinataGatewayIsHttps = false;
+  }
+  if (!pinataGatewayIsHttps) {
+    throw new Error(`Invalid PINATA_GATEWAY: "${pinataGatewayValue}". Must be a valid HTTPS URL.`);
+  }
+}
+
 const ENV_LOG_LEVEL: Record<NodeEnv, LogLevel> = {
   development: 'debug',
   test: 'warn',
   staging: 'info',
   production: 'warn',
 };
+
+const DEFAULT_CORS_ORIGINS: Record<NodeEnv, string[]> = {
+  development: ['*'],
+  test: ['*'],
+  staging: ['https://staging.scoutoff.io'],
+  production: ['https://app.scoutoff.io', 'https://scoutoff.io'],
+};
+
+const rawCorsOrigins = process.env.CORS_ALLOWED_ORIGINS ?? process.env.ALLOWED_ORIGINS;
+const corsAllowedOrigins =
+  rawCorsOrigins !== undefined && rawCorsOrigins.trim() !== ''
+    ? rawCorsOrigins.split(',').map((o) => o.trim()).filter(Boolean)
+    : DEFAULT_CORS_ORIGINS[nodeEnv];
 
 const config = {
   nodeEnv,
@@ -39,6 +81,7 @@ const config = {
     process.env.SOROBAN_RPC_URL ?? 'https://soroban-testnet.stellar.org',
   contractId: required('CONTRACT_ID'),
   jwtSecret: required('JWT_SECRET'),
+  platformSecret: process.env.PLATFORM_SECRET ?? '',
   pinata: {
     apiKey: process.env.PINATA_API_KEY ?? '',
     secret: process.env.PINATA_SECRET ?? '',
@@ -50,8 +93,47 @@ const config = {
     ],
   },
   platformFeeBps: parseInt(process.env.PLATFORM_FEE_BPS ?? '500', 10),
-  platformSecret: process.env.PLATFORM_SECRET ?? '',
+  jwtSecretPrevious: process.env.JWT_SECRET_PREVIOUS ?? '',
+  platformSecretKey: (() => {
+    const isTest = (process.env.NODE_ENV ?? 'development') === 'test';
+    const val = process.env.PLATFORM_SECRET_KEY ?? '';
+    if (!val && !isTest) {
+      throw new Error('PLATFORM_SECRET_KEY is required in non-test environments');
+    }
+    return val;
+  })(),
+  dbDriver: (() => {
+    const raw = process.env.DB_DRIVER ?? 'sqlite';
+    const valid = ['sqlite', 'postgres'] as const;
+    if (!(valid as readonly string[]).includes(raw)) {
+      throw new Error(
+        `DB_DRIVER="${raw}" is invalid. Must be one of: ${valid.join(', ')}. ` +
+        `Check for typos — an unrecognised value does NOT fall back to SQLite; the server will not start.`
+      );
+    }
+    return raw as 'sqlite' | 'postgres';
+  })(),
   dbPath: process.env.DB_PATH ?? 'scout-off.db',
+  databaseUrl: process.env.DATABASE_URL ?? '',
+  /**
+   * Enable SSL/TLS for the PostgreSQL connection.
+   *
+   * Set DATABASE_SSL=true to enable SSL with certificate verification (the
+   * default secure mode).  Set DATABASE_SSL=no-verify to enable SSL but skip
+   * certificate verification (useful for self-signed certs in dev/staging; do
+   * NOT use in production).  Leave unset or set to false to disable SSL
+   * (suitable only for local / private-network Postgres without TLS).
+   *
+   * Most managed providers (RDS, Heroku, Supabase, Railway, Neon) require
+   * SSL — set DATABASE_SSL=true for them.  See docs/postgres-migration.md for
+   * per-provider examples.
+   */
+  databaseSsl: (() => {
+    const raw = (process.env.DATABASE_SSL ?? '').toLowerCase();
+    if (raw === 'true' || raw === '1' || raw === 'yes') return true as const;
+    if (raw === 'no-verify') return 'no-verify' as const;
+    return false as const;
+  })(),
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),
@@ -61,11 +143,23 @@ const config = {
     xContentTypeOptions: process.env.SECURITY_X_CONTENT_TYPE_OPTIONS ?? 'nosniff',
     xFrameOptions: process.env.SECURITY_X_FRAME_OPTIONS ?? 'DENY',
     referrerPolicy: process.env.SECURITY_REFERRER_POLICY ?? 'no-referrer',
+    /** Content-Security-Policy value. Override via SECURITY_CSP env var. */
+    csp: process.env.SECURITY_CSP ?? "default-src 'none'; frame-ancestors 'none'",
+    /** Permissions-Policy value. Override via SECURITY_PERMISSIONS_POLICY env var. */
+    permissionsPolicy: process.env.SECURITY_PERMISSIONS_POLICY ?? 'camera=(), microphone=(), geolocation=()',
   },
   webhook: {
     enabled: process.env.WEBHOOK_ENABLED === 'true',
     url: process.env.WEBHOOK_URL ?? '',
+    // HMAC secret for the legacy single-subscriber webhook (WEBHOOK_URL). Used to seed a
+    // row in `webhook_subscriptions` on startup for backward compatibility. Real
+    // multi-subscriber deployments should manage subscriptions in the DB instead.
+    secret: process.env.WEBHOOK_SECRET ?? '',
   },
+  // Symmetric key (32-byte hex, e.g. `openssl rand -hex 32`) used to encrypt
+  // webhook_subscriptions.secret at rest (#686). Required in production —
+  // see src/utils/webhookSecretCipher.ts and docs/secrets-rotation.md.
+  webhookSecretEncryptionKey: process.env.WEBHOOK_SECRET_ENCRYPTION_KEY ?? '',
   rateLimit: {
     enabled: process.env.RATE_LIMIT_ENABLED !== 'false',
     windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
@@ -79,9 +173,8 @@ const config = {
     // Maximum JSON payload size (default: 1MB)
     json: process.env.JSON_PAYLOAD_LIMIT ?? '1mb',
   },
-  allowedOrigins: process.env.ALLOWED_ORIGINS
-    ? process.env.ALLOWED_ORIGINS.split(',').map((o) => o.trim()).filter(Boolean)
-    : [],
+  corsAllowedOrigins,
+  allowedOrigins: corsAllowedOrigins,
   logLevel: (process.env.LOG_LEVEL ?? ENV_LOG_LEVEL[nodeEnv]) as LogLevel,
   showErrorDetails: nodeEnv === 'development' || nodeEnv === 'test',
   useMockServices: nodeEnv === 'development' || nodeEnv === 'test',
@@ -102,6 +195,26 @@ const config = {
   },
   /** TTL for player list cache entries in milliseconds. */
   playerCacheTtlMs: parseInt(process.env.PLAYER_CACHE_TTL_MS ?? '60000', 10),
+
+  playerImport: {
+    /** Maximum number of rows accepted per bulk player import request. */
+    maxBatchSize: parseInt(process.env.PLAYER_IMPORT_MAX_BATCH ?? '500', 10),
+  },
+
+  // When set, the search cache (src/services/cache.ts) uses Redis so cache
+  // state is shared across multiple backend instances. When unset (default),
+  // it falls back to an in-memory Map — no setup required for local dev/CI.
+  redisUrl: process.env.REDIS_URL || '',
+
+  /** TTL for pinJson deduplication cache entries in milliseconds (default: 5 min). */
+  pinJsonCacheTtlMs: parseInt(process.env.PIN_JSON_CACHE_TTL_MS ?? '300000', 10),
+
+  /** Maximum evidence file size in bytes (default: 50 MB). */
+  evidenceMaxBytes: parseInt(process.env.EVIDENCE_MAX_BYTES ?? String(50 * 1024 * 1024), 10),
+
+  /** TTL for multi-admin action proposals in milliseconds (default: 1 hour). */
+  adminActionTtlMs: parseInt(process.env.ADMIN_ACTION_TTL_MS ?? '3600000', 10),
+
 };
 
 export default config;

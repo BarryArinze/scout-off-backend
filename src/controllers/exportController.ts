@@ -1,30 +1,124 @@
 import { Request, Response, NextFunction } from 'express';
+import { EventExportRow, getEventsIterable } from '../db';
+import { adminDateRangeSchema } from './adminController';
+import type { ContractEventType } from '../types';
+
+/**
+ * Escapes a single CSV field per RFC 4180: any value containing a comma,
+ * double quote, or newline (\n or \r) is wrapped in double quotes, with
+ * internal double quotes doubled.
+ */
+export function csvEscapeField(value: string): string {
+  if (/[",\n\r]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+/** Formats a single event row as one CSV line (including trailing newline). */
+export function formatEventCsvRow(row: EventExportRow): string {
+  const timestampSeconds = Math.floor((row.createdAt ?? 0) / 1000);
+  const fields = [
+    csvEscapeField(row.type),
+    String(row.ledger),
+    String(timestampSeconds),
+    csvEscapeField(JSON.stringify(row.payload)),
+  ];
+  return fields.join(',') + '\n';
+}
 
 /**
  * GET /api/admin/events/export
  *
- * Placeholder endpoint — returns contract events as CSV.
+ * Streams indexed contract events as CSV using Node's stream/backpressure
+ * primitives.  Memory usage stays bounded and roughly constant regardless of
+ * table size — rows are read one at a time via a better-sqlite3 cursor
+ * (`Statement.iterate()`) and written to the response in small batches with
+ * explicit backpressure handling.
  *
- * Intended export structure:
- *   event_type  — Soroban contract event name (e.g. player_registered)
- *   ledger      — ledger sequence number when the event was emitted
- *   timestamp   — Unix epoch seconds
- *   payload     — JSON-encoded event payload
+ * ## Consistency guarantee (concurrent indexer)
  *
- * TODO: replace stub rows with real indexer data once CSV serialisation
- *       is implemented.
+ * The export opens a cursor that sees a stable snapshot of the `events`
+ * table as of the first `next()` call.  Rows inserted by the concurrently
+ * running indexer (`indexEvents()` in src/index.ts, every 5 s) after the
+ * cursor is established are **consistently excluded** from the export — no
+ * row appears twice and no row within the snapshot boundary is silently
+ * dropped.  This is guaranteed by:
+ *
+ *   1. `Statement.iterate()` — the underlying prepared-statement cursor
+ *      holds a SHARED lock on the database that either (a) in WAL mode
+ *      provides snapshot isolation, or (b) in rollback-journal mode prevents
+ *      concurrent writes for the cursor's lifetime.
+ *   2. A single pass with a fixed ORDER BY — unlike repeated LIMIT/OFFSET
+ *      pagination the cursor does not recompute offsets, so concurrent
+ *      inserts cannot shift rows into or out of the result window.
+ *
+ * ## Truncation detection
+ *
+ * After the last data row the response ends with a footer line:
+ *
+ *   __EOF__,<row_count>,,
+ *
+ * CSV-consuming clients can check for this line to detect a truncated
+ * export (e.g. a connection drop mid-stream).  If the last line of the
+ * received file is not `__EOF__,<n>,,` the export is incomplete.
+ *
+ * Columns:
+ *   event_type — Soroban contract event name (e.g. player_registered)
+ *   ledger     — ledger sequence number when the event was emitted
+ *   timestamp  — Unix epoch seconds
+ *   payload    — JSON-encoded event payload
+ *
+ * Query params (identical semantics to GET /api/admin/events):
+ *   startDate  — ISO 8601, inclusive lower bound on the event's indexed time
+ *   endDate    — ISO 8601, inclusive upper bound on the event's indexed time
+ *   eventType  — filter to a single contract event type
  */
 export async function exportEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const csv = [
-      'event_type,ledger,timestamp,payload',
-      'player_registered,1000,1700000000,"{}"',
-      'milestone_approved,1001,1700000060,"{}"',
-    ].join('\n');
+    const parsed = adminDateRangeSchema.safeParse(req.query ?? {});
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+      });
+      return;
+    }
 
+    const { startDate, endDate, eventType } = parsed.data;
+    const eventTypeFilter = eventType as ContractEventType | undefined;
+
+    res.status(200);
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="events.csv"');
-    res.status(200).send(csv);
+
+    res.write('event_type,ledger,timestamp,payload\n');
+
+    const iterable = getEventsIterable({ type: eventTypeFilter, startDate, endDate });
+
+    // Clean up the SQLite cursor when the client disconnects mid-stream
+    if (typeof req.on === 'function') {
+      req.on('close', () => {
+        iterable.return?.();
+      });
+    }
+
+    let rowCount = 0;
+
+    for (const row of iterable) {
+      rowCount++;
+      const line = formatEventCsvRow(row);
+
+      if (!res.write(line)) {
+        // Internal buffer is full — wait for drain before writing more
+        await new Promise<void>((resolve) => res.once('drain', resolve));
+      }
+    }
+
+    // Footer: lets the client detect a truncated export (missing this line
+    // means the stream was interrupted before all rows were sent).
+    res.write(`__EOF__,${rowCount},,\n`);
+    res.end();
   } catch (err) {
     next(err);
   }

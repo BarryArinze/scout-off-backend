@@ -22,6 +22,25 @@ The thresholds are defined once, as data, in
 (`TIER_THRESHOLDS`). The indexer and the tests both consume that single source
 of truth, so retuning promotion is a one-line change to the thresholds.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Unverified: 0 approved milestones
+    state "Level 0: Unverified" as Unverified
+    state "Level 1: Emerging" as Emerging
+    state "Level 2: Established" as Established
+    state "Level 3: Elite" as Elite
+
+    Unverified --> Emerging: approved count reaches 1
+    Emerging --> Established: approved count reaches 3
+    Established --> Elite: approved count reaches 6
+```
+
+These transitions show the backend promotion model implemented by
+`tierForApprovedMilestones`. Product-facing material may describe levels 1 and
+2 as "Verified Identity" and "Performance Milestones", but those labels do not
+add KYC, academy, footage, or trial-offer conditions to this service. In the
+backend, only the recorded `milestone_approved` count controls these transitions.
+
 ## When promotion happens
 
 Promotion is applied by the indexer ([`src/services/indexer.ts`](../src/services/indexer.ts))

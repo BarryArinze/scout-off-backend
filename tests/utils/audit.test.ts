@@ -1,7 +1,13 @@
-import { recordAudit, queryAudit, auditStore } from '../../src/utils/audit';
+import { recordAudit, queryAudit } from '../../src/utils/audit';
+import { getDb, insertAuditLog, getAuditLogsCount, getAllAuditLogRows } from '../../src/db';
+import { GENESIS_HASH } from '../../src/utils/hashChain';
+import { verifyAuditChain } from '../../src/utils/auditVerify';
 
+// recordAudit/queryAudit now persist to the audit_log table instead of an
+// in-memory array (#464), so isolate tests by clearing that table rather
+// than resetting an array.
 beforeEach(() => {
-  auditStore.length = 0;
+  getDb().prepare('DELETE FROM audit_log').run();
 });
 
 describe('recordAudit', () => {
@@ -13,14 +19,14 @@ describe('recordAudit', () => {
     expect(entry.payloadHash).toHaveLength(64);
     expect(typeof entry.timestamp).toBe('number');
     expect(entry.notes).toBeUndefined();
-    expect(auditStore).toHaveLength(1);
+    expect(queryAudit()).toHaveLength(1);
   });
 
   it('stores a milestone_approved entry with notes field', () => {
     const entry = recordAudit('GVALIDATOR', 'milestone_approved', { milestoneId: 'M42' }, 'approved via admin panel');
     expect(entry.eventType).toBe('milestone_approved');
     expect(entry.notes).toBe('approved via admin panel');
-    expect(auditStore).toHaveLength(1);
+    expect(queryAudit()).toHaveLength(1);
   });
 
   it('stores a player_search entry linked to a scout wallet', () => {
@@ -28,7 +34,7 @@ describe('recordAudit', () => {
     expect(entry.eventType).toBe('player_search');
     expect(entry.actorWallet).toBe('GSCOUT123');
     expect(typeof entry.payloadHash).toBe('string');
-    expect(auditStore).toHaveLength(1);
+    expect(queryAudit()).toHaveLength(1);
   });
 
   it('stores a player_search entry with anonymous wallet when unauthenticated', () => {
@@ -42,6 +48,29 @@ describe('recordAudit', () => {
     const a = recordAudit('G1', 'milestone_submitted', payload);
     const b = recordAudit('G1', 'milestone_submitted', payload);
     expect(a.payloadHash).toBe(b.payloadHash);
+  });
+
+  it('persists across a fresh read from the DB (survives "restart")', () => {
+    recordAudit('GVALIDATOR', 'milestone_submitted', { playerId: 'P1' });
+    // Simulate a fresh read path unrelated to the in-process call above —
+    // queryAudit re-reads from the DB rather than an in-memory reference.
+    const rows = queryAudit({ eventType: 'milestone_submitted' });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].actorWallet).toBe('GVALIDATOR');
+  });
+
+  it('handles row with non-JSON query_params gracefully in queryAudit', () => {
+    getDb()
+      .prepare(
+        `INSERT INTO audit_log (action, admin_wallet, query_params, created_at, prev_hash, hash, event_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run('player_registered', 'GWALLET', 'invalid json', new Date().toISOString(), GENESIS_HASH, 'dummyhash', 'app_event');
+
+    const results = queryAudit();
+    expect(results).toHaveLength(1);
+    expect(results[0].payloadHash).toBe('');
+    expect(results[0].actorWallet).toBe('GWALLET');
   });
 });
 
@@ -72,5 +101,85 @@ describe('queryAudit', () => {
     const results = queryAudit({ eventType: 'milestone_approved', actorWallet: 'G1' });
     expect(results).toHaveLength(1);
     expect(results[0].actorWallet).toBe('G1');
+  });
+
+  it('does not surface admin-action rows written via insertAuditLog directly', () => {
+    insertAuditLog({ action: 'contract_state_change', adminWallet: 'GADMIN', queryParams: {}, createdAt: new Date().toISOString() });
+    expect(queryAudit()).toHaveLength(3);
+  });
+});
+
+describe('hash computation and chain continuity', () => {
+  it('uses GENESIS_HASH as the previous hash for the first audit entry', () => {
+    const row = insertAuditLog({
+      action: 'player_registered',
+      adminWallet: 'GPLAYER1',
+      queryParams: { name: 'Player One' },
+      createdAt: '2025-01-01T00:00:00.000Z',
+    });
+    expect(row.prev_hash).toBe(GENESIS_HASH);
+  });
+
+  it('uses the hash of the first entry as previous hash for the second audit entry', () => {
+    const firstRow = insertAuditLog({
+      action: 'player_registered',
+      adminWallet: 'GPLAYER1',
+      queryParams: { name: 'Player One' },
+      createdAt: '2025-01-01T00:00:00.000Z',
+    });
+    const secondRow = insertAuditLog({
+      action: 'profile_updated',
+      adminWallet: 'GPLAYER1',
+      queryParams: { name: 'Player One Updated' },
+      createdAt: '2025-01-02T00:00:00.000Z',
+    });
+    expect(secondRow.prev_hash).toBe(firstRow.hash);
+  });
+
+  it('increments the entry count in the DB when insertAuditLog is called', () => {
+    expect(getAuditLogsCount({})).toBe(0);
+    insertAuditLog({
+      action: 'player_registered',
+      adminWallet: 'GPLAYER1',
+      queryParams: {},
+      createdAt: '2025-01-01T00:00:00.000Z',
+    });
+    expect(getAuditLogsCount({})).toBe(1);
+    insertAuditLog({
+      action: 'profile_updated',
+      adminWallet: 'GPLAYER1',
+      queryParams: {},
+      createdAt: '2025-01-02T00:00:00.000Z',
+    });
+    expect(getAuditLogsCount({})).toBe(2);
+  });
+
+  it('ensures two entries inserted in sequence have a continuous hash chain with no gap', () => {
+    const row1 = insertAuditLog({
+      action: 'player_registered',
+      adminWallet: 'GPLAYER1',
+      queryParams: { step: 1 },
+      createdAt: '2025-01-01T00:00:00.000Z',
+    });
+    const row2 = insertAuditLog({
+      action: 'milestone_submitted',
+      adminWallet: 'GVALIDATOR',
+      queryParams: { step: 2 },
+      createdAt: '2025-01-02T00:00:00.000Z',
+    });
+    expect(row2.prev_hash).toBe(row1.hash);
+    const rows = getAllAuditLogRows();
+    expect(rows).toHaveLength(2);
+    expect(rows[1].prev_hash).toBe(rows[0].hash);
+    expect(verifyAuditChain().valid).toBe(true);
+  });
+
+  it('produces a different hash when inserting an entry with the same event_type and actor_wallet but different metadata', () => {
+    const entry1 = recordAudit('GPLAYER1', 'profile_updated', { bio: 'First bio' });
+    const entry2 = recordAudit('GPLAYER1', 'profile_updated', { bio: 'Second bio' });
+    expect(entry1.payloadHash).not.toBe(entry2.payloadHash);
+
+    const rows = getAllAuditLogRows();
+    expect(rows[0].hash).not.toBe(rows[1].hash);
   });
 });
