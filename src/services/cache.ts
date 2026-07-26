@@ -1,49 +1,68 @@
 /**
- * In-memory cache with TTL support.
+ * Search cache.
+ *
+ * Backend is selected once at module load based on `REDIS_URL`:
+ *   - set   -> RedisCacheStore — cache state is shared across every backend
+ *              instance, so a load-balanced multi-instance deployment stays
+ *              consistent instead of each process re-hitting IPFS/DB.
+ *   - unset -> InMemoryCacheStore — process-local, zero setup. Default for
+ *              local dev and CI.
  *
  * Cache key conventions:
- *   players:list:<hash>   – paginated player search results (keyed by filter params)
- *   players:<playerId>    – single player profile
+ *   players:list:<hash>  – paginated player search results (keyed by filter params)
+ *   players:<playerId>   – single player profile
  *   milestones:<playerId> – milestone list for a player
  *
- * TODO (Redis): Replace Map with a Redis client for distributed deployments.
+ * All exported functions are async: Redis access is inherently network I/O,
+ * so every call site must `await` these calls (they returned void
+ * synchronously before this module supported a Redis backend).
  */
-
+import { getRedisClient } from './redis';
 import config from '../config';
+import { CacheStore } from './cacheStore';
+import { InMemoryCacheStore } from './inMemoryCacheStore';
+import { RedisCacheStore } from './redisCacheStore';
+import { recordCacheHit, recordCacheMiss } from '../middleware/metrics';
 
-interface CacheEntry<T> {
-  value: T;
-  expiresAt: number;
-}
-
-const cache = new Map<string, CacheEntry<unknown>>();
-
-export function cacheGet<T>(key: string): T | undefined {
-  const entry = cache.get(key) as CacheEntry<T> | undefined;
-  if (!entry) return undefined;
-  if (Date.now() > entry.expiresAt) {
-    cache.delete(key);
-    return undefined;
+function createStore(): CacheStore {
+  const client = getRedisClient();
+  if (client) {
+    return new RedisCacheStore(client);
   }
-  return entry.value;
+  return new InMemoryCacheStore();
 }
 
-export function cacheSet<T>(key: string, value: T, ttlMs = config.playerCacheTtlMs): void {
-  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
-}
+const store: CacheStore = createStore();
 
-export function invalidatePlayerCache(playerId?: string): void {
-  for (const key of cache.keys()) {
-    if (key.startsWith('players:list:')) {
-      cache.delete(key);
-    }
+/** Fetch a cached value. Returns undefined if missing or expired. */
+export async function cacheGet<T>(key: string): Promise<T | undefined> {
+  const value = await store.get<T>(key);
+  if (value !== undefined) {
+    recordCacheHit();
+  } else {
+    recordCacheMiss();
   }
+  return value;
+}
+
+/** Store a value under `key`, expiring after `ttlMs` (default: config.playerCacheTtlMs). */
+export async function cacheSet<T>(
+  key: string,
+  value: T,
+  ttlMs: number = config.playerCacheTtlMs
+): Promise<void> {
+  await store.set(key, value, ttlMs);
+}
+
+export async function invalidatePlayerCache(playerId?: string): Promise<void> {
+  await store.deleteByPrefix('players:list');
   if (playerId) {
-    cache.delete(`players:${playerId}`);
+    await store.del(`players:${playerId}`);
   }
 }
 
-export function invalidateMilestoneCache(playerId: string): void {
-  cache.delete(`milestones:${playerId}`);
-  invalidatePlayerCache(playerId);
+export async function invalidateMilestoneCache(playerId: string): Promise<void> {
+  await store.del(`milestones:${playerId}`);
+  // Also bust the player list so updated progress tier is reflected
+  await invalidatePlayerCache(playerId);
 }

@@ -2,3 +2,9 @@ node_modules/
 dist/
 .env
 *.js.map
+contracts/target/
+contracts/**/test_snapshots/
+coverage/
+BUILD_COMMIT
+.husky/_
+

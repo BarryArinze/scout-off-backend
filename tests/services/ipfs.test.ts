@@ -9,12 +9,23 @@ const mockPinJson = jest.fn();
 jest.mock('../../src/services/ipfs', () => ({
   pinJson: mockPinJson,
   gatewayUrl: (cid: string) => `https://gateway.pinata.cloud/ipfs/${cid}`,
+  gatewayUrls: (cid: string) => [`https://gateway.pinata.cloud/ipfs/${cid}`],
 }));
 
 // ── mock cache service ────────────────────────────────────────────────────────
 jest.mock('../../src/services/cache', () => ({
   invalidatePlayerCache: jest.fn(),
   invalidateMilestoneCache: jest.fn(),
+}));
+
+// ── mock webhooks service ─────────────────────────────────────────────────────
+jest.mock('../../src/services/webhooks', () => ({
+  dispatchEventWebhook: jest.fn().mockResolvedValue(undefined),
+}));
+
+// ── mock db (registerPlayer writes via insertOrUpdatePlayer) ──────────────────────────
+jest.mock('../../src/db', () => ({
+  insertOrUpdatePlayer: jest.fn(),
 }));
 
 import { registerPlayer } from '../../src/controllers/playerController';
@@ -49,6 +60,7 @@ describe('registerPlayer – IPFS pinning', () => {
 
   it('calls pinJson with player metadata and returns cid + metadataUri', async () => {
     const req = {
+      account: 'G'.repeat(56),
       body: {
         wallet: 'G'.repeat(56),
         position: 'striker',
@@ -73,6 +85,7 @@ describe('registerPlayer – IPFS pinning', () => {
 
   it('returned CID matches expected CID format', async () => {
     const req = {
+      account: 'G'.repeat(56),
       body: {
         wallet: 'G'.repeat(56),
         position: 'midfielder',
@@ -90,6 +103,7 @@ describe('registerPlayer – IPFS pinning', () => {
 
   it('calls invalidatePlayerCache after successful pin', async () => {
     const req = {
+      account: 'G'.repeat(56),
       body: {
         wallet: 'G'.repeat(56),
         position: 'goalkeeper',
@@ -107,6 +121,7 @@ describe('registerPlayer – IPFS pinning', () => {
   it('calls next(err) when pinJson throws', async () => {
     mockPinJson.mockRejectedValue(new Error('Pinata 503'));
     const req = {
+      account: 'G'.repeat(56),
       body: {
         wallet: 'G'.repeat(56),
         position: 'defender',

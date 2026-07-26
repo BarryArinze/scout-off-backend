@@ -56,6 +56,7 @@ describe('requestTimeout middleware', () => {
     requestTimeout(req, res, next);
     jest.advanceTimersByTime(200);
     expect(res._getStatus()).toBe(503);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     expect((res._getBody() as any).code).toBe('REQUEST_TIMEOUT');
   });
 
@@ -77,6 +78,7 @@ describe('requestTimeout middleware', () => {
 
   it('does not send 503 if headers were already sent', () => {
     const { req, res, next } = makeReqRes();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     (res as any).markSent();
     requestTimeout(req, res, next);
     jest.advanceTimersByTime(200);

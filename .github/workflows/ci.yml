@@ -1,3 +1,9 @@
+# npm dependency caching: every actions/setup-node step below sets
+# `cache: npm`, which caches ~/.npm keyed on the runner OS, the Node.js
+# version, and a hash of package-lock.json. A cache hit skips re-downloading
+# packages during `npm ci`, cutting install time from ~60-90s to well under
+# 10s. The cache is automatically invalidated whenever package-lock.json
+# changes, so dependency updates always install cleanly.
 name: Backend CI
 
 on:
@@ -6,17 +12,27 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: ${{ matrix.node-version }}
+          cache: npm
 
       - run: npm ci
 
@@ -25,30 +41,113 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
+          node-version: ${{ matrix.node-version }}
+          cache: npm
 
       - run: npm ci
+
+      - name: Install sqlite3 CLI
+        run: sudo apt-get update && sudo apt-get install -y sqlite3
 
       - name: Validate env example
         run: node scripts/validate-env.js
 
-      - name: Type check
-        run: npx tsc --noEmit
+      - name: Validate OpenAPI spec
+        run: npm run validate:openapi
 
-      - name: Run tests
-        run: npm test
+      - name: Type check (src)
+        run: node node_modules/.bin/tsc --noEmit
+
+      - name: Type check (scripts)
+        run: node node_modules/.bin/tsc --noEmit -p tsconfig.scripts.json
+
+      - name: Run tests with coverage
+        # node_modules/.bin/jest is unreliable here: jest and jest-cli are
+        # both hoisted to top-level node_modules and both declare a bin
+        # literally named "jest", so npm can't deterministically symlink it.
+        # Invoke via the npm script which calls jest's own bin directly.
+        run: npm run test:coverage -- --forceExit --coverageReporters=text --coverageReporters=lcov
         env:
-          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC
+          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+
+      # Coverage is only representative once, so upload it from the Node
+      # version .nvmrc pins (20) to keep this identical to the prior
+      # single-version behavior instead of uploading/overwriting 3x.
+      - name: Upload coverage to Codecov
+        if: matrix.node-version == 20
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage/lcov.info
+          fail_ci_if_error: false
+
+      - name: Upload coverage report as artifact
+        if: matrix.node-version == 20
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage/
+
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      # Dev-only tooling (eslint, jest, etc.) never ships to production, so
+      # only production dependencies gate the build. See CONTRIBUTING.md's
+      # "CI Enforcement & Exception Process" for what to do when this fails
+      # on a legitimately unpatchable finding.
+      - name: Audit production dependencies (high/critical)
+        run: npm audit --omit=dev --audit-level=high
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image with GIT_COMMIT build arg
+        run: |
+          docker build \
+            --build-arg GIT_COMMIT=${{ github.sha }} \
+            --tag scout-off-backend:ci \
+            .
+
+      - name: Verify GIT_COMMIT is set in the image
+        run: |
+          commit=$(docker run --rm \
+            -e CONTRACT_ID=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4 \
+            -e JWT_SECRET=test-secret-min-32-chars-for-ci-only \
+            scout-off-backend:ci \
+            node -e "console.log(process.env.GIT_COMMIT)")
+          echo "GIT_COMMIT in image: $commit"
+          test "$commit" = "${{ github.sha }}"
   contracts:
     name: Soroban Contracts
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -70,7 +169,7 @@ jobs:
 
       - name: Build contracts (WASM)
         working-directory: contracts
-        run: cargo build --release
+        run: cargo build --target wasm32-unknown-unknown --release
 
       - name: Test contracts (host target)
         working-directory: contracts

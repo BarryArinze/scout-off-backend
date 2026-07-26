@@ -6,10 +6,12 @@ members = [
     "progress",
     "subscription",
     "connection",
+    "player_token",
 ]
 
 [workspace.dependencies]
-soroban-sdk = { version = "21.7.7", features = [] }
+soroban-sdk = { version = "21.7.7", features = ["testutils"] }
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 opt-level = "z"
