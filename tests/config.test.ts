@@ -3,14 +3,34 @@ process.env.JWT_SECRET = 'test-secret';
 
 describe('config NODE_ENV toggles', () => {
   const originalEnv = process.env.NODE_ENV;
+  const originalAdminWallet = process.env.ADMIN_WALLET;
+  const originalPlatformSecretKey = process.env.PLATFORM_SECRET_KEY;
 
   afterEach(() => {
     process.env.NODE_ENV = originalEnv;
+    if (originalAdminWallet !== undefined) {
+      process.env.ADMIN_WALLET = originalAdminWallet;
+    } else {
+      delete process.env.ADMIN_WALLET;
+    }
+    if (originalPlatformSecretKey !== undefined) {
+      process.env.PLATFORM_SECRET_KEY = originalPlatformSecretKey;
+    } else {
+      delete process.env.PLATFORM_SECRET_KEY;
+    }
     jest.resetModules();
   });
 
   async function loadConfig(env: string) {
     process.env.NODE_ENV = env;
+    // Ensure ADMIN_WALLET is set when loading production/staging config
+    if (env === 'production' || env === 'staging') {
+      process.env.ADMIN_WALLET = 'GADMINWALLET1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    }
+    // PLATFORM_SECRET_KEY is required in every non-test environment
+    if (env !== 'test') {
+      process.env.PLATFORM_SECRET_KEY = 'SPLATFORMSECRETKEY1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    }
     jest.resetModules();
     const mod = await import('../src/config');
     return mod.default;
@@ -18,6 +38,12 @@ describe('config NODE_ENV toggles', () => {
 
   async function loadHelpers(env: string) {
     process.env.NODE_ENV = env;
+    if (env === 'production' || env === 'staging') {
+      process.env.ADMIN_WALLET = 'GADMINWALLET1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    }
+    if (env !== 'test') {
+      process.env.PLATFORM_SECRET_KEY = 'SPLATFORMSECRETKEY1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    }
     jest.resetModules();
     return import('../src/config');
   }
@@ -132,5 +158,105 @@ describe('config required env vars', () => {
     process.env.JWT_SECRET = 'test-secret';
     jest.resetModules();
     await expect(import('../src/config')).resolves.toBeDefined();
+  });
+});
+
+describe('config DB_DRIVER validation', () => {
+  const savedDbDriver = process.env.DB_DRIVER;
+  const savedContractId = process.env.CONTRACT_ID;
+  const savedJwtSecret = process.env.JWT_SECRET;
+
+  beforeEach(() => {
+    process.env.CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
+    process.env.JWT_SECRET = 'test-secret';
+  });
+
+  afterEach(() => {
+    if (savedDbDriver !== undefined) {
+      process.env.DB_DRIVER = savedDbDriver;
+    } else {
+      delete process.env.DB_DRIVER;
+    }
+    process.env.CONTRACT_ID = savedContractId;
+    process.env.JWT_SECRET = savedJwtSecret;
+    jest.resetModules();
+  });
+
+  it('accepts DB_DRIVER=sqlite without throwing', async () => {
+    process.env.DB_DRIVER = 'sqlite';
+    jest.resetModules();
+    await expect(import('../src/config')).resolves.toBeDefined();
+  });
+
+  it('accepts DB_DRIVER=postgres without throwing', async () => {
+    process.env.DB_DRIVER = 'postgres';
+    jest.resetModules();
+    await expect(import('../src/config')).resolves.toBeDefined();
+  });
+
+  it('throws on a typo like "Postgres" (wrong case)', async () => {
+    process.env.DB_DRIVER = 'Postgres';
+    jest.resetModules();
+    await expect(import('../src/config')).rejects.toThrow(/DB_DRIVER="Postgres" is invalid/);
+  });
+
+  it('throws on "postgresql" and names the valid values', async () => {
+    process.env.DB_DRIVER = 'postgresql';
+    jest.resetModules();
+    let message = '';
+    try {
+      await import('../src/config');
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain('postgresql');
+    expect(message).toContain('sqlite');
+    expect(message).toContain('postgres');
+  });
+});
+
+describe('config PINATA_GATEWAY validation', () => {
+  const savedPinataGateway = process.env.PINATA_GATEWAY;
+  const savedContractId = process.env.CONTRACT_ID;
+  const savedJwtSecret = process.env.JWT_SECRET;
+
+  beforeEach(() => {
+    process.env.CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
+    process.env.JWT_SECRET = 'test-secret';
+  });
+
+  afterEach(() => {
+    if (savedPinataGateway !== undefined) {
+      process.env.PINATA_GATEWAY = savedPinataGateway;
+    } else {
+      delete process.env.PINATA_GATEWAY;
+    }
+    process.env.CONTRACT_ID = savedContractId;
+    process.env.JWT_SECRET = savedJwtSecret;
+    jest.resetModules();
+  });
+
+  it('accepts a valid HTTPS PINATA_GATEWAY without throwing', async () => {
+    process.env.PINATA_GATEWAY = 'https://gateway.pinata.cloud';
+    jest.resetModules();
+    await expect(import('../src/config')).resolves.toBeDefined();
+  });
+
+  it('accepts an unset PINATA_GATEWAY without throwing', async () => {
+    delete process.env.PINATA_GATEWAY;
+    jest.resetModules();
+    await expect(import('../src/config')).resolves.toBeDefined();
+  });
+
+  it('throws on an HTTP (non-HTTPS) PINATA_GATEWAY', async () => {
+    process.env.PINATA_GATEWAY = 'http://gateway.pinata.cloud';
+    jest.resetModules();
+    await expect(import('../src/config')).rejects.toThrow(/Invalid PINATA_GATEWAY/);
+  });
+
+  it('throws on a malformed PINATA_GATEWAY URL', async () => {
+    process.env.PINATA_GATEWAY = 'not-a-url';
+    jest.resetModules();
+    await expect(import('../src/config')).rejects.toThrow(/Invalid PINATA_GATEWAY/);
   });
 });

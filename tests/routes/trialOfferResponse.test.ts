@@ -20,10 +20,11 @@ const SCOUT_WALLET  = 'GSCOUTWALLET1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 const OFFER_ID      = 'offer-xyz-789';
 
 // In-memory store for mocked trial offers
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 const _offers: any[] = [];
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockImplementation((type?: string) => {
+  queryEvents: jest.fn().mockImplementation((type?: string) => {
     if (type === 'player_registered') {
       return [
         {
@@ -45,9 +46,9 @@ jest.mock('../../src/db', () => ({
 }));
 
 // Ensure we can update the player_registered event wallet in tests
-import { getEvents, getTrialOfferById, insertTrialOffer, respondToTrialOffer } from '../../src/db';
+import { queryEvents, getTrialOfferById, insertTrialOffer, respondToTrialOffer } from '../../src/db';
 
-const mockGetEvents = getEvents as jest.Mock;
+const mockGetEvents = queryEvents as jest.Mock;
 const mockGetOffer = getTrialOfferById as jest.Mock;
 const mockInsertOffer = insertTrialOffer as jest.Mock;
 const mockRespondOffer = respondToTrialOffer as jest.Mock;

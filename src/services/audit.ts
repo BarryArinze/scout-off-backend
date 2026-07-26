@@ -3,11 +3,17 @@ import { insertAuditLog } from '../db';
 
 export interface AuditEvent {
   action: string;
-  adminWallet: string;
-  queryParams: Record<string, unknown>;
   timestamp: string;
   /** Optional: contract action name for admin smart contract interactions (e.g. 'pause_contract') */
   contractAction?: string;
+  adminWallet?: string;
+  queryParams?: Record<string, unknown>;
+  /** Optional: request path, for auth_failed/auth_forbidden events. */
+  path?: string;
+  /** Optional: human-readable reason, for auth_failed/auth_forbidden events. */
+  reason?: string;
+  /** Optional: role required by the route, for auth_failed/auth_forbidden events. */
+  requiredRole?: string;
 }
 
 /**

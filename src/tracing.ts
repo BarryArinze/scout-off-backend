@@ -12,20 +12,15 @@
 import { NodeSDK } from '@opentelemetry/sdk-node';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-http';
 import { getNodeAutoInstrumentations } from '@opentelemetry/auto-instrumentations-node';
-import { NoopSpanExporter } from '@opentelemetry/sdk-trace-base';
-
 let sdk: NodeSDK | null = null;
 
 export function initTracing(): void {
   const endpoint = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
-
-  const exporter = endpoint
-    ? new OTLPTraceExporter({ url: `${endpoint}/v1/traces` })
-    : new NoopSpanExporter();
+  if (!endpoint) return;
 
   sdk = new NodeSDK({
+    traceExporter: new OTLPTraceExporter({ url: `${endpoint}/v1/traces` }),
     serviceName: process.env.OTEL_SERVICE_NAME ?? 'scout-off-backend',
-    traceExporter: exporter,
     instrumentations: [
       getNodeAutoInstrumentations({
         // disable noisy FS instrumentation

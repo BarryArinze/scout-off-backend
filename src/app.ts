@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import helmet from 'helmet';
 import compression from 'compression';
 import config from './config';
 import authRoutes from './routes/auth';
@@ -13,13 +14,18 @@ import { securityHeaders } from './middleware/securityHeaders';
 import { correlationId } from './middleware/correlationId';
 import { traceId } from './middleware/traceId';
 import { responseTime } from './middleware/responseTime';
-import { stellarHealth } from './services/stellar';
+import { stellarHealth, stellarBreaker } from './services/stellar';
 import { checkHealth } from './services/ipfs';
 import { API_PREFIX, API_V1_PREFIX } from './config';
+import { mountGraphQL } from './graphql';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
+import { ipReputationMiddleware } from './middleware/ipReputation';
 import { requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
 import { getDb } from './db';
+import { getVersionInfo } from './version';
+import { apiVersion } from './middleware/apiVersion';
+import docsRouter from './routes/docs';
 
 /** Probe the SQLite database with a lightweight SELECT 1.
  *  Resolves 'ok' or 'error'; never rejects.
@@ -39,25 +45,67 @@ async function probeDb(timeoutMs = 2_000): Promise<'ok' | 'error'> {
   });
 }
 
+/** Probe SQLite writability with a heartbeat-row upsert into indexer_state.
+ *  Catches disk-full/permissions regressions that a read-only SELECT 1 would miss.
+ *  Resolves 'ok' or 'error'; never rejects.
+ *  A configurable timeout (default 2 s) guards against a locked DB hanging the readiness check.
+ */
+async function probeDbWritable(timeoutMs = 2_000): Promise<'ok' | 'error'> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve('error'), timeoutMs);
+    try {
+      getDb()
+        .prepare(
+          "INSERT INTO indexer_state (key, value) VALUES ('health_heartbeat', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        )
+        .run(String(Date.now()));
+      clearTimeout(timer);
+      resolve('ok');
+    } catch {
+      clearTimeout(timer);
+      resolve('error');
+    }
+  });
+}
+
 const app = express();
+// Disable Express's default X-Powered-By header. helmet() also does this, but
+// being explicit here ensures it is suppressed regardless of middleware order.
+app.disable('x-powered-by');
+// Disable Express's automatic ETag on every response — it would also tag
+// error bodies (e.g. 404s). ETags are set explicitly where conditional GET
+// support is actually implemented (see getPlayer).
+app.set('etag', false);
 
 const corsOrigin =
-  config.nodeEnv !== 'development' && config.allowedOrigins.length > 0
-    ? config.allowedOrigins
-    : '*';
+  config.allowedOrigins.includes('*')
+    ? '*'
+    : config.allowedOrigins;
 app.use(cors({ origin: corsOrigin }));
 app.use(compression({ threshold: parseInt(process.env.COMPRESSION_THRESHOLD ?? '1024', 10) }));
 app.use(requestTimeout);
 app.use(correlationId);
 app.use(traceId);
+// helmet first so the explicit values below (driven by config.securityHeaders) win
+// on any header both middlewares set.
+app.use(helmet());
 app.use(securityHeaders);
 app.use(responseTime);
+// Set X-API-Version on every response before route handlers run
+app.use(apiVersion);
 // Configure Express body parser with JSON payload size limit
 // Returns 413 Payload Too Large if exceeded
 app.use(express.json({ limit: config.bodyLimit.json }));
 app.use(requestLogger);
 // Collect per-route request counts, latency, and error counts for /metrics.
 app.use(metricsMiddleware);
+// IP reputation layer — runs after metrics so the finish hook in
+// metricsMiddleware is registered first, keeping score increments in order.
+app.use(ipReputationMiddleware);
+
+app.get('/version', (_req, res) => {
+  res.json(getVersionInfo());
+});
 
 app.get('/health', async (_req, res) => {
   const healthStatus: Record<string, 'ok' | 'error' | 'disabled'> = {};
@@ -77,6 +125,8 @@ app.get('/health', async (_req, res) => {
 async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | 'disabled'>> {
   const services: Record<string, 'ok' | 'unavailable' | 'disabled'> = {};
 
+  services.db = (await probeDbWritable()) === 'ok' ? 'ok' : 'unavailable';
+
   try {
     await checkHealth();
     services.ipfs = 'ok';
@@ -85,11 +135,15 @@ async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | '
   }
 
   if (config.stellarHealthCheckEnabled) {
-    try {
-      const stellarOk = await stellarHealth();
-      services.stellar = stellarOk ? 'ok' : 'unavailable';
-    } catch {
+    if (stellarBreaker.state === 'OPEN') {
       services.stellar = 'unavailable';
+    } else {
+      try {
+        const stellarOk = await stellarHealth();
+        services.stellar = stellarOk ? 'ok' : 'unavailable';
+      } catch {
+        services.stellar = 'unavailable';
+      }
     }
   } else {
     services.stellar = 'disabled';
@@ -133,15 +187,22 @@ app.use('/auth', authRoutes);
 // Mount API routes under both /api (backwards-compatible alias) and /api/v1
 const prefixes = [API_PREFIX, API_V1_PREFIX];
 for (const prefix of prefixes) {
+  app.use(`${prefix}/docs`, docsRouter);
   app.use(`${prefix}/players`, playerRoutes);
   app.use(`${prefix}/scouts`, scoutRoutes);
   app.use(`${prefix}/validators`, validatorRoutes);
   app.use(`${prefix}/admin`, adminRoutes);
 }
 
-// Catch-all 404 handler for unmatched routes
-app.use((_req, res) => {
-  res.status(404).json({ error: 'Not Found' });
+// Mount the GraphQL endpoint alongside the REST API.
+// Must be registered before the 404 catch-all.
+mountGraphQL(app);
+
+// Catch-all 404 handler for unmatched routes.
+// Returns JSON so API clients never receive an HTML error page.
+// Must be registered after all other routes and before the error handler.
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not Found', path: req.path });
 });
 
 app.use(errorHandler);
