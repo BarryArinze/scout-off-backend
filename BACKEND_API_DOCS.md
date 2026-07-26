@@ -126,7 +126,7 @@ Filter players by region, position, and minimum verified tier. No auth required.
 |------------|---------|----------|--------------------------------------|
 | `region`   | string  | ❌       | Filter by region                     |
 | `position` | string  | ❌       | Filter by position                   |
-| `minTier`  | integer | ❌       | Minimum progress level (0–3)         |
+| `minTier`  | integer | ❌       | Minimum progress level (0=Unverified, 1=Verified, 2=Performance, 3=Elite)         |
 | `page`     | integer | ❌       | Page number (default: 1)             |
 | `pageSize` | integer | ❌       | Results per page (default: 20, max: 100) |
 
@@ -150,10 +150,20 @@ Filter players by region, position, and minimum verified tier. No auth required.
 ```
 
 **Error `400`** — invalid `minTier`
+
+Out of range:
 ```json
 {
   "success": false,
-  "error": "minTier 5 is out of range. Valid values: 0, 1, 2, 3."
+  "error": "minTier must be between 0 (Unverified) and 3 (Elite Tier)"
+}
+```
+
+Non-numeric string:
+```json
+{
+  "success": false,
+  "error": "minTier must be a number; valid values are 0=Unverified, 1=Verified, 2=Performance, 3=Elite"
 }
 ```
 
