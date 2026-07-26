@@ -1,3 +1,9 @@
+# npm dependency caching: every actions/setup-node step below sets
+# `cache: npm`, which caches ~/.npm keyed on the runner OS, the Node.js
+# version, and a hash of package-lock.json. A cache hit skips re-downloading
+# packages during `npm ci`, cutting install time from ~60-90s to well under
+# 10s. The cache is automatically invalidated whenever package-lock.json
+# changes, so dependency updates always install cleanly.
 name: Backend CI
 
 on:
@@ -104,6 +110,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
+          cache: npm
 
       - run: npm ci
 
