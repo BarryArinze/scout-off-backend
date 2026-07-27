@@ -24,7 +24,7 @@ import { ApiResponse } from "../types";
 import { ErrorCode } from "../utils/errorCodes";
 import { getTierMeta, tierName } from "../utils/tier";
 import { validateMinTier } from "../utils/minTierValidator";
-import { normalizePosition } from "../utils/positionAliases";
+import { normalizePositionOrFallback } from "../utils/positionAliases";
 import { dispatchEventWebhook } from "../services/webhooks";
 import { enrichPlayerResult } from "../utils/searchEnrichment";
 import { playerIdSchema } from "../utils/playerIdValidator";
@@ -81,13 +81,14 @@ export async function registerPlayer(
     }
 
     const sanitizedPosition = sanitizeInput(parsed.position);
+    const canonicalPosition = normalizePositionOrFallback(sanitizedPosition);
     const sanitizedRegion = sanitizeInput(parsed.region);
     const metadataUri =
       "metadataUri" in parsed
         ? parsed.metadataUri
         : await pinJson({
             wallet: parsed.wallet,
-            position: sanitizedPosition,
+            position: canonicalPosition,
             region: sanitizedRegion,
             ...parsed.metadata,
           });
@@ -101,7 +102,7 @@ export async function registerPlayer(
     insertOrUpdatePlayer({
       player_id: playerId,
       wallet: parsed.wallet,
-      position: sanitizedPosition,
+      position: canonicalPosition,
       region: sanitizedRegion,
       metadata_uri: metadataUri,
       created_at: Math.floor(Date.now() / 1000),
@@ -110,14 +111,14 @@ export async function registerPlayer(
     await dispatchEventWebhook("player_registered", {
       player_id: playerId,
       wallet: parsed.wallet,
-      position: sanitizedPosition,
+      position: canonicalPosition,
       region: sanitizedRegion,
       metadataUri,
     });
 
     const ipfsResult = serializeIpfsResult(metadataUri, {
       wallet: parsed.wallet,
-      position: sanitizedPosition,
+      position: canonicalPosition,
       region: sanitizedRegion,
     });
     const body: ApiResponse<
@@ -239,7 +240,7 @@ export async function filterPlayers(
     const sanitizedRegion = region ? sanitizeInput(region) : undefined;
     const sanitizedPosition = position ? sanitizeInput(position) : undefined;
     const normalizedPosition = sanitizedPosition
-      ? normalizePosition(sanitizedPosition)
+      ? normalizePositionOrFallback(sanitizedPosition)
       : undefined;
 
     // Parse the ?fields= param into a Set for O(1) lookup.
@@ -250,7 +251,7 @@ export async function filterPlayers(
 
     const cacheKey = `players:list:${JSON.stringify({
       region: sanitizedRegion ?? null,
-      position: normalizedPosition ?? sanitizedPosition ?? null,
+      position: normalizedPosition ?? null,
       minTier: minTier ?? null,
       page,
       pageSize,
@@ -268,7 +269,7 @@ export async function filterPlayers(
 
     const rows = queryPlayers({
       region: sanitizedRegion,
-      position: normalizedPosition ?? sanitizedPosition,
+      position: normalizedPosition,
       minTier,
       limit: pageSize,
       offset: (page - 1) * pageSize,
@@ -276,7 +277,7 @@ export async function filterPlayers(
 
     const total = countPlayers({
       region: sanitizedRegion,
-      position: normalizedPosition ?? sanitizedPosition,
+      position: normalizedPosition,
       minTier,
     });
     const pages = Math.ceil(total / pageSize);
@@ -298,7 +299,7 @@ export async function filterPlayers(
     const scoutWallet = req.account ?? 'anonymous';
     recordAudit(scoutWallet, 'player_search', {
       region: sanitizedRegion ?? null,
-      position: normalizedPosition ?? sanitizedPosition ?? null,
+      position: normalizedPosition ?? null,
       minTier: minTier ?? null,
       page,
       pageSize,
