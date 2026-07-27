@@ -11,6 +11,7 @@ import {
   filterPlayers,
   getPlayerMilestones,
   updatePlayer,
+  getPlayerAnalytics,
   registerSchema,
   filterSchema,
   updatePlayerSchema,
@@ -68,6 +69,18 @@ router.route("/:playerId/history")
       }
       return requireRole("player")(req, res, () => requireOwner(req, res, next));
     },
+  )
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * GET /api/players/:playerId/analytics
+ * Return profile view and contact unlock analytics (owner-only).
+ */
+router.route("/:playerId/analytics")
+  .get(
+    requireRole("player"),
+    requireOwner,
+    getPlayerAnalytics,
   )
   .all(methodNotAllowed(['GET', 'HEAD']));
 

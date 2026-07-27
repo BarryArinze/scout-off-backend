@@ -13,6 +13,11 @@ import {
   queryPlayers,
   countPlayers,
   upsertPlayer,
+  recordProfileView,
+  getLastProfileView,
+  getProfileViewCount,
+  getUniqueViewerCount,
+  getContactUnlockCount,
 } from "../db";
 
 import { queryMilestones, updateProfile } from "../services/stellar";
@@ -166,6 +171,10 @@ export async function getPlayer(
     }
     res.set("ETag", etag);
     res.json({ success: true, data });
+
+    // Record profile view (non-blocking, after response is sent)
+    // This is synchronous but happens after the response is queued
+    recordProfileViewForRequest(req);
   } catch (err) {
     next(err);
   }
@@ -343,6 +352,115 @@ export async function getPlayerMilestones(
       return order === "asc" ? av - bv : bv - av;
     });
     res.json({ success: true, data: combined });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Profile Analytics ─────────────────────────────────────────────────────
+
+/**
+ * Record a profile view from an authenticated scout.
+ * Checks for self-views and deduplicates rapid consecutive views within a 5-minute window.
+ * Errors are logged but do not interfere with the response.
+ */
+function recordProfileViewForRequest(req: Request): void {
+  try {
+    // Only record views from authenticated scouts
+    if (!req.account) {
+      return;
+    }
+
+    const playerId = req.params.playerId;
+    const scoutWallet = req.account as string;
+
+    // Get player to check for self-view
+    const player = getPlayerById(playerId);
+    if (!player) {
+      // Player doesn't exist, skip recording
+      return;
+    }
+
+    // Exclude self-views
+    if (scoutWallet === player.wallet) {
+      return;
+    }
+
+    // Check dedup window: 5 minutes (300 seconds)
+    const lastViewAt = getLastProfileView(scoutWallet, playerId);
+    const now = Math.floor(Date.now() / 1000);
+
+    if (lastViewAt !== null && (now - lastViewAt) < 300) {
+      // View within dedup window, skip recording
+      return;
+    }
+
+    // Record the view
+    recordProfileView({
+      scout_wallet: scoutWallet,
+      player_id: playerId,
+      viewed_at: now,
+      created_at: now,
+    });
+  } catch (err) {
+    // Log error but don't re-throw; profile view recording is non-critical
+    const message = err instanceof Error ? err.message : JSON.stringify(err);
+    // eslint-disable-next-line no-console
+    console.error(`[Profile View Recording Error] ${message}`, {
+      playerId: req.params.playerId,
+      scoutWallet: req.account,
+    });
+  }
+}
+
+/**
+ * GET /api/players/:playerId/analytics
+ * Return aggregated profile view and contact unlock analytics for the player (owner-only).
+ */
+export async function getPlayerAnalytics(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const idResult = playerIdSchema.safeParse(req.params.playerId);
+    if (!idResult.success) {
+      res.status(400).json({
+        success: false,
+        error: idResult.error.errors[0]?.message ?? "Invalid playerId",
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    const playerId = sanitizeInput(req.params.playerId);
+
+    // Verify player exists
+    const player = getPlayerById(playerId);
+    if (!player) {
+      res.status(404).json({
+        success: false,
+        error: "Player not found",
+        code: ErrorCode.PLAYER_NOT_FOUND,
+      });
+      return;
+    }
+
+    // Get aggregated metrics
+    const viewCount = getProfileViewCount(playerId);
+    const viewerCount = getUniqueViewerCount(playerId);
+    const contactUnlockCount = getContactUnlockCount(playerId);
+    const lastUpdated = Math.floor(Date.now() / 1000);
+
+    res.json({
+      success: true,
+      data: {
+        view_count: viewCount,
+        viewer_count: viewerCount,
+        contact_unlock_count: contactUnlockCount,
+        lastUpdated,
+      },
+    });
   } catch (err) {
     next(err);
   }
