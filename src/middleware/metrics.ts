@@ -406,12 +406,12 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   }
 
   // Webhook delivery counters.
-  const webhook = getWebhookDeliveryMetrics();
+  const webhookDelivery = getWebhookDeliveryMetrics();
   lines.push('# HELP webhook_delivery_total Total number of webhook deliveries by status');
   lines.push('# TYPE webhook_delivery_total counter');
-  lines.push(`webhook_delivery_total{status="success"} ${webhook.success}`);
-  lines.push(`webhook_delivery_total{status="failure"} ${webhook.failure}`);
-  lines.push(`webhook_delivery_total{status="dead_letter"} ${webhook.dead_letter}`);
+  lines.push(`webhook_delivery_total{status="success"} ${webhookDelivery.success}`);
+  lines.push(`webhook_delivery_total{status="failure"} ${webhookDelivery.failure}`);
+  lines.push(`webhook_delivery_total{status="dead_letter"} ${webhookDelivery.dead_letter}`);
 
   // SSE active connections gauge.
   if (extras.sseConnectionsActive !== undefined) {
