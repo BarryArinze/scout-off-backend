@@ -48,6 +48,56 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
    - No security vulnerabilities: `npm audit`
    - Environment is set up: `cp .env.example .env`
 
+### Database Migrations
+
+The project uses SQL migrations to manage database schema across environments. Migrations are stored as numbered `.sql` files in the `db/` directory and are tracked in the `migrations` table.
+
+**Checking migration status:**
+
+To see which migrations have been applied to your current database and which are pending:
+
+```bash
+npm run migration:status
+```
+
+This command is read-only and does not modify the database. It queries the `migrations` table to determine which schema changes have been applied.
+
+**Example output:**
+
+```
+Migration Status Report
+═════════════════════════════════════════════════════════════════════
+
+Status: 7 applied, 2 pending
+
+┌──────────────────────────────────┬───────────┬──────────────────────┐
+│ Migration                        │ Status    │ Applied At           │
+├──────────────────────────────────┼───────────┼──────────────────────┤
+│ 001_initial.sql                  │ ✓ Applied │ 2024-01-15 10:23:45  │
+│ 002_audit_log.sql                │ ✓ Applied │ 2024-01-15 10:23:46  │
+│ 003_idempotency_keys.sql         │ ✓ Applied │ 2024-01-15 10:23:48  │
+│ 004_token_revocation.sql         │ ⧬ Pending │ —                    │
+│ 004_validators.sql               │ ⧬ Pending │ —                    │
+└──────────────────────────────────┴───────────┴──────────────────────┘
+```
+
+**Understanding the output:**
+
+- **Status: X applied, Y pending**: Summary line showing how many migrations have been applied and how many are awaiting execution
+- **✓ Applied**: Migration has been executed and is recorded in the `migrations` table
+- **⧬ Pending**: Migration file exists but has not been applied yet
+- **Applied At**: Timestamp (ISO 8601 format) when the migration was applied, or "—" for pending migrations
+
+**Applying pending migrations:**
+
+To apply all pending migrations, use:
+
+```bash
+npm run seed
+```
+
+This runs the migration system, which automatically applies any pending migrations found in the `db/` directory in alphabetical order.
+
 ## Seeding the Database
 
 New contributors don't need to manually create players, events, or

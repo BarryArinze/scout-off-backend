@@ -484,6 +484,7 @@ Optional but commonly set:
 | `PINATA_API_KEY` / `PINATA_SECRET` | —               | IPFS upload credentials                         |
 | `DB_PATH`                          | `scout-off.db`  | SQLite database file path                       |
 | `LOG_LEVEL`                        | `info`          | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `SLOW_QUERY_THRESHOLD_MS`          | `50`            | Log a warning for DB queries slower than this (ms) |
 
 See [.env.example](.env.example) for the full list of supported variables.
 
@@ -780,6 +781,7 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
 | `ADMIN_THRESHOLD`                 | Number of admin signatures required for high-value operations (default: `1`)                                          |
 | `STELLAR_HEALTH_CHECK`            | Set to `false` to disable Stellar RPC check in `/health` (default: `true`)                                            |
 | `JSON_PAYLOAD_LIMIT`              | Maximum JSON request body size (default: `1mb`); requests exceeding limit return HTTP 413                             |
+| `UPLOAD_PAYLOAD_LIMIT`            | Max JSON body for upload endpoints — player registration and milestone evidence (default: `10mb`)                     |
 | `RATE_LIMIT_ENABLED`              | Set to `false` to disable rate limiting (default: `true`)                                                             |
 | `RATE_LIMIT_WINDOW_MS`            | Rate limit window in milliseconds (default: `60000`)                                                                  |
 | `RATE_LIMIT_MAX`                  | Max requests per window (default: `60`)                                                                               |
@@ -798,6 +800,7 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
 | `SUBSCRIPTION_GRACE_PERIOD_HOURS` | Grace period after subscription expiry during which access is still granted (default: `24`)                           |
 | `REQUEST_TIMEOUT_MS`              | Global request timeout in milliseconds before responding with 503 (default: `30000`)                                  |
 | `ADMIN_IP_ALLOWLIST`              | Comma-separated list of IPv4 addresses/CIDRs allowed on admin routes (unset = allow all)                              |
+| `SLOW_QUERY_THRESHOLD_MS`         | Log a structured warning for DB queries slower than this, in milliseconds (default: `50`)                             |
 | `SSE_KEEPALIVE_INTERVAL_MS`       | Interval in milliseconds to send SSE keep-alive comments (default: `15000` = 15 seconds)                              |
 | `SSE_MAX_CONNECTIONS`             | Maximum number of concurrent SSE connections (default: `0` = unlimited)                                               |
 
