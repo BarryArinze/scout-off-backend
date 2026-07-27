@@ -1,5 +1,5 @@
 import express from 'express';
-import cors from 'cors';
+import cors, { CorsOptions } from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import config from './config';
@@ -16,7 +16,7 @@ import { traceId } from './middleware/traceId';
 import { responseTime } from './middleware/responseTime';
 import { stellarHealth, stellarBreaker } from './services/stellar';
 import { checkHealth } from './services/ipfs';
-import { API_PREFIX, API_V1_PREFIX } from './config';
+import { API_PREFIX, API_V1_PREFIX, API_V2_PREFIX } from './config';
 import { mountGraphQL } from './graphql';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
 import { ipReputationMiddleware } from './middleware/ipReputation';
@@ -25,7 +25,14 @@ import { indexerLedgerLag } from './services/indexer';
 import { getDb } from './db';
 import { getVersionInfo } from './version';
 import { apiVersion } from './middleware/apiVersion';
+import { versionRouting } from './middleware/versionRouting';
 import docsRouter from './routes/docs';
+import {
+  playerRoutes as playerRoutesV2,
+  scoutRoutes as scoutRoutesV2,
+  validatorRoutes as validatorRoutesV2,
+  adminRoutes as adminRoutesV2,
+} from './routes/v2';
 
 /** Probe the SQLite database with a lightweight SELECT 1.
  *  Resolves 'ok' or 'error'; never rejects.
@@ -68,6 +75,68 @@ async function probeDbWritable(timeoutMs = 2_000): Promise<'ok' | 'error'> {
   });
 }
 
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+//
+// Allowed origins are driven by the CORS_ALLOWED_ORIGINS env var (comma-separated).
+// In development and test we default to '*' (any origin).
+// In production/staging we use an explicit allowlist; if none is configured we
+// log a warning and reject all cross-origin requests.
+
+const isDevOrTest = config.nodeEnv === 'development' || config.nodeEnv === 'test';
+const allowedOrigins = config.corsAllowedOrigins;
+
+if (!isDevOrTest && (!allowedOrigins || allowedOrigins.length === 0)) {
+  logger.warn(
+    '[cors] WARNING: CORS_ALLOWED_ORIGINS is not set in production. ' +
+    'All cross-origin requests will be rejected.',
+  );
+}
+
+const isWildcard = allowedOrigins.includes('*');
+
+const corsOptions: CorsOptions = {
+  // Callback-based origin so we can do per-request allow/deny
+  origin: (origin, callback) => {
+    // Same-origin or server-to-server (no Origin header) — always allow
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    // Wildcard: allow all (dev / test only)
+    if (isWildcard) {
+      callback(null, '*');
+      return;
+    }
+
+    // Explicit allowlist check (case-sensitive, exact match)
+    if (allowedOrigins.includes(origin)) {
+      callback(null, origin);
+      return;
+    }
+
+    // Not in the allowlist — suppress the CORS header (no error thrown so the
+    // request still gets a response body, but the browser will block it)
+    callback(null, false);
+  },
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-API-Key',
+    'X-Correlation-ID',
+    'X-Idempotency-Key',
+    'X-API-Version',
+  ],
+  exposedHeaders: ['ETag', 'X-Correlation-ID', 'X-Response-Time', 'X-API-Version'],
+  // credentials cannot be used with a wildcard origin (CORS spec); only enable
+  // it when we are using an explicit allowlist
+  credentials: !isWildcard,
+  maxAge: 86400, // 24 hours — browsers cache pre-flight for this duration
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
+};
+
 const app = express();
 // Disable Express's default X-Powered-By header. helmet() also does this, but
 // being explicit here ensures it is suppressed regardless of middleware order.
@@ -77,11 +146,11 @@ app.disable('x-powered-by');
 // support is actually implemented (see getPlayer).
 app.set('etag', false);
 
-const corsOrigin =
-  config.allowedOrigins.includes('*')
-    ? '*'
-    : config.allowedOrigins;
-app.use(cors({ origin: corsOrigin }));
+// Apply CORS with the callback-based options built above.
+// Also handle pre-flight OPTIONS requests explicitly so they short-circuit
+// before any auth or body-parser middleware runs.
+app.options('*', cors(corsOptions));
+app.use(cors(corsOptions));
 app.use(compression({ threshold: parseInt(process.env.COMPRESSION_THRESHOLD ?? '1024', 10) }));
 app.use(requestTimeout);
 app.use(correlationId);
@@ -202,6 +271,25 @@ app.get('/metrics', createMetricsHandler(() => indexerLedgerLag));
 
 app.use('/auth', authRoutes);
 
+// ── API-Version response header ───────────────────────────────────────────────
+// Set the API-Version response header based on the URL prefix (or header override).
+// This runs on every /api/* request so clients always know which version handled them.
+app.use((req: import('express').Request, res: import('express').Response, next: import('express').NextFunction) => {
+  const url = req.originalUrl;
+  if (url.startsWith(API_PREFIX + '/') || url.startsWith(API_PREFIX + '?') || url === API_PREFIX) {
+    let servedVersion = 1;
+    if (
+      req.apiVersionOverride === 2 ||
+      url.startsWith(API_V2_PREFIX + '/') ||
+      url === API_V2_PREFIX
+    ) {
+      servedVersion = 2;
+    }
+    res.setHeader('API-Version', String(servedVersion));
+  }
+  next();
+});
+
 // Mount API routes under both /api (backwards-compatible alias) and /api/v1
 const prefixes = [API_PREFIX, API_V1_PREFIX];
 for (const prefix of prefixes) {
@@ -211,6 +299,18 @@ for (const prefix of prefixes) {
   app.use(`${prefix}/validators`, validatorRoutes);
   app.use(`${prefix}/admin`, adminRoutes);
 }
+
+// /api/v2 routes — currently identical to v1 handlers; new v2-only routes added here
+app.use(`${API_V2_PREFIX}/docs`, docsRouter);
+app.use(`${API_V2_PREFIX}/players`, playerRoutesV2);
+app.use(`${API_V2_PREFIX}/scouts`, scoutRoutesV2);
+app.use(`${API_V2_PREFIX}/validators`, validatorRoutesV2);
+app.use(`${API_V2_PREFIX}/admin`, adminRoutesV2);
+
+// Header-based v2 routing: when a client sends API-Version: 2 on an unversioned
+// /api/ path, the versionRouting middleware records req.apiVersionOverride = 2 and
+// the API-Version response header above reflects that. The request is handled by
+// the same v1 handler set (v2 is currently identical to v1).
 
 // Mount the GraphQL endpoint alongside the REST API.
 // Must be registered before the 404 catch-all.

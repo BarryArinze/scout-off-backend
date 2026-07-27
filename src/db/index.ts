@@ -274,6 +274,37 @@ export interface EventExportRow {
 }
 
 /**
+ * Count indexed events at the SQL level, filtered by type and/or created_at range.
+ * Used to populate the `total` field in paginated event responses without loading
+ * all matching rows into memory.
+ */
+export function countEventsFiltered(filter: EventsPageFilter): number {
+  const db = getDb();
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (filter.type) {
+    clauses.push('type = ?');
+    params.push(filter.type);
+  }
+  if (filter.startDate) {
+    clauses.push('created_at >= ?');
+    params.push(filter.startDate.getTime());
+  }
+  if (filter.endDate) {
+    clauses.push('created_at <= ?');
+    params.push(filter.endDate.getTime());
+  }
+
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const sql = 'SELECT COUNT(*) AS count FROM events ' + where;
+  const row = timedQuery(sql, () =>
+    db.prepare(sql).get(...(params as unknown[])) as { count: number } | undefined,
+  );
+  return row?.count ?? 0;
+}
+
+/**
  * Fetches one bounded page of indexed events (LIMIT/OFFSET), filtered at the
  * SQL level by type and/or created_at range, ordered by ledger ascending
  * (ties broken by insertion order via `id`).
@@ -391,6 +422,7 @@ export interface QueryPlayersOptions {
 }
 
 export interface PlayerProfileHistoryRow {
+  id: number;
   metadata_uri: string;
   changed_at: number;
   tx_hash: string;
@@ -415,12 +447,33 @@ export function getPlayerProfileHistory(
 ): PlayerProfileHistoryRow[] {
   return getDb()
     .prepare(
-      `SELECT metadata_uri, changed_at, tx_hash
+      `SELECT id, metadata_uri, changed_at, tx_hash
        FROM player_profile_history
        WHERE player_id = ?
        ORDER BY changed_at DESC`,
     )
     .all(playerId) as PlayerProfileHistoryRow[];
+}
+
+/**
+ * Returns all history rows for a player ordered oldest-first (ASC), with a
+ * 1-based `version` number assigned by insertion order. The version number is
+ * derived from the row's position in the ascending sequence so it is stable
+ * even after rows are inserted concurrently.
+ */
+export function getPlayerProfileHistoryVersioned(
+  playerId: string,
+): Array<PlayerProfileHistoryRow & { version: number }> {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, metadata_uri, changed_at, tx_hash
+       FROM player_profile_history
+       WHERE player_id = ?
+       ORDER BY id ASC`,
+    )
+    .all(playerId) as PlayerProfileHistoryRow[];
+
+  return rows.map((row, idx) => ({ ...row, version: idx + 1 }));
 }
 
 export function insertOrUpdatePlayer(p: {
@@ -720,6 +773,17 @@ export function getLatestSubscription(scoutWallet: string): SubscriptionRow | nu
   const sql = `SELECT * FROM subscriptions WHERE scout_wallet = ? AND cancelled_at IS NULL ORDER BY expires_at DESC LIMIT 1`;
   return timedQuery(sql, () =>
     (getDb().prepare(sql).get(scoutWallet) as SubscriptionRow | undefined) ?? null
+  );
+}
+
+/**
+ * Return all subscription rows for a scout (including cancelled), ordered newest-first.
+ * Used by the payment history endpoint.
+ */
+export function getSubscriptionsByScout(scoutWallet: string): SubscriptionRow[] {
+  const sql = `SELECT * FROM subscriptions WHERE scout_wallet = ? ORDER BY created_at DESC`;
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).all(scoutWallet) as SubscriptionRow[]
   );
 }
 
