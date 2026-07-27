@@ -3,7 +3,8 @@ import jwt from 'jsonwebtoken';
 import { logger } from '../../src/utils/logger';
 import app from '../../src/app';
 import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
-import { auditStore } from '../../src/utils/audit';
+import { queryAudit } from '../../src/utils/audit';
+import * as db from '../../src/db';
 
 jest.mock('../../src/services/ipfs', () => ({
   pinJson: jest.fn().mockResolvedValue('QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64'),
@@ -12,21 +13,82 @@ jest.mock('../../src/services/ipfs', () => ({
   gatewayUrls: jest.fn((cid) => [`https://gateway.pinata.cloud/ipfs/${cid}`]),
 }));
 
-jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
-  queryPlayers: jest.fn().mockReturnValue([]),
-  countPlayers: jest.fn().mockReturnValue(0),
-  getPlayerById: jest.fn().mockReturnValue(null),
-  getEventsCount: jest.fn().mockReturnValue(0),
-  insertPlayerProfileHistory: jest.fn(),
-  getPlayerProfileHistory: jest.fn().mockReturnValue([]),
-  getLatestSubscription: jest.fn().mockReturnValue(null),
-  insertSubscription: jest.fn().mockReturnValue(1),
-  renewSubscription: jest.fn(),
-  cancelSubscription: jest.fn(),
-  getPendingMilestones: jest.fn().mockReturnValue({ data: [], total: 0 }),
-  upsertPlayer: jest.fn(),
-}));
+jest.mock('../../src/db', () => {
+  // Minimal in-memory stand-in for the audit_log table, so that the real
+  // (unmocked) src/utils/audit.ts's recordAudit/queryAudit — which now read
+  // and write through src/db instead of an in-memory array (#464) — keep
+  // working against this fully-mocked db module.
+  let auditRows: Array<{
+    id: number;
+    action: string;
+    admin_wallet: string;
+    query_params: string;
+    created_at: string;
+    prev_hash: string | null;
+    hash: string;
+    event_source: string;
+  }> = [];
+  let nextAuditId = 1;
+
+  return {
+    queryEvents: jest.fn().mockReturnValue([]),
+    queryPlayers: jest.fn().mockReturnValue([]),
+    countPlayers: jest.fn().mockReturnValue(0),
+    getPlayerById: jest.fn().mockImplementation((id) => {
+      if (id === 'player_123') {
+        return {
+          player_id: 'player_123',
+          wallet: 'G' + 'A'.repeat(55),
+          position: 'striker',
+          region: 'europe',
+          metadata_uri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+          progress_level: 1,
+          created_at: 1700000000,
+          is_active: 1,
+        };
+      }
+      return null;
+    }),
+    getEventsCount: jest.fn().mockReturnValue(0),
+    insertPlayerProfileHistory: jest.fn(),
+    getPlayerProfileHistory: jest.fn().mockReturnValue([]),
+    getLatestSubscription: jest.fn().mockReturnValue(null),
+    insertSubscription: jest.fn().mockReturnValue(1),
+    renewSubscription: jest.fn(),
+    cancelSubscription: jest.fn(),
+    getPendingMilestones: jest.fn().mockReturnValue({ data: [], total: 0 }),
+    insertOrUpdatePlayer: jest.fn(),
+    insertAuditLog: jest.fn(
+      (p: { action: string; adminWallet?: string; queryParams?: Record<string, unknown>; createdAt: string; eventSource?: string }) => {
+        const row = {
+          id: nextAuditId++,
+          action: p.action,
+          admin_wallet: p.adminWallet ?? '',
+          query_params: JSON.stringify(p.queryParams ?? {}),
+          created_at: p.createdAt,
+          prev_hash: auditRows.length ? auditRows[auditRows.length - 1].hash : '0'.repeat(64),
+          hash: `mock-hash-${nextAuditId}`,
+          event_source: p.eventSource ?? 'admin_action',
+        };
+        auditRows.push(row);
+        return row;
+      }
+    ),
+    getAllAuditLogRows: jest.fn(
+      (filters: { eventSource?: string; actorWallet?: string; action?: string } = {}) =>
+        auditRows.filter((r) => {
+          if (filters.eventSource && r.event_source !== filters.eventSource) return false;
+          if (filters.actorWallet && r.admin_wallet !== filters.actorWallet) return false;
+          if (filters.action && r.action !== filters.action) return false;
+          return true;
+        })
+    ),
+    __resetAuditRows: () => {
+      auditRows = [];
+      nextAuditId = 1;
+    },
+  };
+});
 
 jest.mock('../../src/services/indexer', () => ({
   indexEvents: jest.fn(),
@@ -151,7 +213,7 @@ describe('POST /api/players/register', () => {
 
 describe('GET /api/players/:playerId route validation', () => {
   it('accepts a valid player ID and returns 404 when the player does not exist', async () => {
-    const res = await request(app).get('/api/players/player_123');
+    const res = await request(app).get('/api/players/player_non_existent');
     expect(res.status).toBe(404);
     expect(res.body.success).toBe(false);
   });
@@ -450,12 +512,12 @@ describe('POST /api/validators/milestone', () => {
 
 describe('GET /api/players — search audit logging', () => {
   beforeEach(() => {
-    auditStore.length = 0;
+    (db as unknown as { __resetAuditRows: () => void }).__resetAuditRows();
   });
 
   it('records an anonymous player_search entry when no auth token is provided', async () => {
     await request(app).get('/api/players?region=europe');
-    const entry = auditStore.find((e) => e.eventType === 'player_search');
+    const entry = queryAudit({ eventType: 'player_search' })[0];
     expect(entry).toBeDefined();
     expect(entry!.actorWallet).toBe('anonymous');
     expect(entry!.eventType).toBe('player_search');
@@ -467,7 +529,7 @@ describe('GET /api/players — search audit logging', () => {
     await request(app)
       .get('/api/players?position=striker')
       .set('Authorization', `Bearer ${token}`);
-    const entry = auditStore.find((e) => e.eventType === 'player_search');
+    const entry = queryAudit({ eventType: 'player_search' })[0];
     expect(entry).toBeDefined();
     expect(entry!.actorWallet).toBe(scoutWallet);
   });

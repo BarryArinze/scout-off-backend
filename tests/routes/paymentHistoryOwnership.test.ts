@@ -5,7 +5,7 @@ import app from '../../src/app';
 const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   getPlayerById: jest.fn().mockReturnValue(null),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   getContactUnlocksByScout: jest.fn().mockReturnValue([]),

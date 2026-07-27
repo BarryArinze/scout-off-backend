@@ -1,0 +1,247 @@
+# =============================================================================
+# scout-off-backend Helm values
+#
+# Every tunable parameter is documented with a comment describing its purpose
+# and the accepted values. Override any of these in a separate values file:
+#
+#   helm upgrade --install scout-off-backend ./helm/scout-off-backend \
+#     -f my-prod-values.yaml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Image
+# -----------------------------------------------------------------------------
+image:
+  # Container registry + image name
+  repository: ghcr.io/scoutoff/scout-off-backend
+  # Image tag to deploy. Defaults to the chart's appVersion when set to "".
+  tag: ""
+  # Pull policy: Always | IfNotPresent | Never
+  pullPolicy: IfNotPresent
+
+# Secrets required to pull from a private registry.
+# Each entry is the name of an existing imagePullSecret in the namespace.
+imagePullSecrets: []
+# - name: regcred
+
+# -----------------------------------------------------------------------------
+# Replica count & update strategy
+# -----------------------------------------------------------------------------
+# Minimum number of replicas. The HPA will scale up from this floor.
+replicaCount: 2
+
+# Rolling update strategy — zero downtime: never take a pod down before a new
+# one is healthy (maxUnavailable: 0) and allow one extra pod during rollout.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1
+    maxUnavailable: 0
+
+# -----------------------------------------------------------------------------
+# Horizontal Pod Autoscaler
+# -----------------------------------------------------------------------------
+hpa:
+  enabled: true
+  # Lower bound — matches replicaCount above.
+  minReplicas: 2
+  # Upper bound — expand to handle traffic spikes.
+  maxReplicas: 10
+  # Scale up when average CPU across all pods exceeds this percentage.
+  targetCPUUtilizationPercentage: 70
+  # Scale up when average memory across all pods exceeds this percentage.
+  targetMemoryUtilizationPercentage: 80
+
+# -----------------------------------------------------------------------------
+# PodDisruptionBudget
+# -----------------------------------------------------------------------------
+pdb:
+  enabled: true
+  # At least one pod must remain available during voluntary disruptions
+  # (node drain, rolling upgrade, etc.).
+  minAvailable: 1
+
+# -----------------------------------------------------------------------------
+# Resource requests & limits
+#
+# requests: guaranteed resources; used by the scheduler for placement.
+# limits:   hard cap; container is OOM-killed / throttled when exceeded.
+# -----------------------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# -----------------------------------------------------------------------------
+# Service
+# -----------------------------------------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+  # Port the container listens on. Must match PORT env var.
+  targetPort: 4000
+
+# -----------------------------------------------------------------------------
+# Ingress (optional)
+#
+# Set ingress.enabled=true to expose the service outside the cluster.
+# TLS termination is handled at the Ingress level; the backend sees plain HTTP.
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  # Ingress class name (e.g. "nginx", "traefik", "alb").
+  className: "nginx"
+  annotations: {}
+  #  kubernetes.io/ingress.class: nginx
+  #  cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: api.scoutoff.io
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: scout-off-tls
+      hosts:
+        - api.scoutoff.io
+
+# -----------------------------------------------------------------------------
+# Liveness probe
+#
+# Kubernetes restarts a container when liveness fails failureThreshold times.
+# /health/liveness is a lightweight "am I alive?" check (no external deps).
+# -----------------------------------------------------------------------------
+livenessProbe:
+  httpGet:
+    path: /health/liveness
+    port: 4000
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  failureThreshold: 3
+  timeoutSeconds: 5
+
+# -----------------------------------------------------------------------------
+# Readiness probe
+#
+# Kubernetes removes a pod from Service endpoints until readiness passes.
+# /health/readiness checks DB write-ability and IPFS connectivity.
+# A shorter period catches startup slowness faster than the liveness probe.
+# -----------------------------------------------------------------------------
+readinessProbe:
+  httpGet:
+    path: /health/readiness
+    port: 4000
+  initialDelaySeconds: 15
+  periodSeconds: 5
+  failureThreshold: 2
+  timeoutSeconds: 5
+
+# -----------------------------------------------------------------------------
+# Kubernetes Secret reference
+#
+# Sensitive values (CONTRACT_ID, JWT_SECRET) are sourced from a pre-existing
+# Kubernetes Secret named "scout-off-secrets". Create it before deploying:
+#
+#   kubectl create secret generic scout-off-secrets \
+#     --from-literal=CONTRACT_ID=<value> \
+#     --from-literal=JWT_SECRET=<value>
+#
+# The secret name can be overridden here if your naming convention differs.
+# -----------------------------------------------------------------------------
+secretName: scout-off-secrets
+
+# -----------------------------------------------------------------------------
+# Non-sensitive environment variables (ConfigMap)
+#
+# Add any env var here that does NOT contain a secret. Each key/value pair is
+# mounted into the pod via a ConfigMap named <release>-config.
+# Sensitive vars (CONTRACT_ID, JWT_SECRET) are always sourced from the Secret.
+# -----------------------------------------------------------------------------
+env:
+  NODE_ENV: production
+  PORT: "4000"
+  NETWORK: mainnet
+  HORIZON_URL: https://horizon.stellar.org
+  SOROBAN_RPC_URL: https://soroban-rpc.mainnet.stellar.gateway.fm
+  LOG_LEVEL: info
+  METRICS_ENABLED: "true"
+  # Database driver: sqlite | postgres
+  DB_DRIVER: sqlite
+  DB_PATH: /data/scout-off.db
+  # SSE keep-alive interval in ms
+  SSE_KEEPALIVE_INTERVAL_MS: "15000"
+  # Maximum concurrent SSE connections (0 = unlimited)
+  SSE_MAX_CONNECTIONS: "0"
+  # Request timeout in ms
+  REQUEST_TIMEOUT_MS: "30000"
+  # Rate limiting
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_WINDOW_MS: "60000"
+  RATE_LIMIT_MAX: "60"
+  AUTH_RATE_LIMIT_WINDOW_MS: "60000"
+  AUTH_RATE_LIMIT_MAX: "5"
+  # JWT access token TTL (seconds). Default: 900 = 15 min.
+  JWT_ACCESS_TTL_SECONDS: "900"
+  # Stellar health check (set false in staging)
+  STELLAR_HEALTH_CHECK: "true"
+
+# -----------------------------------------------------------------------------
+# Pod annotations
+# Useful for Prometheus scraping or Datadog APM injection.
+# -----------------------------------------------------------------------------
+podAnnotations: {}
+# prometheus.io/scrape: "true"
+# prometheus.io/path: "/metrics"
+# prometheus.io/port: "4000"
+
+# -----------------------------------------------------------------------------
+# Pod security context
+# Runs as a non-root user for defence-in-depth.
+# -----------------------------------------------------------------------------
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  fsGroup: 1000
+
+# -----------------------------------------------------------------------------
+# Container security context
+# -----------------------------------------------------------------------------
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false   # set true if you mount a writable volume for DB
+  capabilities:
+    drop:
+      - ALL
+
+# -----------------------------------------------------------------------------
+# Service account
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  # Annotations to add to the service account (e.g. IAM role for EKS).
+  annotations: {}
+  name: ""
+
+# -----------------------------------------------------------------------------
+# Node selection / tolerations / affinity
+# -----------------------------------------------------------------------------
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -----------------------------------------------------------------------------
+# Extra volumes / volume mounts
+# Use to mount a PersistentVolumeClaim for the SQLite database file.
+# Example:
+#   extraVolumes:
+#     - name: data
+#       persistentVolumeClaim:
+#         claimName: scout-off-data
+#   extraVolumeMounts:
+#     - name: data
+#       mountPath: /data
+# -----------------------------------------------------------------------------
+extraVolumes: []
+extraVolumeMounts: []

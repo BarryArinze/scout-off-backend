@@ -11,8 +11,20 @@
  *  - Auth guards (401 / 403) are enforced
  */
 import request from 'supertest';
-import app from '../../src/app';
 import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
+
+// This suite exercises the real indexer/DB layer end-to-end (including a
+// register -> revoke -> re-import round trip), but revoke_validator now
+// performs a real Soroban RPC call in production. Mock only that one
+// function (keeping everything else in the module real via
+// jest.requireActual) so this stays deterministic and offline — same
+// approach as tests/routes/admin.test.ts.
+jest.mock('../../src/services/stellar', () => ({
+  ...jest.requireActual('../../src/services/stellar'),
+  revokeValidatorOnChain: jest.fn().mockResolvedValue({ transactionId: 'e2e-import-revoke-txid' }),
+}));
+
+import app from '../../src/app';
 import { parseCsvBody, processBatch } from '../../src/controllers/adminController';
 
 // ─── Auth helper ──────────────────────────────────────────────────────────────

@@ -7,6 +7,19 @@
  *
  * Usage:
  *   npx ts-node --project tsconfig.scripts.json scripts/seed.ts
+ *   npm run seed
+ *
+ * Selective seeding with --only:
+ *   npm run seed -- --only players
+ *   npm run seed -- --only players,subscriptions
+ *
+ * Supported types: players, events, milestones, subscriptions, contacts
+ * (milestones and subscriptions are sub-sets of events; contacts is also a
+ * sub-set of events.  Using --only milestones, --only subscriptions, or
+ * --only contacts seeds only those event types plus any player rows they
+ * reference.)
+ *
+ * When no --only flag is provided, all types are seeded (existing behaviour).
  *
  * The script is idempotent: running it multiple times is safe.  Each player,
  * event, and subscription is keyed by a stable ID so re-runs skip rows that
@@ -26,7 +39,7 @@ if (!process.env.CONTRACT_ID)
   process.env.CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
 if (!process.env.JWT_SECRET) process.env.JWT_SECRET = 'seed-script';
 
-import { initDb, getDb, upsertPlayer, updatePlayerProgress } from '../src/db';
+import { initDb, getDb, insertOrUpdatePlayer, updatePlayerProgress } from '../src/db';
 import { runMigrations } from '../src/db/migrate';
 
 // ─── Sample data ──────────────────────────────────────────────────────────────
@@ -250,6 +263,41 @@ const EVENTS: Array<{
   },
 ];
 
+// ─── CLI argument parsing ─────────────────────────────────────────────────────
+
+/** All recognised seed-type names. */
+const VALID_TYPES = ['players', 'events', 'milestones', 'subscriptions', 'contacts'] as const;
+type SeedType = typeof VALID_TYPES[number];
+
+/**
+ * Parse the --only flag from process.argv.
+ *
+ * Returns a Set of the requested types, or null when --only is not supplied
+ * (meaning "seed everything").
+ *
+ * Unknown type names are logged as warnings and skipped.
+ */
+function parseOnly(): Set<SeedType> | null {
+  const idx = process.argv.indexOf('--only');
+  if (idx === -1) return null; // no flag → seed all
+
+  const raw = process.argv[idx + 1];
+  if (!raw || raw.startsWith('--')) {
+    console.warn('⚠️  --only requires a value, e.g. --only players,subscriptions');
+    return new Set<SeedType>(); // empty set → nothing seeded
+  }
+
+  const requested = new Set<SeedType>();
+  for (const token of raw.split(',').map((t) => t.trim().toLowerCase())) {
+    if ((VALID_TYPES as readonly string[]).includes(token)) {
+      requested.add(token as SeedType);
+    } else {
+      console.warn(`⚠️  Unknown seed type "${token}" — skipped. Valid types: ${VALID_TYPES.join(', ')}`);
+    }
+  }
+  return requested;
+}
+
 // ─── Seeding logic ────────────────────────────────────────────────────────────
 
 function seed(): void {
@@ -257,19 +305,61 @@ function seed(): void {
   const db = getDb();
   runMigrations(db);
 
+  const only = parseOnly();
+
+  // Determine which categories to seed.
+  // When --only is absent (only === null) every category is included.
+  // When --only lists "milestones", "subscriptions", or "contacts" those map
+  // to specific event types within the events table.  Requesting them does NOT
+  // implicitly seed players — only an explicit "players" entry does that.
+  const seedPlayers      = only === null || only.has('players');
+  const seedEvents       = only === null || only.has('events');
+  const seedMilestones   = only === null || only.has('milestones');
+  const seedSubscriptions = only === null || only.has('subscriptions');
+  const seedContacts     = only === null || only.has('contacts');
+
+  // Derive which event types to insert
+  const allowedEventTypes = new Set<string>();
+  if (seedEvents) {
+    // "events" flag means all event sub-types
+    for (const ev of EVENTS) allowedEventTypes.add(ev.type);
+  } else {
+    if (seedMilestones)    allowedEventTypes.add('milestone_approved');
+    if (seedSubscriptions) allowedEventTypes.add('scout_subscribed');
+    if (seedContacts)      allowedEventTypes.add('contact_unlocked');
+    // Always include player_registered events when players are being seeded so
+    // the events table stays consistent with the players table.
+    if (seedPlayers)       allowedEventTypes.add('player_registered');
+  }
+
   console.log('🌱  ScoutOff seed starting…\n');
+  if (only !== null) {
+    console.log(`  Seeding only: ${[...only].join(', ') || '(nothing requested)'}\n`);
+  }
 
   // ── Players ────────────────────────────────────────────────────────────────
-  const insertedPlayers: string[] = [];
-  const skippedPlayers: string[] = [];
+  if (seedPlayers) {
+    const insertedPlayers: string[] = [];
+    const skippedPlayers: string[] = [];
 
-  for (const p of PLAYERS) {
-    const existing = db.prepare('SELECT player_id FROM players WHERE player_id = ?').get(p.player_id);
-    if (existing) {
-      skippedPlayers.push(p.player_id);
-      continue;
+    for (const p of PLAYERS) {
+      const existing = db.prepare('SELECT player_id FROM players WHERE player_id = ?').get(p.player_id);
+      if (existing) {
+        skippedPlayers.push(p.player_id);
+        continue;
+      }
+      upsertPlayer({
+        player_id: p.player_id,
+        wallet: p.wallet,
+        position: p.position,
+        region: p.region,
+        metadata_uri: p.metadata_uri,
+        created_at: p.created_at,
+      });
+      updatePlayerProgress(p.player_id, p.progress_level);
+      insertedPlayers.push(p.player_id);
     }
-    upsertPlayer({
+    insertOrUpdatePlayer({
       player_id: p.player_id,
       wallet: p.wallet,
       position: p.position,
@@ -281,27 +371,31 @@ function seed(): void {
     insertedPlayers.push(p.player_id);
   }
 
-  console.log(`  Players   inserted=${insertedPlayers.length}  skipped=${skippedPlayers.length}`);
-  if (insertedPlayers.length) console.log(`    + ${insertedPlayers.join(', ')}`);
-
-  // ── Events (registrations, milestones, subscriptions, contacts) ─────────
-  const insertEvent = db.prepare(
-    'INSERT OR IGNORE INTO events (type, ledger, tx_hash, payload) VALUES (?, ?, ?, ?)',
-  );
-
-  let insertedEvents = 0;
-  let skippedEvents = 0;
-
-  for (const ev of EVENTS) {
-    const result = insertEvent.run(ev.type, ev.ledger, ev.tx_hash, JSON.stringify(ev.payload));
-    if (result.changes > 0) {
-      insertedEvents++;
-    } else {
-      skippedEvents++;
-    }
+    console.log(`  Players   inserted=${insertedPlayers.length}  skipped=${skippedPlayers.length}`);
+    if (insertedPlayers.length) console.log(`    + ${insertedPlayers.join(', ')}`);
   }
 
-  console.log(`  Events    inserted=${insertedEvents}  skipped=${skippedEvents}`);
+  // ── Events (registrations, milestones, subscriptions, contacts) ─────────
+  if (allowedEventTypes.size > 0) {
+    const insertEvent = db.prepare(
+      'INSERT OR IGNORE INTO events (type, ledger, tx_hash, payload) VALUES (?, ?, ?, ?)',
+    );
+
+    let insertedEvents = 0;
+    let skippedEvents = 0;
+
+    for (const ev of EVENTS) {
+      if (!allowedEventTypes.has(ev.type)) continue;
+      const result = insertEvent.run(ev.type, ev.ledger, ev.tx_hash, JSON.stringify(ev.payload));
+      if (result.changes > 0) {
+        insertedEvents++;
+      } else {
+        skippedEvents++;
+      }
+    }
+
+    console.log(`  Events    inserted=${insertedEvents}  skipped=${skippedEvents}`);
+  }
 
   // ── Summary ────────────────────────────────────────────────────────────────
   const counts = {

@@ -1,10 +1,26 @@
 import { Router } from 'express';
-import { getSubscription, getUnlockedContacts, getContactDetails, unlockContact, getPaymentHistory, subscribe, renewSubscription, cancelSubscription, submitTrialOffer, listTrialOffers, createTrialOffer, trialOfferSchema, unlockContactSchema } from '../controllers/scoutController';
+import {
+  getSubscription,
+  getUnlockedContacts,
+  getContactDetails,
+  unlockContact,
+  getPaymentHistory,
+  subscribe,
+  renewSubscription,
+  cancelSubscription,
+  submitTrialOffer,
+  listTrialOffers,
+  createTrialOffer,
+  trialOfferSchema,
+  unlockContactSchema,
+} from '../controllers/scoutController';
 import { getScoutRecommendations } from '../controllers/scoutRecommendationsController';
 import { putScoutNote, getScoutNoteHandler, listScoutNotesHandler } from '../controllers/scoutNotesController';
 import { issueApiKey, listApiKeys, revokeApiKey } from '../controllers/apiKeyController';
 import { addBookmark, removeBookmark, listBookmarks } from '../controllers/scoutBookmarksController';
 import { createSavedSearch, listSavedSearches, deleteSavedSearchHandler } from '../controllers/scoutSavedSearchesController';
+import { requireFeatureFlag } from '../middleware/requireFeatureFlag';
+import { FeatureFlags } from '../services/featureFlags';
 import { requireRole } from '../middleware/auth';
 import { validateBody } from '../middleware/validate';
 import { walletRateLimit } from '../middleware/rateLimit';
@@ -234,8 +250,8 @@ router.route('/:wallet/bookmarks')
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/saved-searches')
-  .post(requireRole('scout'), createSavedSearch)
-  .get(requireRole('scout'), listSavedSearches)
+  .post(requireRole('scout'), requireFeatureFlag(FeatureFlags.SAVED_SEARCHES), createSavedSearch)
+  .get(requireRole('scout'), requireFeatureFlag(FeatureFlags.SAVED_SEARCHES), listSavedSearches)
   .all(methodNotAllowed(['POST', 'GET', 'HEAD']));
 
 /**
@@ -246,7 +262,7 @@ router.route('/:wallet/saved-searches')
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/saved-searches/:id')
-  .delete(requireRole('scout'), deleteSavedSearchHandler)
+  .delete(requireRole('scout'), requireFeatureFlag(FeatureFlags.SAVED_SEARCHES), deleteSavedSearchHandler)
   .all(methodNotAllowed(['DELETE']));
 
 export default router;

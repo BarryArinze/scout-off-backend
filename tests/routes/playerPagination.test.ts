@@ -31,7 +31,7 @@ jest.mock('../../src/services/cache', () => ({
 }));
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   getPlayerById: jest.fn(),
   queryPlayers: jest.fn().mockReturnValue([]),
   countPlayers: jest.fn().mockReturnValue(0),
@@ -39,7 +39,7 @@ jest.mock('../../src/db', () => ({
   getPlayerProfileHistory: jest.fn().mockReturnValue([]),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn().mockReturnValue(1),
-  upsertPlayer: jest.fn(),
+  insertOrUpdatePlayer: jest.fn(),
 }));
 
 import { queryPlayers, countPlayers } from '../../src/db';
