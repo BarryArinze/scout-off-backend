@@ -754,6 +754,17 @@ export function getLatestSubscription(scoutWallet: string): SubscriptionRow | nu
   );
 }
 
+/**
+ * Return all subscription rows for a scout (including cancelled), ordered newest-first.
+ * Used by the payment history endpoint.
+ */
+export function getSubscriptionsByScout(scoutWallet: string): SubscriptionRow[] {
+  const sql = `SELECT * FROM subscriptions WHERE scout_wallet = ? ORDER BY created_at DESC`;
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).all(scoutWallet) as SubscriptionRow[]
+  );
+}
+
 export function insertSubscription(p: {
   scout_wallet: string;
   tier: string;

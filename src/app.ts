@@ -16,7 +16,7 @@ import { traceId } from './middleware/traceId';
 import { responseTime } from './middleware/responseTime';
 import { stellarHealth, stellarBreaker } from './services/stellar';
 import { checkHealth } from './services/ipfs';
-import { API_PREFIX, API_V1_PREFIX } from './config';
+import { API_PREFIX, API_V1_PREFIX, API_V2_PREFIX } from './config';
 import { mountGraphQL } from './graphql';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
 import { ipReputationMiddleware } from './middleware/ipReputation';
@@ -25,7 +25,14 @@ import { indexerLedgerLag } from './services/indexer';
 import { getDb } from './db';
 import { getVersionInfo } from './version';
 import { apiVersion } from './middleware/apiVersion';
+import { versionRouting } from './middleware/versionRouting';
 import docsRouter from './routes/docs';
+import {
+  playerRoutes as playerRoutesV2,
+  scoutRoutes as scoutRoutesV2,
+  validatorRoutes as validatorRoutesV2,
+  adminRoutes as adminRoutesV2,
+} from './routes/v2';
 
 /** Probe the SQLite database with a lightweight SELECT 1.
  *  Resolves 'ok' or 'error'; never rejects.
@@ -202,6 +209,25 @@ app.get('/metrics', createMetricsHandler(() => indexerLedgerLag));
 
 app.use('/auth', authRoutes);
 
+// ── API-Version response header ───────────────────────────────────────────────
+// Set the API-Version response header based on the URL prefix (or header override).
+// This runs on every /api/* request so clients always know which version handled them.
+app.use((req: import('express').Request, res: import('express').Response, next: import('express').NextFunction) => {
+  const url = req.originalUrl;
+  if (url.startsWith(API_PREFIX + '/') || url.startsWith(API_PREFIX + '?') || url === API_PREFIX) {
+    let servedVersion = 1;
+    if (
+      req.apiVersionOverride === 2 ||
+      url.startsWith(API_V2_PREFIX + '/') ||
+      url === API_V2_PREFIX
+    ) {
+      servedVersion = 2;
+    }
+    res.setHeader('API-Version', String(servedVersion));
+  }
+  next();
+});
+
 // Mount API routes under both /api (backwards-compatible alias) and /api/v1
 const prefixes = [API_PREFIX, API_V1_PREFIX];
 for (const prefix of prefixes) {
@@ -211,6 +237,18 @@ for (const prefix of prefixes) {
   app.use(`${prefix}/validators`, validatorRoutes);
   app.use(`${prefix}/admin`, adminRoutes);
 }
+
+// /api/v2 routes — currently identical to v1 handlers; new v2-only routes added here
+app.use(`${API_V2_PREFIX}/docs`, docsRouter);
+app.use(`${API_V2_PREFIX}/players`, playerRoutesV2);
+app.use(`${API_V2_PREFIX}/scouts`, scoutRoutesV2);
+app.use(`${API_V2_PREFIX}/validators`, validatorRoutesV2);
+app.use(`${API_V2_PREFIX}/admin`, adminRoutesV2);
+
+// Header-based v2 routing: when a client sends API-Version: 2 on an unversioned
+// /api/ path, the versionRouting middleware records req.apiVersionOverride = 2 and
+// the API-Version response header above reflects that. The request is handled by
+// the same v1 handler set (v2 is currently identical to v1).
 
 // Mount the GraphQL endpoint alongside the REST API.
 // Must be registered before the 404 catch-all.
