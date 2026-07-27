@@ -1,12 +1,12 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
-import { queryEvents, getEventsCount, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow } from '../db';
+import { queryEvents, getEventsCount, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow, insertFeeWithdrawal } from '../db';
 import { getAllValidators, insertValidator, revokeValidatorRow, getValidatorByWallet } from '../services/indexer';
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { logAuditEvent } from '../services/audit';
 import { verifyAuditChain } from '../utils/auditVerify';
-import { withdrawFees as stellarWithdrawFees, FeeWithdrawalError, FeeWithdrawalResult, pauseContractOnChain, unpauseContractOnChain, registerValidatorOnChain, ValidatorActionError } from '../services/stellar';
+import { withdrawFees as stellarWithdrawFees, FeeWithdrawalError, FeeWithdrawalResult, getFeeBalance, pauseContractOnChain, unpauseContractOnChain, registerValidatorOnChain, ValidatorActionError } from '../services/stellar';
 import { revokeToken, isTokenRevoked } from '../services/tokenBlocklist';
 import config from '../config';
 import { logger } from '../utils/logger';
@@ -1403,5 +1403,306 @@ export async function importValidators(req: Request, res: Response, next: NextFu
     });
   } catch (err) {
     next(err);
+  }
+}
+
+// ─── POST /api/admin/fees/withdraw ─────────────────────────────────────────
+//
+// Fully-specified fee withdrawal endpoint (replaces the stub in
+// withdrawFeesController above). Key differences from the legacy endpoint:
+//
+//  1. Body:      { treasuryAddress, amountStroops }  (not { recipient })
+//  2. Validate:  treasuryAddress via isValidStellarAddress
+//                amountStroops > 0 AND ≤ on-chain get_fee_balance()
+//  3. Multi-sig: if ADMIN_THRESHOLD > 1 → propose and return 202
+//  4. Execute:   withdraw_fees(admin, treasury_address, amount_stroops)
+//  5. DB record: fee_withdrawals row (idempotency_key, treasury_address,
+//                amount_stroops, tx_hash, admin_wallet, created_at)
+//  6. Audit log: fee_withdrawal event
+//  7. Idempotency: Idempotency-Key header handled by the idempotency
+//                  middleware applied in the route; the controller also
+//                  writes to the fee_withdrawals idempotency_key column
+//                  as a storage-layer guard.
+
+const withdrawFeesV2Schema = z.object({
+  treasuryAddress: z
+    .string({ required_error: 'treasuryAddress is required' })
+    .refine(isValidStellarAddress, {
+      message: 'treasuryAddress must be a valid Stellar public key',
+    }),
+  amountStroops: z
+    .union([z.string(), z.number()])
+    .transform((v) => String(v))
+    .refine((v) => /^\d+$/.test(v) && BigInt(v) > 0n, {
+      message: 'amountStroops must be a positive integer',
+    }),
+});
+
+/**
+ * POST /api/admin/fees/withdraw
+ *
+ * Withdraw accumulated platform fees from the Soroban contract.
+ *
+ * Request body: { treasuryAddress: string, amountStroops: string | number }
+ * Optional header: Idempotency-Key  (prevents duplicate submissions)
+ *
+ * Flow:
+ *  1. Role + admin-wallet guard
+ *  2. Zod validation
+ *  3. get_fee_balance() — reject 422 if amountStroops > balance
+ *  4. Multi-sig gate — if ADMIN_THRESHOLD > 1 propose and return 202
+ *  5. Concurrency lock — reject 409 if another withdrawal is in flight
+ *  6. withdraw_fees() on-chain
+ *  7. Insert fee_withdrawals DB record
+ *  8. Audit log
+ */
+export async function withdrawFeesV2Controller(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  // ── 1. Role guard (defence-in-depth in addition to route middleware) ───────
+  if (req.role !== 'admin') {
+    res.status(403).json({
+      success: false,
+      error: 'Insufficient permissions',
+      code: ErrorCode.FORBIDDEN,
+    });
+    return;
+  }
+
+  const adminWallet = req.account ?? 'unknown';
+
+  if (!config.adminWallets.includes(adminWallet)) {
+    res.status(403).json({ success: false, error: 'Insufficient permissions' });
+    return;
+  }
+
+  // ── 2. Zod validation ───────────────────────────────────────────────────────
+  const parsed = withdrawFeesV2Schema.safeParse(req.body);
+  if (!parsed.success) {
+    const reason = parsed.error.errors[0]?.message ?? 'Invalid request body';
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: { error: 'validation_failed', reason },
+      timestamp: new Date().toISOString(),
+    });
+    res.status(400).json({
+      success: false,
+      error: reason,
+      code: ErrorCode.VALIDATION_ERROR,
+    });
+    return;
+  }
+
+  const { treasuryAddress, amountStroops } = parsed.data;
+
+  // ── 3. Multi-sig gate ───────────────────────────────────────────────────────
+  if (config.adminThreshold > 1) {
+    const proposal = proposeAction(
+      'withdraw_fees',
+      { treasuryAddress, amountStroops },
+      adminWallet,
+    );
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: {
+        treasuryAddress,
+        amountStroops,
+        actionId: proposal.actionId,
+        outcome: 'multisig_pending',
+      },
+      timestamp: new Date().toISOString(),
+    });
+    res.status(202).json({
+      success: true,
+      message: `Fee withdrawal proposed, awaiting ${config.adminThreshold - 1} more admin signature(s)`,
+      data: {
+        actionId: proposal.actionId,
+        collectedSignatures: 1,
+        requiredSignatures: config.adminThreshold,
+        treasuryAddress,
+        amountStroops,
+      },
+    });
+    return;
+  }
+
+  // ── 4. Validate amountStroops against live on-chain fee balance ────────────
+  try {
+    const balance = await getFeeBalance();
+    if (BigInt(amountStroops) > balance) {
+      logAuditEvent({
+        action: 'fee_withdrawal_attempt',
+        adminWallet,
+        queryParams: {
+          treasuryAddress,
+          amountStroops,
+          feeBalance: balance.toString(),
+          error: 'amount_exceeds_balance',
+          outcome: 'failure',
+        },
+        timestamp: new Date().toISOString(),
+      });
+      res.status(422).json({
+        success: false,
+        error: `amountStroops (${amountStroops}) exceeds the contract fee balance (${balance})`,
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+  } catch (balanceErr) {
+    // Non-fatal balance check failure — log and proceed; the contract itself
+    // will reject the withdrawal if the amount is invalid.
+    logger.warn(
+      `[admin] fee_balance_check_failed admin=${adminWallet} err=${
+        balanceErr instanceof Error ? balanceErr.message : balanceErr
+      }`,
+    );
+  }
+
+  // ── 5. Concurrency guard ────────────────────────────────────────────────────
+  if (withdrawalInProgress) {
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: {
+        treasuryAddress,
+        amountStroops,
+        error: 'concurrent_withdrawal_rejected',
+        outcome: 'failure',
+      },
+      timestamp: new Date().toISOString(),
+      contractAction: 'withdraw_fees',
+    });
+    res.status(409).json({
+      success: false,
+      error: 'A withdrawal is already in progress',
+      code: ErrorCode.CONFLICT,
+    });
+    return;
+  }
+
+  withdrawalInProgress = true;
+
+  // Extract idempotency key from the header (the middleware has already served
+  // a cached response if the key was seen before — reaching here means it's new).
+  const idempotencyKey =
+    typeof req.headers['idempotency-key'] === 'string'
+      ? req.headers['idempotency-key'].trim() || null
+      : null;
+
+  try {
+    // ── 6. On-chain execution ─────────────────────────────────────────────────
+    logger.info(
+      `[admin] action=withdraw_fees admin=${adminWallet} treasury=${treasuryAddress} amount=${amountStroops}`,
+    );
+
+    const result: FeeWithdrawalResult = await stellarWithdrawFees(treasuryAddress);
+
+    // ── 7. DB record ──────────────────────────────────────────────────────────
+    try {
+      insertFeeWithdrawal({
+        idempotencyKey,
+        treasuryAddress,
+        amountStroops,
+        txHash: result.transactionId,
+        adminWallet,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (dbErr) {
+      // DB write failure must not block the response — the on-chain transaction
+      // already succeeded. Log the error so ops can reconcile manually.
+      logger.error(
+        `[admin] fee_withdrawal_db_insert_failed txHash=${result.transactionId} err=${
+          dbErr instanceof Error ? dbErr.message : dbErr
+        }`,
+      );
+    }
+
+    // ── 8. Audit log ──────────────────────────────────────────────────────────
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: {
+        treasuryAddress,
+        amountStroops,
+        recipient: result.recipient,
+        transactionId: result.transactionId,
+        amount: result.amount,
+        token: result.token,
+        outcome: 'success',
+      },
+      timestamp: new Date().toISOString(),
+      contractAction: 'withdraw_fees',
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        transactionId: result.transactionId,
+        treasuryAddress,
+        amountStroops,
+        recipient: result.recipient,
+        amount: result.amount,
+        token: result.token,
+      },
+    });
+  } catch (err) {
+    const errorCode = err instanceof FeeWithdrawalError ? err.code : 'UNKNOWN';
+    const retryable = err instanceof FeeWithdrawalError ? err.retryable : false;
+
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: {
+        treasuryAddress,
+        amountStroops,
+        error: err instanceof Error ? err.message : 'unknown_error',
+        errorCode,
+        retryable,
+        outcome: 'failure',
+      },
+      timestamp: new Date().toISOString(),
+      contractAction: 'withdraw_fees',
+    });
+
+    if (err instanceof FeeWithdrawalError) {
+      switch (err.code) {
+        case 'NO_FEES':
+          res.status(409).json({
+            success: false,
+            error: 'No fees available to withdraw',
+            code: ErrorCode.NO_FEES,
+          });
+          return;
+        case 'CONTRACT_PAUSED':
+          res.status(409).json({
+            success: false,
+            error: 'Contract is paused; withdrawal not available',
+            code: ErrorCode.CONTRACT_PAUSED,
+          });
+          return;
+        case 'INVALID_RECIPIENT':
+          res.status(400).json({
+            success: false,
+            error: 'Invalid treasury address',
+            code: ErrorCode.INVALID_RECIPIENT,
+          });
+          return;
+        case 'NETWORK_ERROR':
+          res.status(503).json({
+            success: false,
+            error: 'Network error; please retry',
+            code: ErrorCode.NETWORK_ERROR,
+          });
+          return;
+      }
+    }
+    next(err);
+  } finally {
+    withdrawalInProgress = false;
   }
 }

@@ -1695,3 +1695,84 @@ export async function revokeValidatorOnChain(
     }
   });
 }
+
+// ─── Fee balance query ────────────────────────────────────────────────────────
+
+export class FeeBalanceError extends Error {
+  constructor(
+    message: string,
+    public readonly code: 'NETWORK_ERROR' | 'CONTRACT_PAUSED',
+  ) {
+    super(message);
+    this.name = 'FeeBalanceError';
+  }
+}
+
+/**
+ * Read the current accumulated platform fee balance from the Soroban contract
+ * by invoking `get_fee_balance() -> u128` via simulateTransaction.
+ *
+ * This is a read-only call — no transaction is signed or submitted.  Uses an
+ * ephemeral keypair as the simulation source (same pattern as isSubscribed /
+ * queryMilestones) so no platform key material is required.
+ *
+ * Returns the balance as a BigInt.  Returns 0n when the contract returns a
+ * zero balance or when the return value is absent (treat as empty vault).
+ * Throws FeeBalanceError with code 'CONTRACT_PAUSED' when the contract's
+ * paused-state guard rejects the simulation, or 'NETWORK_ERROR' for any
+ * RPC / transport failure.
+ */
+export async function getFeeBalance(): Promise<bigint> {
+  return tracer.startActiveSpan('stellar.getFeeBalance', async (span) => {
+    span.setAttribute('stellar.contract_function', 'get_fee_balance');
+    try {
+      const contract = new Contract(config.contractId);
+      const ephemeral = Keypair.random();
+      const sourceAccount = new Account(ephemeral.publicKey(), '0');
+
+      const tx = new TransactionBuilder(sourceAccount, {
+        fee: BASE_FEE,
+        networkPassphrase: networkPassphrase(),
+      })
+        .addOperation(contract.call('get_fee_balance'))
+        .setTimeout(30)
+        .build();
+
+      let simResult;
+      try {
+        simResult = await server.simulateTransaction(tx);
+      } catch (err) {
+        throw new FeeBalanceError(
+          `Simulation request failed: ${(err as Error).message}`,
+          'NETWORK_ERROR',
+        );
+      }
+
+      if (SorobanRpc.Api.isSimulationError(simResult)) {
+        const errMsg = simResult.error ?? '';
+        if (isContractPausedError(errMsg)) {
+          throw new FeeBalanceError('Contract is paused', 'CONTRACT_PAUSED');
+        }
+        throw new FeeBalanceError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
+      }
+
+      const successSim = simResult as SorobanRpc.Api.SimulateTransactionSuccessResponse;
+      const retval = successSim.result?.retval;
+      if (!retval) {
+        span.setAttribute('stellar.fee_balance', '0');
+        return 0n;
+      }
+
+      const balance = scValToNative(retval) as bigint;
+      span.setAttribute('stellar.fee_balance', balance.toString());
+      return balance;
+    } catch (err) {
+      span.recordException(err as Error);
+      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+      span.setAttribute('error.type', (err as Error).name);
+      throw err;
+    } finally {
+      span.end();
+    }
+  });
+}
