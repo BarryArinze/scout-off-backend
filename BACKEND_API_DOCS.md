@@ -6,6 +6,7 @@ All endpoints are served from the base URL configured via `PORT` (default: `4000
 
 ## Table of Contents
 
+- [API Versioning](#api-versioning)
 - [Authentication](#authentication)
 - [Endpoints](#endpoints)
   - [Health](#health)
@@ -16,6 +17,62 @@ All endpoints are served from the base URL configured via `PORT` (default: `4000
   - [Admin](#admin)
 - [Stubbed Routes](#stubbed-routes)
 - [Error Format](#error-format)
+
+---
+
+## API Versioning
+
+The platform supports two stable API versions. All routes are available under multiple prefixes:
+
+| Prefix     | Description                                  |
+| ---------- | -------------------------------------------- |
+| `/api`     | Unversioned alias (maps to v1; **deprecated** in production) |
+| `/api/v1`  | Stable v1 — use this for all new integrations |
+| `/api/v2`  | Stable v2 — currently identical to v1; new v2-only behaviour will be introduced here |
+
+### Selecting a version
+
+**URL prefix (recommended)**
+
+```bash
+# v1
+curl http://localhost:4000/api/v1/players
+
+# v2
+curl http://localhost:4000/api/v2/players
+```
+
+**`API-Version` request header (alternative)**
+
+Send `API-Version: 2` on any unversioned `/api/` path to be routed to v2 handlers:
+
+```bash
+curl -H "API-Version: 2" http://localhost:4000/api/players
+```
+
+### `API-Version` response header
+
+Every response from an `/api/` path includes an `API-Version` response header indicating which version actually handled the request:
+
+```
+API-Version: 1
+```
+
+or
+
+```
+API-Version: 2
+```
+
+### Deprecation policy
+
+Calling the bare `/api/` prefix (without `/v1` or `/v2`) in a **production** environment emits a `warn`-level log entry:
+
+```
+[deprecation] Unversioned /api/ path called: GET /api/players — prefer /api/v1/ or /api/v2/. Unversioned paths will be removed in a future release.
+```
+
+Clients should migrate to `/api/v1/` to suppress this warning and prepare for the eventual removal of the unversioned alias.
 
 ---
 
@@ -372,6 +429,71 @@ curl -X GET "http://localhost:4000/api/scouts/GSCOUT1EXAMPLEWALLETXXXXXXXXXXXXXX
 ```
 
 > ⚠️ **Stubbed** — contact data is read from indexed contract events; no write endpoint yet.
+
+---
+
+#### `GET /api/scouts/:wallet/payments`
+
+Payment history for a scout, combining contact unlock payments and subscription payments. Only the owning scout or an admin may call this endpoint. **Requires Bearer auth (scout role).**
+
+**Query params**
+
+| Param      | Type    | Required | Description                                                                                  |
+| ---------- | ------- | -------- | -------------------------------------------------------------------------------------------- |
+| `type`     | string  | ❌       | Filter by payment type: `subscription` or `contact_unlock`                                   |
+| `from`     | string  | ❌       | ISO 8601 start date (inclusive)                                                              |
+| `to`       | string  | ❌       | ISO 8601 end date (inclusive)                                                                |
+| `page`     | integer | ❌       | Page number (default: `1`)                                                                   |
+| `pageSize` | integer | ❌       | Results per page (default: `50`, minimum: `1`, maximum: `100`)                               |
+| `format`   | string  | ❌       | Response format: `json` (default) or `csv` — when `csv`, returns a downloadable CSV file    |
+
+**Response `200` (JSON)**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "tx-abc123",
+      "type": "contact_unlock",
+      "amount_xlm": "5",
+      "player_id": "player-xyz",
+      "tier": null,
+      "tx_hash": "tx-abc123",
+      "created_at": "2024-06-01T00:00:00.000Z",
+      "transactionId": "tx-abc123",
+      "amount": "5",
+      "token": "XLM",
+      "timestamp": "2024-06-01T00:00:00.000Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "pageSize": 50
+}
+```
+
+**Response `200` (CSV)** — `Content-Type: text/csv; Content-Disposition: attachment; filename="payments.csv"`
+
+```csv
+id,type,amount_xlm,player_id,tier,tx_hash,created_at
+"tx-abc123","contact_unlock","5","player-xyz","","tx-abc123","2024-06-01T00:00:00.000Z"
+```
+
+**Error `403`** — JWT wallet does not match the `:wallet` path parameter.
+
+**Example requests**
+
+```bash
+# JSON — subscription payments only, date-filtered
+curl "http://localhost:4000/api/scouts/GSCOUT.../payments?type=subscription&from=2024-01-01&to=2024-12-31" \
+  -H "Authorization: Bearer <scout-jwt>"
+
+# CSV export
+curl "http://localhost:4000/api/scouts/GSCOUT.../payments?format=csv" \
+  -H "Authorization: Bearer <scout-jwt>" \
+  -o payments.csv
+```
 
 ---
 

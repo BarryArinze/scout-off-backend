@@ -232,3 +232,4 @@ export function isDevelopment(): boolean { return config.nodeEnv === 'developmen
 /** Route prefix constants for API versioning */
 export const API_PREFIX = process.env.API_PREFIX ?? '/api';
 export const API_V1_PREFIX = process.env.API_V1_PREFIX ?? '/api/v1';
+export const API_V2_PREFIX = process.env.API_V2_PREFIX ?? '/api/v2';
