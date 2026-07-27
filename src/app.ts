@@ -100,11 +100,27 @@ app.use(securityHeaders);
 app.use(responseTime);
 // Set X-API-Version on every response before route handlers run
 app.use(apiVersion);
-// Parse API-Version header and emit deprecation warnings for bare /api/ paths
-app.use(versionRouting);
-// Configure Express body parser with JSON payload size limit
-// Returns 413 Payload Too Large if exceeded
-app.use(express.json({ limit: config.bodyLimit.json }));
+// Configure Express body parser with per-route JSON payload size limits.
+// Upload endpoints (player registration, milestone evidence) accept larger payloads.
+// Auth endpoints are restricted to prevent DoS via large JWT bodies.
+// All other routes use the global JSON_PAYLOAD_LIMIT (default 1 MB).
+const uploadJsonParser = express.json({ limit: config.bodyLimit.upload });
+const authJsonParser = express.json({ limit: config.bodyLimit.auth });
+const defaultJsonParser = express.json({ limit: config.bodyLimit.json });
+
+const UPLOAD_PATHS = new Set([
+  '/api/players/register', '/api/v1/players/register',
+  '/api/validators/milestone', '/api/v1/validators/milestone',
+]);
+const AUTH_PATHS = new Set(['/auth/token', '/auth/challenge']);
+
+app.use((req, res, next) => {
+  if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
+    if (UPLOAD_PATHS.has(req.path)) return uploadJsonParser(req, res, next);
+    if (AUTH_PATHS.has(req.path)) return authJsonParser(req, res, next);
+  }
+  defaultJsonParser(req, res, next);
+});
 app.use(requestLogger);
 // Collect per-route request counts, latency, and error counts for /metrics.
 app.use(metricsMiddleware);

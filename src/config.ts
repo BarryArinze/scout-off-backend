@@ -172,6 +172,10 @@ const config = {
   bodyLimit: {
     // Maximum JSON payload size (default: 1MB)
     json: process.env.JSON_PAYLOAD_LIMIT ?? '1mb',
+    // Upload endpoints (player registration, milestone evidence) accept larger payloads (default: 10MB)
+    upload: process.env.UPLOAD_PAYLOAD_LIMIT ?? '10mb',
+    // Auth endpoints are restricted to small payloads to prevent DoS (default: 1KB)
+    auth: '1kb',
   },
   corsAllowedOrigins,
   allowedOrigins: corsAllowedOrigins,

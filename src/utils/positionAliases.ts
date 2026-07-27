@@ -18,6 +18,8 @@ export const defaultPositionAliases: PositionAliasMap = {
   // Forwards
   fw: 'forward',
   fwd: 'forward',
+  st: 'forward',
+  cf: 'forward',
   striker: 'forward',
   forward: 'forward',
 
@@ -26,11 +28,24 @@ export const defaultPositionAliases: PositionAliasMap = {
   mid: 'midfielder',
   midfield: 'midfielder',
   midfielder: 'midfielder',
+  cm: 'midfielder',
+  dm: 'midfielder',
+  am: 'midfielder',
+  cdm: 'midfielder',
+  cam: 'midfielder',
+  lm: 'midfielder',
+  rm: 'midfielder',
 
   // Defenders
   df: 'defender',
   def: 'defender',
   defender: 'defender',
+  cb: 'defender',
+  lb: 'defender',
+  rb: 'defender',
+  lwb: 'defender',
+  rwb: 'defender',
+  sw: 'defender',
 
   // Goalkeepers
   gk: 'goalkeeper',

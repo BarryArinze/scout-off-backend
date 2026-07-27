@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
-import { queryEvents, getEventsCount, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow } from '../db';
+import { queryEvents, countEventsFiltered, getEventsPage, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow } from '../db';
 import { getAllValidators, insertValidator, revokeValidatorRow, getValidatorByWallet } from '../services/indexer';
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { logAuditEvent } from '../services/audit';
@@ -259,37 +259,108 @@ export const adminDateRangeSchema = z.object({
   { message: 'startDate must not be after endDate' }
 );
 
-const paginationSchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).optional(),
-  offset: z.coerce.number().int().min(0).optional(),
-  page: z.coerce.number().int().min(1).optional(),
-  pageSize: z.coerce.number().int().min(1).max(100).optional(),
-});
+/**
+ * Zod schema for all query parameters accepted by GET /api/admin/events.
+ *
+ * Supports two pagination styles for backwards compatibility:
+ *   - Legacy:  ?limit=N&offset=M   (max limit 100, offset >= 0)
+ *   - Modern:  ?page=N&pageSize=N  (max pageSize 200, page >= 1)
+ *
+ * Date-range filtering via ?startDate / ?endDate (ISO 8601) or the shorter
+ * aliases ?from / ?to are both accepted and normalised to startDate/endDate.
+ */
+const eventsQuerySchema = z
+  .object({
+    // ── date-range ─────────────────────────────────────────────────────────
+    startDate: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'startDate must be a valid ISO 8601 date' })
+      .optional(),
+    endDate: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'endDate must be a valid ISO 8601 date' })
+      .optional(),
+    from: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'from must be a valid ISO 8601 date' })
+      .optional(),
+    to: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'to must be a valid ISO 8601 date' })
+      .optional(),
+    // ── event type ─────────────────────────────────────────────────────────
+    eventType: z.string().optional(),
+    // ── legacy pagination (limit / offset) ─────────────────────────────────
+    limit: z.coerce.number().int().min(1).max(100).optional(),
+    offset: z.coerce.number().int().min(0).optional(),
+    // ── modern pagination (page / pageSize) ────────────────────────────────
+    page: z.coerce.number().int().min(1).optional(),
+    pageSize: z.coerce.number().int().min(1).max(200).optional(),
+  })
+  .refine(
+    (d) => {
+      const start = d.startDate ?? d.from;
+      const end = d.endDate ?? d.to;
+      if (start && end) return new Date(start) <= new Date(end);
+      return true;
+    },
+    { message: 'startDate must not be after endDate' },
+  );
 
 /** GET /api/admin/events */
 export async function getAllEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { startDate, endDate, eventType } = req.query as {
-      startDate?: Date;
-      endDate?: Date;
-      eventType?: string;
-    };
-    const { limit: requestedLimit, offset: requestedOffset, page, pageSize } = req.query as {
-      limit?: number;
-      offset?: number;
-      page?: number;
-      pageSize?: number;
-    };
-    const limit = requestedLimit ?? pageSize ?? 20;
-    const offset = requestedOffset ?? ((page ?? 1) - 1) * limit;
+    const parsed = eventsQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    const { startDate, endDate, from, to, eventType, limit, offset, page, pageSize } = parsed.data;
+
+    // Resolve date range — ?from/?to are aliases for ?startDate/?endDate
+    const resolvedStart = startDate ?? from;
+    const resolvedEnd = endDate ?? to;
+    const startDateObj = resolvedStart ? new Date(resolvedStart) : undefined;
+    const endDateObj = resolvedEnd ? new Date(resolvedEnd) : undefined;
 
     const eventTypeFilter = eventType as ContractEventType | undefined;
-    let events = queryEvents(eventTypeFilter, { limit, offset }) as unknown as EventRecord[];
-    if (startDate) events = events.filter((e) => new Date(e.created_at ?? 0) >= startDate!);
-    if (endDate) events = events.filter((e) => new Date(e.created_at ?? 0) <= endDate!);
 
-    const total = getEventsCount(eventTypeFilter);
-    res.json({ success: true, data: events, total, limit, offset });
+    // Resolve pagination — legacy limit/offset takes precedence when supplied;
+    // falls back to page/pageSize, then defaults (limit=20, offset=0).
+    const resolvedLimit = limit ?? pageSize ?? 20;
+    const resolvedOffset = offset ?? ((page ?? 1) - 1) * resolvedLimit;
+
+    const filter = { type: eventTypeFilter, startDate: startDateObj, endDate: endDateObj };
+
+    // Fetch the page from the DB (date filtering happens at SQL level)
+    const rows = getEventsPage(filter, resolvedLimit, resolvedOffset);
+    const total = countEventsFiltered(filter);
+    const totalPages = Math.ceil(total / resolvedLimit);
+
+    const data = rows.map((r) => ({
+      source: '',
+      type: r.type,
+      payload: r.payload,
+      contractAddress: '',
+      created_at: r.createdAt,
+    }));
+
+    res.json({
+      success: true,
+      data,
+      total,
+      // Return both pagination styles so existing callers keep working
+      limit: resolvedLimit,
+      offset: resolvedOffset,
+      page: Math.floor(resolvedOffset / resolvedLimit) + 1,
+      pageSize: resolvedLimit,
+      totalPages,
+    });
   } catch (err) {
     next(err);
   }

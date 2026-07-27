@@ -17,9 +17,14 @@
  * This is a format-only check — no network requests are made.
  */
 
-/** Returns true when `uri` is a non-empty string with an ipfs:// or https:// scheme and meaningful content after it. */
-export function isValidEvidenceUri(uri: string): boolean {
-  if (!uri || typeof uri !== 'string') return false;
+// CIDv0: Base58-encoded SHA2-256 multihash.
+// Always "Qm" prefix + 44 base58btc characters = 46 total.
+const CID_V0_RE = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/;
+
+// CIDv1: base32 lower-case (the default encoding used by modern IPFS tooling).
+// The two common prefixes in the wild are "bafy" (dag-pb / raw) and "bafk" (sha2-512).
+// At least 50 chars total to rule out accidental short matches.
+const CID_V1_RE = /^(bafy|bafk)[2-7a-z]{46,}$/;
 
 // HTTPS URL — requires a proper hostname (no raw IPs, no localhost).
 // Rejects path traversal ("..") anywhere in the URL string.
