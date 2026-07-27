@@ -13,13 +13,41 @@
 // Service dependency: Pinata (https://pinata.cloud)
 //   Required env vars: PINATA_API_KEY, PINATA_SECRET
 //   Optional env var:  PINATA_GATEWAY (default: https://gateway.pinata.cloud)
+//
+// ── Distributed deduplication flow (multi-instance deployments) ──────────────
+//
+// pinJson() uses a two-layer dedup strategy:
+//
+//   Layer 1 — Process-local (single instance, same process):
+//     • pinJsonCache: in-memory Map keyed by content hash, TTL-bounded.
+//     • inflightPins: in-memory Map of in-flight Promises so concurrent calls
+//       within the same process share one Pinata round-trip.
+//
+//   Layer 2 — Cross-instance (multiple pods behind a load balancer):
+//     • pending_pins DB row as a distributed mutex:
+//         INSERT OR IGNORE … WHERE hash = <content-hash>
+//       Only the instance that succeeds the INSERT (changes > 0) proceeds to
+//       upload. All other instances detect the row already exists and enter a
+//       poll loop.
+//     • resolved_cid column on the same pending_pins row:
+//         The WINNING instance writes the CID into resolved_cid immediately
+//         after a successful Pinata upload (before deleting the row).
+//         LOSING instances, on observing the lock row disappear, call
+//         getResolvedCidByHash() to read the CID from the DB.  If it is
+//         present they return it directly — no duplicate upload occurs.
+//         Only if the CID is absent (e.g. the winning instance crashed before
+//         writing it) does the losing instance fall through to its own upload.
+//
+// This eliminates the original bug where a losing instance, finding its local
+// caches empty after the lock cleared, unconditionally re-uploaded the same
+// content — defeating the purpose of the lock in multi-instance deployments.
 
 import { createHash } from 'crypto';
 import axios from 'axios';
 import FormData from 'form-data';
 import config from '../config';
 import { logger } from '../utils/logger';
-import { insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts } from '../db';
+import { insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts, setPendingPinResolvedCid, getResolvedCidByHash } from '../db';
 import { observeIpfsLatency } from '../middleware/metrics';
 
 const PINATA_PIN_JSON_URL = 'https://api.pinata.cloud/pinning/pinJSONToIPFS';
@@ -156,10 +184,22 @@ export async function pinJson(body: object): Promise<string> {
             return await inflightPins.get(hash)!;
           }
           if (!isPendingPinByHash(hash)) {
+            // Lock row is gone — the winning instance finished (or crashed).
+            // Check process-local cache first (same-process concurrent callers).
             const finalCached = pinJsonCache.get(hash);
             if (finalCached && Date.now() - finalCached.timestamp < ttlMs) {
               return finalCached.cid;
             }
+            // Cross-instance path: read the CID the winning instance persisted
+            // into the resolved_cid column before it deleted the row.
+            const resolvedCid = getResolvedCidByHash(hash);
+            if (resolvedCid) {
+              logger.debug(`[ipfs] pinJson cross-instance dedup — using resolved CID from DB (hash=${hash.slice(0, 8)}…)`);
+              pinJsonCache.set(hash, { cid: resolvedCid, timestamp: Date.now() });
+              return resolvedCid;
+            }
+            // No CID found — winning instance may have crashed before writing it.
+            // Fall through to upload as a safety-net.
             break;
           }
         }
@@ -168,7 +208,12 @@ export async function pinJson(body: object): Promise<string> {
       const cid = await (async () => {
         try {
           const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
-          return res.data.IpfsHash as string;
+          const uploadedCid = res.data.IpfsHash as string;
+          // Persist the CID into the pending_pins row BEFORE deleting it so any
+          // other instance waiting in its poll loop can read it via
+          // getResolvedCidByHash() and avoid a duplicate upload.
+          setPendingPinResolvedCid(hash, uploadedCid);
+          return uploadedCid;
         } catch (err) {
           logger.critical('[ipfs] Pinata unavailable — queueing payload for retry', (err as Error).message);
           const failTime = new Date().toISOString();

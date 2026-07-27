@@ -1058,6 +1058,8 @@ export interface PendingPinRow {
   created_at: string;
   last_tried: string | null;
   hash?: string | null;
+  /** CID written by the winning upload instance once the pin succeeds. */
+  resolved_cid?: string | null;
 }
 
 export function insertPendingPin(p: {
@@ -1102,6 +1104,29 @@ export function isPendingPinByHash(hash: string): boolean {
 export function incrementPendingPinAttempts(id: number): void {
   const sql = 'UPDATE pending_pins SET attempts = attempts + 1, last_tried = ? WHERE id = ?';
   timedQuery(sql, () => getDb().prepare(sql).run(new Date().toISOString(), id));
+}
+
+/**
+ * Persist the resolved CID on a pending_pins row identified by content hash.
+ *
+ * Called by the winning upload instance immediately after a successful Pinata
+ * upload so that any other instance waiting on the same lock can retrieve the
+ * CID from the DB instead of issuing a duplicate upload.
+ */
+export function setPendingPinResolvedCid(hash: string, cid: string): void {
+  const sql = 'UPDATE pending_pins SET resolved_cid = ? WHERE hash = ?';
+  timedQuery(sql, () => getDb().prepare(sql).run(cid, hash));
+}
+
+/**
+ * Return the resolved CID for a previously completed pin identified by content
+ * hash, or null if none has been recorded yet (i.e. the winning instance is
+ * still uploading or the row no longer exists).
+ */
+export function getResolvedCidByHash(hash: string): string | null {
+  const sql = 'SELECT resolved_cid FROM pending_pins WHERE hash = ? LIMIT 1';
+  const row = timedQuery(sql, () => getDb().prepare(sql).get(hash) as { resolved_cid: string | null } | undefined);
+  return row?.resolved_cid ?? null;
 }
 
 // ─── Scout player notes helpers (#488) ───────────────────────────────────────
