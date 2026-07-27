@@ -1744,3 +1744,80 @@ export function purgeOldWebhookDeadLetters(cutoffDays: number): number {
     return info.changes;
   });
 }
+
+// ─── Fee withdrawal helpers (#fee-withdrawal) ────────────────────────────────
+
+export interface FeeWithdrawalRow {
+  id: number;
+  idempotency_key: string | null;
+  treasury_address: string;
+  amount_stroops: string;
+  tx_hash: string;
+  admin_wallet: string;
+  created_at: string;
+}
+
+/**
+ * Insert a confirmed fee withdrawal record.
+ * The UNIQUE constraint on `tx_hash` prevents duplicate rows for the same
+ * on-chain transaction; the UNIQUE constraint on `idempotency_key` provides
+ * a storage-layer guard against double-submission at the DB level (the HTTP
+ * idempotency middleware is the primary gate, but belts-and-suspenders here
+ * is valuable for audit integrity).
+ *
+ * Returns the new row id.
+ */
+export function insertFeeWithdrawal(p: {
+  idempotencyKey: string | null;
+  treasuryAddress: string;
+  amountStroops: string;
+  txHash: string;
+  adminWallet: string;
+  createdAt: string;
+}): number {
+  const sql = `
+    INSERT INTO fee_withdrawals
+      (idempotency_key, treasury_address, amount_stroops, tx_hash, admin_wallet, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `;
+  return timedQuery(sql, () => {
+    const info = getDb()
+      .prepare(sql)
+      .run(
+        p.idempotencyKey ?? null,
+        p.treasuryAddress,
+        p.amountStroops,
+        p.txHash,
+        p.adminWallet,
+        p.createdAt,
+      );
+    return info.lastInsertRowid as number;
+  });
+}
+
+/**
+ * Look up a fee withdrawal by idempotency key.
+ * Returns null when no record exists for the given key, so callers can
+ * distinguish "never submitted" from "already submitted".
+ */
+export function getFeeWithdrawalByIdempotencyKey(key: string): FeeWithdrawalRow | null {
+  const sql = `SELECT * FROM fee_withdrawals WHERE idempotency_key = ? LIMIT 1`;
+  return timedQuery(sql, () =>
+    (getDb().prepare(sql).get(key) as FeeWithdrawalRow | undefined) ?? null,
+  );
+}
+
+/**
+ * Return the most recent fee_withdrawals rows, newest-first.
+ * Used by GET /api/admin/fees to show withdrawal history.
+ */
+export function listFeeWithdrawals(limit = 50, offset = 0): FeeWithdrawalRow[] {
+  const sql = `
+    SELECT * FROM fee_withdrawals
+    ORDER BY created_at DESC
+    LIMIT ? OFFSET ?
+  `;
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).all(limit, offset) as FeeWithdrawalRow[],
+  );
+}

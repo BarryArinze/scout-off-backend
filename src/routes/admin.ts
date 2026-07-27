@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import express from 'express';
-import { getStats, getAllEvents, getFeeSummary, listValidators, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, introspectToken, revokeTokenController, reindex, getValidatorStatsEndpoint, getAuditLog, getAuditChainVerification, importValidators, getPendingActions, getPendingActionById, approvePendingAction, getAuditTrail } from '../controllers/adminController';
+import { getStats, getAllEvents, getFeeSummary, listValidators, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, withdrawFeesV2Controller, introspectToken, revokeTokenController, reindex, getValidatorStatsEndpoint, getAuditLog, getAuditChainVerification, importValidators, getPendingActions, getPendingActionById, approvePendingAction, getAuditTrail } from '../controllers/adminController';
 import { importPlayers } from '../controllers/adminPlayerImportController';
 import { adminDeactivatePlayer, adminReactivatePlayer } from '../controllers/adminPlayerDeactivationController';
 import { getFeatureFlags, updateFeatureFlag } from '../controllers/featureFlagsController';
@@ -9,6 +9,7 @@ import { listDeadLetters, replayDeadLetter, purgeOldDeadLetters, requeueDeadLett
 import { setIpReputationController, getIpReputationController } from '../controllers/ipReputationController';
 import { triggerReindex, reindexStatusHandler } from '../controllers/reindexController';
 import { requireRole } from '../middleware/auth';
+import { idempotency } from '../middleware/idempotency';
 import { ipAllowlistMiddleware } from '../middleware/ipAllowlist';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
 import { rateLimit } from '../middleware/rateLimit';
@@ -92,6 +93,33 @@ router.route('/fees')
   .get(requireRole('admin'), getFeeSummary)
   .post(requireRole('admin'), withdrawFeesController)
   .all(methodNotAllowed(['GET', 'POST', 'HEAD']));
+
+/**
+ * POST /api/admin/fees/withdraw
+ *
+ * Withdraw accumulated platform fees from the Soroban contract to a treasury
+ * address. This is the fully-specified replacement for POST /api/admin/fees.
+ *
+ * @body treasuryAddress {string} — valid Stellar public key (G…)
+ * @body amountStroops   {string|number} — positive integer ≤ contract fee balance
+ *
+ * Optional header: Idempotency-Key — prevents double-submission; cached result
+ * is returned on repeat requests with the same key (24-hour TTL).
+ *
+ * @response 200 { success: true, data: { transactionId, treasuryAddress, amountStroops, recipient, amount, token } }
+ * @response 202 { success: true, message, data: { actionId, collectedSignatures, requiredSignatures, … } }
+ *               — when ADMIN_THRESHOLD > 1 (multi-sig required)
+ * @response 400 { success: false, error } — invalid treasuryAddress or amountStroops
+ * @response 401 { success: false, error } — missing/expired token
+ * @response 403 { success: false, error } — non-admin role
+ * @response 409 { success: false, error } — no fees / contract paused / concurrent withdrawal
+ * @response 422 { success: false, error } — amountStroops exceeds contract fee balance
+ * @response 503 { success: false, error } — transient network error (retryable)
+ * @auth Bearer (admin role required)
+ */
+router.route('/fees/withdraw')
+  .post(requireRole('admin'), idempotency, withdrawFeesV2Controller)
+  .all(methodNotAllowed(['POST']));
 
 /**
  * GET /api/admin/audit

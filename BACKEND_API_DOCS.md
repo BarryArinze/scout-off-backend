@@ -718,21 +718,58 @@ curl -X GET "http://localhost:4000/api/admin/events?startDate=2024-01-01&endDate
 
 #### `GET /api/admin/events/export`
 
-Streams all indexed contract events as a CSV file. **Requires Bearer auth (admin role).**
+Streams all indexed contract events as a CSV file using a Node.js streaming pipeline. **Requires Bearer auth (admin role).**
 
-Query params (identical semantics to `GET /api/admin/events`): `startDate`, `endDate` (ISO 8601, inclusive), `eventType`.
+Unlike a buffered response, this endpoint reads rows from the `events` table one at a time via a `better-sqlite3` cursor (`Statement.iterate()`) and writes each CSV line to the HTTP response as it is produced. Memory usage is **bounded and roughly constant** regardless of table size — exporting 1 million rows consumes less than a few MB of heap.
 
-Rows are read from the database in bounded pages and written to the response as each page
-arrives, so memory usage does not grow with the number of events.
+**Query params** (identical semantics to `GET /api/admin/events`)
 
-**Response `200`** — `Content-Type: text/csv`, `Content-Disposition: attachment; filename="events.csv"`
+| Param       | Type   | Required | Description                                                    |
+| ----------- | ------ | -------- | -------------------------------------------------------------- |
+| `startDate` | string | ❌       | ISO 8601 — inclusive lower bound on the event's indexed time   |
+| `endDate`   | string | ❌       | ISO 8601 — inclusive upper bound on the event's indexed time   |
+| `eventType` | string | ❌       | Filter to a single contract event type (e.g. `player_registered`) |
+
+**Response headers**
+
+| Header               | Value                                        |
+| -------------------- | -------------------------------------------- |
+| `Content-Type`       | `text/csv`                                   |
+| `Content-Disposition`| `attachment; filename="events.csv"`          |
+| `Transfer-Encoding`  | `chunked` (set by Node.js HTTP automatically)|
+
+**Response `200`** — CSV stream, columns: `event_type`, `ledger`, `timestamp`, `payload`
+
 ```csv
 event_type,ledger,timestamp,payload
-player_registered,12345,1700000000,"{}"
+player_registered,12345,1700000000,"{""wallet"":""G...""}"
 milestone_approved,12346,1700000060,"{}"
+__EOF__,2,,
 ```
 
+The last line is always `__EOF__,<row_count>,,`. Clients should verify this line is present to detect truncated exports (e.g. caused by a dropped connection mid-stream).
+
+**CSV escaping** — fields follow RFC 4180: any value containing a comma, double-quote, or newline is wrapped in double-quotes with internal double-quotes doubled (`"` → `""`).
+
+**Backpressure** — the export loop pauses DB reads whenever the HTTP socket buffer is full (waits for the `drain` event) so a slow client cannot cause unbounded memory growth on the server.
+
+**Consistency** — the cursor holds a snapshot of the `events` table as of the first row read. Rows inserted by the background indexer after the cursor opens are excluded — no duplicates and no skipped rows within the snapshot boundary.
+
 **Response `400`** — invalid `startDate`/`endDate`, or `startDate` after `endDate`.
+
+**Example request**
+
+```bash
+# Stream all events to a local file
+curl -X GET "http://localhost:4000/api/admin/events/export" \
+  -H "Authorization: Bearer <admin-jwt>" \
+  --output events.csv
+
+# Filter by type and date range
+curl -X GET "http://localhost:4000/api/admin/events/export?eventType=player_registered&startDate=2024-01-01T00:00:00Z&endDate=2024-12-31T23:59:59Z" \
+  -H "Authorization: Bearer <admin-jwt>" \
+  --output filtered.csv
+```
 
 ---
 
@@ -761,6 +798,89 @@ Fee withdrawal history. **Requires Bearer auth (admin role).**
 ```bash
 curl -X GET "http://localhost:4000/api/admin/fees" \
   -H "Authorization: Bearer <admin-jwt>"
+```
+
+---
+
+#### `POST /api/admin/fees/withdraw`
+
+Withdraw accumulated platform fees from the Soroban contract to a treasury address. **Requires Bearer auth (admin role).**
+
+This is the fully-specified withdrawal endpoint. It queries the contract's live fee balance before submitting, enforces multi-sig when `ADMIN_THRESHOLD > 1`, prevents duplicate submissions via an idempotency key, and records every confirmed withdrawal in the `fee_withdrawals` table.
+
+**Request headers**
+
+| Header            | Required | Description                                                                 |
+| ----------------- | -------- | --------------------------------------------------------------------------- |
+| `Authorization`   | ✅       | `Bearer <admin-jwt>`                                                        |
+| `Idempotency-Key` | ❌       | Opaque string (e.g. UUID). Repeat requests with the same key return the cached result (24-hour TTL). |
+
+**Request body**
+
+| Field             | Type           | Required | Description                                                              |
+| ----------------- | -------------- | -------- | ------------------------------------------------------------------------ |
+| `treasuryAddress` | string         | ✅       | Valid Stellar public key (G…) — destination for the withdrawn fees       |
+| `amountStroops`   | string\|number | ✅       | Positive integer in stroops. Must be ≤ the contract's current fee balance |
+
+**Response `200`** — withdrawal confirmed on-chain
+
+```json
+{
+  "success": true,
+  "data": {
+    "transactionId": "abc123...",
+    "treasuryAddress": "GTREASURY...",
+    "amountStroops": "500000000",
+    "recipient": "GTREASURY...",
+    "amount": "500000000",
+    "token": "XLM"
+  }
+}
+```
+
+**Response `202`** — multi-sig required (`ADMIN_THRESHOLD > 1`); action queued for co-signing
+
+```json
+{
+  "success": true,
+  "message": "Fee withdrawal proposed, awaiting 1 more admin signature(s)",
+  "data": {
+    "actionId": "clxyz...",
+    "collectedSignatures": 1,
+    "requiredSignatures": 2,
+    "treasuryAddress": "GTREASURY...",
+    "amountStroops": "500000000"
+  }
+}
+```
+
+**Error responses**
+
+| Status | Condition                                                           |
+| ------ | ------------------------------------------------------------------- |
+| `400`  | `treasuryAddress` is not a valid Stellar public key, or `amountStroops` is missing / not a positive integer |
+| `401`  | Missing or expired Bearer token                                     |
+| `403`  | Caller does not have the `admin` role, or wallet not in `ADMIN_WALLETS` |
+| `409`  | No fees available (`NO_FEES`), contract paused (`CONTRACT_PAUSED`), or a concurrent withdrawal is already in progress |
+| `422`  | `amountStroops` exceeds the contract's current fee balance          |
+| `503`  | Transient RPC / network error — safe to retry                       |
+
+**Example requests**
+
+```bash
+# Single-admin withdrawal
+curl -X POST "http://localhost:4000/api/admin/fees/withdraw" \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -d '{ "treasuryAddress": "GTREASURY...", "amountStroops": "500000000" }'
+
+# Idempotent retry — returns the same 200 response without re-submitting
+curl -X POST "http://localhost:4000/api/admin/fees/withdraw" \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -d '{ "treasuryAddress": "GTREASURY...", "amountStroops": "500000000" }'
 ```
 
 ---
