@@ -543,34 +543,6 @@ function recordProfileViewForRequest(req: Request): void {
  * Return aggregated profile view and contact unlock analytics for the player (owner-only).
  */
 export async function getPlayerAnalytics(
-/** POST /api/players/:playerId/deactivate */
-export async function deactivatePlayerEndpoint(
-  req: Request,
-  res: Response,
-  next: NextFunction,
-): Promise<void> {
-  try {
-    const idResult = playerIdSchema.safeParse(req.params.playerId);
-    if (!idResult.success) {
-      res.status(400).json({ success: false, error: idResult.error.errors[0]?.message ?? "Invalid playerId", code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const playerId = sanitizeInput(req.params.playerId);
-    const row = getPlayerById(playerId);
-    if (!row) {
-      res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
-      return;
-    }
-    deactivatePlayer(playerId);
-    await invalidatePlayerCache(playerId);
-    res.json({ success: true, message: "Player profile deactivated successfully" });
-  } catch (err) {
-    next(err);
-  }
-}
-
-/** POST /api/players/:playerId/reactivate */
-export async function reactivatePlayerEndpoint(
   req: Request,
   res: Response,
   next: NextFunction,
@@ -614,6 +586,46 @@ export async function reactivatePlayerEndpoint(
         lastUpdated,
       },
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/players/:playerId/deactivate */
+export async function deactivatePlayerEndpoint(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const idResult = playerIdSchema.safeParse(req.params.playerId);
+    if (!idResult.success) {
+      res.status(400).json({ success: false, error: idResult.error.errors[0]?.message ?? "Invalid playerId", code: ErrorCode.VALIDATION_ERROR });
+      return;
+    }
+    const playerId = sanitizeInput(req.params.playerId);
+    const row = getPlayerById(playerId);
+    if (!row) {
+      res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
+    }
+    deactivatePlayer(playerId);
+    await invalidatePlayerCache(playerId);
+    res.json({ success: true, message: "Player profile deactivated successfully" });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/players/:playerId/reactivate */
+export async function reactivatePlayerEndpoint(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const idResult = playerIdSchema.safeParse(req.params.playerId);
+    if (!idResult.success) {
       res.status(400).json({ success: false, error: idResult.error.errors[0]?.message ?? "Invalid playerId", code: ErrorCode.VALIDATION_ERROR });
       return;
     }
