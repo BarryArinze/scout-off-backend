@@ -3,11 +3,11 @@ import { createHash } from "crypto";
 import { sanitizeInput } from "../utils/sanitizer";
 import { createId } from "@paralleldrive/cuid2";
 import { z } from "zod";
-import { CID_REGEX } from "../utils/cidValidator";
+import { isValidMetadataUri, URI_VALIDATION_ERROR } from "../utils/uriValidator";
 import { pinJson } from "../services/ipfs";
 import { serializeIpfsResult } from "../utils/ipfsSerializer";
 import {
-  getEvents,
+  queryEvents,
   getPlayerById,
   insertPlayerProfileHistory,
   queryPlayers,
@@ -18,13 +18,17 @@ import {
   getProfileViewCount,
   getUniqueViewerCount,
   getContactUnlockCount,
+  insertOrUpdatePlayer,
+  deactivatePlayer,
+  reactivatePlayer,
+  countTrialOffersByPlayer,
 } from "../db";
 
 import { queryMilestones, updateProfile } from "../services/stellar";
 import { cacheGet, cacheSet, invalidatePlayerCache } from "../services/cache";
 import { ApiResponse } from "../types";
 import { ErrorCode } from "../utils/errorCodes";
-import { getTierMeta } from "../utils/tier";
+import { getTierMeta, tierName } from "../utils/tier";
 import { validateMinTier } from "../utils/minTierValidator";
 import { normalizePosition } from "../utils/positionAliases";
 import { dispatchEventWebhook } from "../services/webhooks";
@@ -41,7 +45,8 @@ const baseRegistrationSchema = z.object({
 const metadataSchema = z.record(z.unknown());
 const metadataUriSchema = z
   .string()
-  .regex(CID_REGEX, "metadataUri must be a valid CID");
+  .min(1)
+  .refine(isValidMetadataUri, URI_VALIDATION_ERROR);
 
 export const registerSchema = z.union([
   baseRegistrationSchema.extend({ metadata: metadataSchema }),
@@ -54,10 +59,15 @@ export const filterSchema = z.object({
   region: z.string().optional(),
   position: z.string().optional(),
   minTier: z.coerce.number().int().min(0).max(3).optional(),
-  sortBy: z.enum(['tier', 'region']).optional(),
-  sortOrder: z.enum(['asc', 'desc']).default('asc'),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  /**
+   * Comma-separated list of field names to include in each player object.
+   * Unknown field names are silently ignored.
+   * When omitted, all fields are returned (backwards-compatible).
+   * Example: ?fields=player_id,position,region
+   */
+  fields: z.string().optional(),
 });
 
 /** POST /api/players/register */
@@ -65,7 +75,7 @@ export async function registerPlayer(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const parsed = registerSchema.parse(req.body);
 
@@ -89,12 +99,12 @@ export async function registerPlayer(
           });
 
     // Invalidate player search cache so new profile appears in results
-    invalidatePlayerCache();
+    await invalidatePlayerCache();
 
     // Write to DB immediately so GET /players/:playerId returns 200 without
     // waiting for the indexer to process the blockchain event (#282).
     const playerId = createId();
-    upsertPlayer({
+    insertOrUpdatePlayer({
       player_id: playerId,
       wallet: parsed.wallet,
       position: sanitizedPosition,
@@ -133,7 +143,7 @@ export async function getPlayer(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {
@@ -142,14 +152,14 @@ export async function getPlayer(
     }
     const playerId = sanitizeInput(req.params.playerId);
     const cacheKey = `players:${playerId}`;
-    let data = cacheGet<Record<string, unknown>>(cacheKey);
+    let data = await cacheGet<Record<string, unknown>>(cacheKey);
     if (!data) {
       const row = getPlayerById(playerId);
       if (!row) {
         res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
         return;
       }
-      const { tierName, tierDescription } = getTierMeta(row.progress_level as number);
+      const { tierName: tierNameMeta, tierDescription } = getTierMeta(row.progress_level as number);
       data = {
         player_id: row.player_id,
         wallet: row.wallet,
@@ -158,10 +168,21 @@ export async function getPlayer(
         metadataUri: row.metadata_uri,
         progress_level: row.progress_level,
         created_at: row.created_at,
-        tierName,
+        is_active: row.is_active,
+        tierName: tierNameMeta,
         tierDescription,
+        progress_tier_name: tierName(row.progress_level as number),
       };
-      cacheSet(cacheKey, data);
+      await cacheSet(cacheKey, data);
+    }
+
+    if (data.is_active === 0) {
+      const isOwner = req.account && (req.account === data.player_id || req.account === data.wallet);
+      const isAdmin = req.role === 'admin';
+      if (!isOwner && !isAdmin) {
+        res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+        return;
+      }
     }
 
     const etag = `"${createHash("sha1").update(JSON.stringify(data)).digest("hex")}"`;
@@ -175,6 +196,10 @@ export async function getPlayer(
     // Record profile view (non-blocking, after response is sent)
     // This is synchronous but happens after the response is queued
     recordProfileViewForRequest(req);
+    // offerCount is appended after the ETag digest so it doesn't bust the cache
+    // every time an offer is submitted, while still being fresh on each request.
+    const offerCount = countTrialOffersByPlayer(String(data.player_id));
+    res.json({ success: true, data: { ...data, offerCount } });
   } catch (err) {
     next(err);
   }
@@ -188,25 +213,51 @@ interface FilterPlayersResult {
   pages: number;
 }
 
+/**
+ * Return a copy of `obj` containing only the keys present in `allowedFields`.
+ * If `allowedFields` is null/empty the original object is returned unchanged.
+ */
+function projectFields(
+  obj: Record<string, unknown>,
+  allowedFields: Set<string>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const key of allowedFields) {
+    if (Object.prototype.hasOwnProperty.call(obj, key)) {
+      result[key] = obj[key];
+    }
+  }
+  return result;
+}
+
 /** GET /api/players?region=&position=&minTier= */
 export async function filterPlayers(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const tierResult = validateMinTier(req.query.minTier);
     if (!tierResult.valid) {
-      res.status(400).json({ success: false, error: tierResult.error, code: ErrorCode.VALIDATION_ERROR });
+      // minTier is a valid integer but outside the 0–3 range → semantic error (422).
+      // A non-integer or wrong type is caught by Zod as a format error (400).
+      const isRangeError = typeof tierResult.error === 'string' && tierResult.error.includes('out of range');
+      res.status(isRangeError ? 422 : 400).json({ success: false, error: tierResult.error, code: ErrorCode.VALIDATION_ERROR });
       return;
     }
     const minTier = tierResult.tier;
-    const { region, position, page, pageSize } = filterSchema.parse(req.query);
+    const { region, position, page, pageSize, fields } = filterSchema.parse(req.query);
     const sanitizedRegion = region ? sanitizeInput(region) : undefined;
     const sanitizedPosition = position ? sanitizeInput(position) : undefined;
     const normalizedPosition = sanitizedPosition
       ? normalizePosition(sanitizedPosition)
       : undefined;
+
+    // Parse the ?fields= param into a Set for O(1) lookup.
+    // An empty param or absent param means "return all fields".
+    const requestedFields = fields
+      ? new Set(fields.split(',').map((f) => f.trim()).filter(Boolean))
+      : null;
 
     const cacheKey = `players:list:${JSON.stringify({
       region: sanitizedRegion ?? null,
@@ -216,9 +267,13 @@ export async function filterPlayers(
       pageSize,
     })}`;
 
-    const cached = cacheGet<FilterPlayersResult>(cacheKey);
+    const cached = await cacheGet<FilterPlayersResult>(cacheKey);
     if (cached) {
-      res.json({ success: true, ...cached });
+      // Apply field projection to the cached result when requested
+      const responseData = requestedFields
+        ? cached.data.map((p) => projectFields(p, requestedFields))
+        : cached.data;
+      res.json({ success: true, ...cached, data: responseData });
       return;
     }
 
@@ -244,11 +299,12 @@ export async function filterPlayers(
       metadataUri: row.metadata_uri,
       progress_level: row.progress_level,
       created_at: row.created_at,
+      progress_tier_name: tierName(row.progress_level as number),
       ...enrichPlayerResult(row.progress_level),
     }));
 
     const result: FilterPlayersResult = { data: enriched, total, page, pageSize, pages };
-    cacheSet(cacheKey, result);
+    await cacheSet(cacheKey, result);
 
     const scoutWallet = req.account ?? 'anonymous';
     recordAudit(scoutWallet, 'player_search', {
@@ -260,7 +316,12 @@ export async function filterPlayers(
       resultCount: total,
     });
 
-    res.json({ success: true, ...result });
+    // Apply field projection after caching the full result so the cache always
+    // stores all fields (enabling different ?fields= requests to reuse it).
+    const responseData = requestedFields
+      ? enriched.map((p) => projectFields(p, requestedFields))
+      : enriched;
+    res.json({ success: true, ...result, data: responseData });
   } catch (err) {
     next(err);
   }
@@ -276,7 +337,7 @@ export async function updatePlayer(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const playerId = sanitizeInput(req.params.playerId);
     const parsed = updatePlayerSchema.parse(req.body);
@@ -295,7 +356,7 @@ export async function updatePlayer(
     });
 
     // Bust the single-player cache so the next GET reflects the update.
-    invalidatePlayerCache(playerId);
+    await invalidatePlayerCache(playerId);
 
     res.status(200).json({
       success: true,
@@ -319,7 +380,7 @@ export async function getPlayerMilestones(
   req: Request,
   res: Response,
   next: NextFunction,
-) {
+): Promise<void> {
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {
@@ -327,6 +388,20 @@ export async function getPlayerMilestones(
       return;
     }
     const playerId = sanitizeInput(req.params.playerId);
+
+    const player = getPlayerById(playerId);
+    if (!player) {
+      res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
+    }
+    if (player.is_active === 0) {
+      const isOwner = req.account && (req.account === player.player_id || req.account === player.wallet);
+      const isAdmin = req.role === 'admin';
+      if (!isOwner && !isAdmin) {
+        res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+        return;
+      }
+    }
 
     const parsed = milestonesQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -338,7 +413,7 @@ export async function getPlayerMilestones(
       return;
     }
     const { sortBy, order } = parsed.data;
-    const indexedMilestones = getEvents("milestone_approved")
+    const indexedMilestones = queryEvents("milestone_approved")
       .filter((e) => e.payload.player_id === playerId)
       .map((e) => ({ ...e.payload }));
     const onChainMilestones = await queryMilestones(playerId);
@@ -418,6 +493,34 @@ function recordProfileViewForRequest(req: Request): void {
  * Return aggregated profile view and contact unlock analytics for the player (owner-only).
  */
 export async function getPlayerAnalytics(
+/** POST /api/players/:playerId/deactivate */
+export async function deactivatePlayerEndpoint(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const idResult = playerIdSchema.safeParse(req.params.playerId);
+    if (!idResult.success) {
+      res.status(400).json({ success: false, error: idResult.error.errors[0]?.message ?? "Invalid playerId", code: ErrorCode.VALIDATION_ERROR });
+      return;
+    }
+    const playerId = sanitizeInput(req.params.playerId);
+    const row = getPlayerById(playerId);
+    if (!row) {
+      res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
+    }
+    deactivatePlayer(playerId);
+    await invalidatePlayerCache(playerId);
+    res.json({ success: true, message: "Player profile deactivated successfully" });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/** POST /api/players/:playerId/reactivate */
+export async function reactivatePlayerEndpoint(
   req: Request,
   res: Response,
   next: NextFunction,
@@ -461,6 +564,18 @@ export async function getPlayerAnalytics(
         lastUpdated,
       },
     });
+      res.status(400).json({ success: false, error: idResult.error.errors[0]?.message ?? "Invalid playerId", code: ErrorCode.VALIDATION_ERROR });
+      return;
+    }
+    const playerId = sanitizeInput(req.params.playerId);
+    const row = getPlayerById(playerId);
+    if (!row) {
+      res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
+    }
+    reactivatePlayer(playerId);
+    await invalidatePlayerCache(playerId);
+    res.json({ success: true, message: "Player profile reactivated successfully" });
   } catch (err) {
     next(err);
   }

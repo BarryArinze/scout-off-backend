@@ -149,8 +149,9 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
   });
   if (!clientSigned) throw new Error('Invalid challenge signature');
 
-  // Issue JWT with client account and role
-  const token = jwt.sign({ sub: clientAccountId, role: role ?? 'player' }, config.jwtSecret, {
+  // Issue JWT with client account, role, and a unique JTI for revocation support
+  const jti = crypto.randomUUID();
+  const token = jwt.sign({ sub: clientAccountId, role: role ?? 'player', jti }, config.jwtSecret, {
     expiresIn: TOKEN_TTL_SECONDS,
   });
 

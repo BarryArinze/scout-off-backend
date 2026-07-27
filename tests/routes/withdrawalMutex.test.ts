@@ -19,7 +19,7 @@ jest.mock('../../src/services/stellar', () => ({
 }));
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
 }));
 
 jest.mock('../../src/services/indexer', () => ({

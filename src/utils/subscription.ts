@@ -1,4 +1,4 @@
-import { getEvents } from '../db';
+import { queryEvents } from '../db';
 import { isSubscribed } from '../services/stellar';
 import { SubscriptionTier } from '../types';
 
@@ -34,7 +34,7 @@ export async function getActiveSubscription(scoutWallet: string): Promise<Active
   }
 
   // Step 2 — indexed events fallback
-  const subs = getEvents('scout_subscribed').filter((e) => e.payload.scout === scoutWallet);
+  const subs = queryEvents('scout_subscribed').filter((e) => e.payload.scout === scoutWallet);
   const latest = subs.at(-1);
   if (!latest) {
     return { active: false, tier: null, expiresAt: null };
@@ -46,4 +46,24 @@ export async function getActiveSubscription(scoutWallet: string): Promise<Active
   const tier = ((latest.payload.tier as string | undefined) ?? 'basic') as SubscriptionTier;
 
   return { active, tier: active ? tier : null, expiresAt };
+}
+
+/** Default grace period in hours after subscription expiry before access is revoked. */
+export const SUBSCRIPTION_GRACE_PERIOD_HOURS = 24;
+
+/**
+ * Determines if a subscription is still considered active, accounting for a
+ * grace period after the nominal expiry timestamp.
+ *
+ * @param expiresAt - Unix-second expiry timestamp, or null for no subscription.
+ * @param gracePeriodHours - Hours of grace period after expiry (default: SUBSCRIPTION_GRACE_PERIOD_HOURS).
+ * @returns true if the subscription is active or within the grace period.
+ */
+export function isActive(
+  expiresAt: number | null,
+  gracePeriodHours: number = SUBSCRIPTION_GRACE_PERIOD_HOURS,
+): boolean {
+  if (expiresAt === null) return false;
+  const now = Math.floor(Date.now() / 1000);
+  return now <= expiresAt + gracePeriodHours * 3600;
 }

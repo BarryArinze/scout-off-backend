@@ -17,7 +17,7 @@ const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 
 jest.mock('../../src/db', () => ({
   // shared scout router dependencies
-  getEvents: jest.fn(),
+  queryEvents: jest.fn(),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn(),
   dbRenewSubscription: jest.fn(),
@@ -67,15 +67,22 @@ jest.mock('../../src/services/indexer', () => ({
   getTrialOffers: jest.fn().mockReturnValue([]),
 }));
 
+jest.mock('../../src/services/featureFlags', () => ({
+  FeatureFlags: { SAVED_SEARCHES: 'saved_searches' },
+  isFeatureEnabled: jest.fn().mockReturnValue(true),
+}));
+
 import {
   insertSavedSearch,
   getSavedSearchesByScout,
   deleteSavedSearch,
 } from '../../src/db';
+import { isFeatureEnabled } from '../../src/services/featureFlags';
 
 const mockInsertSavedSearch     = insertSavedSearch     as jest.Mock;
 const mockGetSavedSearches      = getSavedSearchesByScout as jest.Mock;
 const mockDeleteSavedSearch     = deleteSavedSearch     as jest.Mock;
+const mockIsFeatureEnabled      = isFeatureEnabled      as jest.Mock;
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -507,6 +514,52 @@ describe('cross-scout authorization denial', () => {
       .set('Authorization', `Bearer ${scoutBToken}`);
 
     expect(res.status).toBe(403);
+    expect(mockDeleteSavedSearch).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Feature flag gating (#494) ──────────────────────────────────────────────
+
+describe('saved searches feature flag (#494)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockIsFeatureEnabled.mockReturnValue(true);
+  });
+
+  it('returns 404 when the saved_searches flag is disabled (POST)', async () => {
+    mockIsFeatureEnabled.mockReturnValue(false);
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/saved-searches`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ name: 'Blocked', filters: VALID_FILTERS });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('FEATURE_DISABLED');
+    expect(mockInsertSavedSearch).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the saved_searches flag is disabled (GET)', async () => {
+    mockIsFeatureEnabled.mockReturnValue(false);
+
+    const res = await request(app)
+      .get(`/api/scouts/${SCOUT_A}/saved-searches`)
+      .set('Authorization', `Bearer ${scoutAToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('FEATURE_DISABLED');
+    expect(mockGetSavedSearches).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the saved_searches flag is disabled (DELETE)', async () => {
+    mockIsFeatureEnabled.mockReturnValue(false);
+
+    const res = await request(app)
+      .delete(`/api/scouts/${SCOUT_A}/saved-searches/1`)
+      .set('Authorization', `Bearer ${scoutAToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('FEATURE_DISABLED');
     expect(mockDeleteSavedSearch).not.toHaveBeenCalled();
   });
 });

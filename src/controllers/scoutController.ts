@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import {
-  getEvents,
+  queryEvents,
   getPlayerById,
   getLatestSubscription,
   insertSubscription,
@@ -29,12 +29,9 @@ import config from '../config';
 import { ErrorCode } from '../utils/errorCodes';
 import { insertTrialOffer, getTrialOffers } from '../services/indexer';
 import { invokeContract, strVal } from '../utils/contract';
+import { isValidEvidenceUri } from '../utils/uriValidator';
 
 // ─── Validation schemas ────────────────────────────────────────────────────────
-
-function isValidEvidenceUri(uri: string): boolean {
-  return uri.startsWith('ipfs://') || uri.startsWith('https://');
-}
 
 export const trialOfferSchema = z.object({
   playerId: z.string().min(1),
@@ -84,7 +81,7 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
   if (localSub && localSub.expires_at > graceThreshold) return true;
 
   // 3. Indexed scout_subscribed events (fallback for pre-table records)
-  const subs = getEvents('scout_subscribed').filter((e) => e.payload.scout === scoutWallet);
+  const subs = queryEvents('scout_subscribed').filter((e) => e.payload.scout === scoutWallet);
   const latestSub = subs.at(-1);
   if (latestSub) {
     const expiresAt = latestSub.payload.subscription_expiry as number;
@@ -98,7 +95,7 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
 // ─── GET /api/scouts/:wallet/subscription ─────────────────────────────────────
 
 /** GET /api/scouts/:wallet/subscription */
-export async function getSubscription(req: Request, res: Response, next: NextFunction) {
+export async function getSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     if (!isValidStellarAddress(wallet)) {
@@ -149,7 +146,7 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
     }
 
     // Fall back to indexed events
-    const subs = getEvents('scout_subscribed').filter((e) => e.payload.scout === wallet);
+    const subs = queryEvents('scout_subscribed').filter((e) => e.payload.scout === wallet);
     const latest = subs.at(-1);
     if (!latest) {
       res.json({
@@ -180,7 +177,7 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
 // ─── POST /api/scouts/:wallet/subscribe ───────────────────────────────────────
 
 /** POST /api/scouts/:wallet/subscribe — new subscription */
-export async function subscribe(req: Request, res: Response, next: NextFunction) {
+export async function subscribe(req: Request, res: Response, next: NextFunction): Promise<void> {
   const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
   try {
     const { wallet } = req.params;
@@ -205,7 +202,11 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
       return;
     }
     const { tier, duration } = parsed.data;
-    const result = await purchaseSubscription(wallet, tier, duration);
+
+    // Use in-flight lock to prevent concurrent subscription requests for the same wallet
+    const result = await inFlightLock.withLock(`subscribe:${wallet}`, async () => {
+      return await purchaseSubscription(wallet, tier, duration);
+    });
 
     // Persist locally
     insertSubscription({
@@ -237,7 +238,7 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
  * If none exists, behaves like POST (creates new).
  * Returns 200 for renewal, 201 for new subscription.
  */
-export async function renewSubscription(req: Request, res: Response, next: NextFunction) {
+export async function renewSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     if (req.account !== wallet) {
@@ -296,7 +297,7 @@ export async function renewSubscription(req: Request, res: Response, next: NextF
  * Returns 403 if the contract rejects the caller as unauthorized.
  * Records cancellation on-chain first; DB row is only updated after confirmation.
  */
-export async function cancelSubscription(req: Request, res: Response, next: NextFunction) {
+export async function cancelSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     if (req.account !== wallet) {
@@ -345,7 +346,7 @@ export async function cancelSubscription(req: Request, res: Response, next: Next
 // ─── GET /api/scouts/:wallet/contacts ─────────────────────────────────────────
 
 /** GET /api/scouts/:wallet/contacts */
-export async function getUnlockedContacts(req: Request, res: Response, next: NextFunction) {
+export async function getUnlockedContacts(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     const { playerId } = req.query as { playerId?: string };
@@ -381,7 +382,7 @@ export async function getUnlockedContacts(req: Request, res: Response, next: Nex
 // ─── POST /api/scouts/:wallet/contacts/:playerId/unlock ───────────────────────
 
 /** POST /api/scouts/:wallet/contacts/:playerId/unlock */
-export async function unlockContact(req: Request, res: Response, next: NextFunction) {
+export async function unlockContact(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet, playerId } = req.params;
     if (!isValidStellarAddress(wallet)) {
@@ -399,13 +400,33 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
       return;
     }
 
+    // Idempotent: a player already unlocked by this scout must not be charged again.
+    // Return the cached contact details so the client can use them immediately.
+    if (hasContactUnlock(wallet, playerId)) {
+      logger.info(`[scout] action=unlock_contact_already_unlocked scout=${wallet} playerId=${playerId}`);
+      const player = getPlayerById(playerId);
+      res.json({
+        success: true,
+        data: {
+          alreadyUnlocked: true,
+          ...(player && {
+            playerId: player.player_id,
+            wallet: player.wallet,
+            email: `${player.player_id}@example.com`,
+            phone: '+1-555-0199',
+          }),
+        },
+      });
+      return;
+    }
+
     logger.info(`[scout] action=unlock_contact_attempt scout=${wallet} playerId=${playerId}`);
 
     const result = await submitContactPayment(wallet, playerId);
     insertContactUnlock({
       scout_wallet: wallet,
       player_id: playerId,
-      tx_hash: (result as { txHash?: string }).txHash ?? '',
+      tx_hash: result.transactionId,
       unlocked_at: Math.floor(Date.now() / 1000),
     });
     res.json({ success: true, data: result });
@@ -421,7 +442,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
 // ─── GET/POST /api/scouts/:wallet/trial-offers (#285) ──────────────────────────
 
 /** GET /api/scouts/:wallet/trial-offers — on-chain trial offer event history */
-export async function listTrialOffers(req: Request, res: Response, next: NextFunction) {
+export async function listTrialOffers(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     res.json({ success: true, data: getTrialOffers(wallet) });
@@ -431,7 +452,7 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
 }
 
 /** POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally */
-export async function createTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
@@ -449,7 +470,7 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
 // ─── POST /api/scouts/:wallet/trial-offer ─────────────────────────────────────
 
 /** POST /api/scouts/:wallet/trial-offer */
-export async function submitTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function submitTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
@@ -460,7 +481,7 @@ export async function submitTrialOffer(req: Request, res: Response, next: NextFu
       return;
     }
 
-    const playerExists = getEvents('player_registered').some((e) => e.payload.player_id === playerId);
+    const playerExists = queryEvents('player_registered').some((e) => e.payload.player_id === playerId);
     if (!playerExists) {
       res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
       return;
@@ -492,7 +513,7 @@ export async function submitTrialOffer(req: Request, res: Response, next: NextFu
 // ─── GET /api/scouts/:wallet/payments ─────────────────────────────────────────
 
 /** GET /api/scouts/:wallet/payments — payment history */
-export async function getPaymentHistory(req: Request, res: Response, next: NextFunction) {
+export async function getPaymentHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     if (!isValidStellarAddress(wallet)) {
@@ -505,7 +526,7 @@ export async function getPaymentHistory(req: Request, res: Response, next: NextF
     }
     const { from, to } = req.query as { from?: string; to?: string };
 
-    let payments = getEvents('contact_unlocked')
+    let payments = queryEvents('contact_unlocked')
       .filter((e) => e.payload.scout === wallet)
       .map((e) => ({
         transactionId: (e.payload.tx_hash as string | undefined) ?? null,
@@ -530,7 +551,7 @@ export async function getPaymentHistory(req: Request, res: Response, next: NextF
 }
 
 /** GET /api/scouts/:wallet/contacts/:playerId */
-export async function getContactDetails(req: Request, res: Response, next: NextFunction) {
+export async function getContactDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet, playerId } = req.params;
     if (req.account !== wallet) {

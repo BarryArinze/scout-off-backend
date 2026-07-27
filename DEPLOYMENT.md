@@ -4,6 +4,9 @@
 
 Copy `.env.example` to `.env` and fill in all required values before starting the server.
 
+> [!NOTE]
+> For instructions and policies on managing, securing, and rotating long-lived secrets (such as JWT secrets, Pinata credentials, and platform signing keys), see the [Secrets Rotation Policy](docs/secrets-rotation.md).
+
 | Variable | Required | Notes |
 |---|---|---|
 | `CONTRACT_ID` | ✅ | Deployed Soroban contract address |
@@ -12,16 +15,131 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `SOROBAN_RPC_URL` | ✅ | e.g. `https://soroban-testnet.stellar.org` |
 | `NETWORK` | ✅ | `testnet` or `mainnet` |
 | `PINATA_API_KEY` / `PINATA_SECRET` | ✅ | IPFS upload credentials |
-| `DB_PATH` | — | SQLite file path (default: `scout-off.db`) |
+| `DB_DRIVER` | — | Database driver: `sqlite` (default) or `postgres` |
+| `DB_PATH` | — | SQLite file path (default: `scout-off.db`); only used when `DB_DRIVER=sqlite` |
+| `DATABASE_URL` | — (required when `DB_DRIVER=postgres`) | PostgreSQL connection string, e.g. `postgresql://user:pass@host:5432/db` |
+| `SSE_KEEPALIVE_INTERVAL_MS` | — | Keep-alive ping interval for SSE connections, in ms (default: `15000`) |
+| `SSE_MAX_CONNECTIONS` | — | Max concurrent SSE connections; `0` = unlimited (default: `0`) |
 | `PORT` | — | API port (default: `4000`) |
 | `LOG_LEVEL` | — | `debug` / `info` / `warn` / `error` |
 | `LOG_SKIP_PATHS` | — | Comma-separated paths requestLogger silences (default: health + metrics probes) |
 | `LOG_SAMPLE_RATE` | — | Float 0–1 sample rate for non-skipped paths (default: `1` = log all) |
-| `STELLAR_HEALTH_CHECK_ENABLED` | — | Set `false` in staging to skip Stellar RPC check |
-| `TRUSTED_PROXY_COUNT` | — | Number of trusted reverse proxies (default: `1`) |
+| `STELLAR_HEALTH_CHECK` | — | Set `false` in staging to skip Stellar RPC check |
+| `TRUSTED_PROXY_COUNT` | — | Number of trusted reverse proxies (default: `1`). Set to the exact number of proxy hops between the internet and this server. **Fail-safe**: if the observed `X-Forwarded-For` chain has fewer entries than this value implies, `extractClientIp()` falls back to the raw socket address rather than trusting the attacker-controlled leftmost value. A chain shorter than expected (direct connection bypassing a proxy, or a client crafting a short header) will therefore appear to come from the connecting IP, not a spoofed address. |
 | `ADMIN_WALLET` | — | Single admin wallet address (for backward compatibility) |
 | `ADMIN_WALLETS` | — | Comma-separated list of admin wallet addresses (e.g., `GABC...,GDEF...`) |
 | `ADMIN_THRESHOLD` | — | Number of admin signatures required for high-value operations (default: `1`) |
+| `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS allowed origins (defaults per env: `*` in dev, `https://staging.scoutoff.io` in staging, `https://app.scoutoff.io,https://scoutoff.io` in prod) |
+| `ADMIN_IP_ALLOWLIST` | — | Comma-separated list of **IPv4** addresses/CIDR ranges allowed to reach admin endpoints (e.g. `192.168.1.0/24,10.0.0.1`). Unset/empty disables the check. IPv6 is not supported yet — any IPv6 client IP is rejected with 403 regardless of this setting (fail closed). |
+
+## Kubernetes / Helm Deployment
+
+The `helm/scout-off-backend/` directory contains a production-grade Helm 3 chart
+(API version `v2`) for deploying the backend to Kubernetes.
+
+### Prerequisites
+
+- Helm 3.x installed (`helm version`)
+- A Kubernetes cluster with `kubectl` configured
+- The `scout-off-secrets` Kubernetes Secret created in the target namespace
+  **before** the first `helm install` (see below)
+
+### 1. Create the Kubernetes Secret
+
+Sensitive env vars (`CONTRACT_ID`, `JWT_SECRET`) are sourced exclusively from a
+Kubernetes Secret — they are never stored in the ConfigMap or committed to source
+control.
+
+```bash
+kubectl create secret generic scout-off-secrets \
+  --from-literal=CONTRACT_ID=<your-soroban-contract-id> \
+  --from-literal=JWT_SECRET=<min-32-char-random-string> \
+  --namespace <your-namespace>
+```
+
+Rotate values by deleting and re-creating the Secret, then triggering a rollout:
+
+```bash
+kubectl delete secret scout-off-secrets --namespace <your-namespace>
+kubectl create secret generic scout-off-secrets \
+  --from-literal=CONTRACT_ID=<new-value> \
+  --from-literal=JWT_SECRET=<new-value> \
+  --namespace <your-namespace>
+kubectl rollout restart deployment/scout-off-backend --namespace <your-namespace>
+```
+
+### 2. Install the chart
+
+```bash
+helm install scout-off-backend ./helm/scout-off-backend \
+  --namespace <your-namespace> \
+  --create-namespace \
+  --set image.tag=<git-sha-or-semver>
+```
+
+### 3. Upgrade
+
+```bash
+helm upgrade scout-off-backend ./helm/scout-off-backend \
+  --namespace <your-namespace> \
+  --set image.tag=<new-tag>
+```
+
+### 4. Override values
+
+Create a `my-values.yaml` file with any overrides and pass it with `-f`:
+
+```bash
+helm upgrade --install scout-off-backend ./helm/scout-off-backend \
+  --namespace production \
+  -f my-values.yaml \
+  --set image.tag=v1.2.3
+```
+
+Common overrides:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `image.tag` | chart appVersion | Docker image tag to deploy |
+| `replicaCount` | `2` | Minimum pod count (HPA floor) |
+| `hpa.maxReplicas` | `10` | Maximum pods under autoscaling |
+| `hpa.targetCPUUtilizationPercentage` | `70` | CPU threshold to trigger scale-up |
+| `hpa.targetMemoryUtilizationPercentage` | `80` | Memory threshold to trigger scale-up |
+| `ingress.enabled` | `false` | Expose the service via an Ingress |
+| `ingress.hosts[0].host` | `api.scoutoff.io` | Public hostname |
+| `ingress.tls[0].secretName` | `scout-off-tls` | TLS certificate Secret name |
+| `resources.requests.cpu` | `100m` | CPU request |
+| `resources.limits.cpu` | `500m` | CPU limit |
+| `resources.requests.memory` | `256Mi` | Memory request |
+| `resources.limits.memory` | `512Mi` | Memory limit |
+| `secretName` | `scout-off-secrets` | Name of the Kubernetes Secret |
+| `env.NODE_ENV` | `production` | Node environment |
+| `env.DB_DRIVER` | `sqlite` | `sqlite` or `postgres` |
+
+### 5. Lint the chart
+
+```bash
+helm lint helm/scout-off-backend
+```
+
+### 6. Render templates locally (dry-run)
+
+```bash
+helm template scout-off-backend ./helm/scout-off-backend \
+  --set image.tag=local-test
+```
+
+This produces a Deployment, HPA, PodDisruptionBudget, Service, ConfigMap, and
+(when `ingress.enabled=true`) an Ingress resource.
+
+### 7. Uninstall
+
+```bash
+helm uninstall scout-off-backend --namespace <your-namespace>
+```
+
+> **Note:** Uninstalling the chart does **not** delete the `scout-off-secrets`
+> Secret. Delete it manually if you are tearing down the environment entirely.
 
 ## Build & Start
 
@@ -64,16 +182,60 @@ It supports local paths, AWS S3, and Google Cloud Storage.
 
 ```bash
 # Local
-DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off npm run backup-db
 
 # AWS S3 (requires aws CLI and credentials in environment)
-DB_PATH=/data/scout-off.db BACKUP_DEST=s3://my-bucket/scout-off-backups bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=s3://my-bucket/scout-off-backups npm run backup-db
 
 # Google Cloud Storage (requires gsutil / gcloud SDK)
-DB_PATH=/data/scout-off.db BACKUP_DEST=gs://my-bucket/scout-off-backups bash scripts/backup-db.sh
+DB_PATH=/data/scout-off.db BACKUP_DEST=gs://my-bucket/scout-off-backups npm run backup-db
+
+# Equivalent direct invocation
+DB_PATH=/data/scout-off.db BACKUP_DEST=/var/backups/scout-off bash scripts/backup-db.sh
 ```
 
-The script exits with code `1` and prints an error to stderr on any failure (file missing, CLI not found, copy error).
+The script exits with code `1` and prints an error to stderr on any failure (file missing, CLI not found, copy error, or verification failure).
+
+Every backup is verified immediately after creation:
+
+1. The script captures row counts for `players`, `events`, and `migrations` from the live database.
+2. It writes a `.counts` sidecar file alongside the backup (same destination prefix).
+3. It runs `scripts/verify-backup.sh`, which copies the backup to a scratch directory, runs `PRAGMA integrity_check`, and confirms the key table row counts match the sidecar.
+
+Requires the `sqlite3` CLI on the host running backups (`python3` is used as a fallback when `sqlite3` is unavailable).
+
+### Restore-verification drills
+
+Run periodic drills against historical backups to confirm they remain restorable. Use `--verify-only` (delegates to `scripts/verify-backup.sh`) or call the verifier directly:
+
+```bash
+# Local backup + sidecar created at backup time
+npm run backup-db -- --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
+
+# S3 (downloads backup and .counts sidecar automatically)
+npm run backup-db -- --verify-only s3://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
+
+# GCS
+npm run backup-db -- --verify-only gs://my-bucket/scout-off-backups/scout-off-20250720T120000Z.db
+
+# Direct verifier with explicit expected counts (e.g. if the sidecar was lost)
+EXPECT_PLAYERS=120 EXPECT_EVENTS=5400 EXPECT_MIGRATIONS=18 \
+  npm run verify-backup -- /var/backups/scout-off/scout-off-20250720T120000Z.db
+
+# Equivalent direct invocations
+bash scripts/backup-db.sh --verify-only /var/backups/scout-off/scout-off-20250720T120000Z.db
+EXPECT_PLAYERS=120 EXPECT_EVENTS=5400 EXPECT_MIGRATIONS=18 \
+  bash scripts/verify-backup.sh /var/backups/scout-off/scout-off-20250720T120000Z.db
+```
+
+Suggested schedule: weekly verification of the most recent backup, plus a monthly spot-check of a random older backup. Failed verification exits non-zero — wire alerts to your cron/systemd log monitoring the same way as backup failures.
+
+Example weekly cron (`/etc/cron.d/scout-off-backup-verify`):
+
+```cron
+0 3 * * 0 ubuntu LATEST=$(aws s3 ls s3://my-bucket/scout-off-backups/ | awk '/\.db$/ { print $4 }' | sort | tail -1) && \
+  bash /opt/scout-off/scripts/backup-db.sh --verify-only "s3://my-bucket/scout-off-backups/${LATEST}" >> /var/log/scout-off-backup-verify.log 2>&1
+```
 
 ### Scheduling via cron
 
@@ -139,6 +301,7 @@ For S3, configure an [Object Lifecycle rule](https://docs.aws.amazon.com/AmazonS
 |---|---|
 | `GET /health` | Liveness check; includes Stellar RPC status |
 | `GET /ready` | Readiness probe; checks IPFS connectivity |
+| `GET /version` | Deployed package version and git commit SHA |
 
 Configure your load balancer or orchestrator to poll `/health` every 30 seconds.  
 Alert on consecutive failures (≥ 2) to catch Stellar RPC or IPFS outages early.
@@ -147,6 +310,21 @@ Recommended metrics to track:
 - HTTP 5xx error rate
 - Event indexer lag (gap between latest on-chain event and last indexed event)
 - SQLite file size growth
+
+### Docker Compose Healthcheck
+
+The `docker-compose.yml` configures a healthcheck on the backend service that polls `/health/liveness` every 10 seconds:
+
+```yaml
+healthcheck:
+  test: ["CMD", "wget", "--spider", "-q", "http://localhost:4000/health/liveness"]
+  interval: 10s
+  timeout: 5s
+  retries: 3
+  start_period: 15s
+```
+
+Docker marks the container `(healthy)` once the first probe succeeds. The `start_period` of 15 seconds gives the Express server time to initialize before probes are counted as failures. The `--spider` flag tells `wget` to perform a HEAD-only request without downloading the response body, keeping healthcheck logs quiet. Run `docker compose ps` to confirm the container status shows `(healthy)` after startup.
 
 ## Multi-Sig Admin Operations
 
@@ -179,6 +357,46 @@ If any check fails, roll back to the previous build immediately.
 2. Tag the release: `git tag v<semver> && git push --tags`
 3. Build the Docker image (or run `npm run build` on the target server)
 4. Apply any pending DB migrations
-5. Restart the server process / redeploy the container
-6. Run smoke tests (see above)
+5. The deploy script handles starting the new process and flipping traffic automatically.
+6. Run smoke tests (see above) - this happens automatically in the staging pipeline.
 7. Monitor logs for 10 minutes post-deploy
+
+## Blue-Green Deployment Topology
+
+Staging uses a local blue-green deployment strategy to eliminate restart downtime.
+
+### Topology
+- **Process Manager**: PM2 manages two identical Node.js services named `scout-off-backend-blue` (port 4000) and `scout-off-backend-green` (port 4001).
+- **Reverse Proxy**: Nginx routes traffic to the active slot.
+- **State**: The currently active slot is stored in a `.active-slot` file in the deployment root.
+
+### Nginx Configuration Requirement
+To support dynamic traffic flipping, Nginx must be configured to use a dedicated upstream config block located at `/etc/nginx/conf.d/scout-off-upstream.conf`.
+
+1. Create the upstream config file:
+   ```bash
+   sudo touch /etc/nginx/conf.d/scout-off-upstream.conf
+   sudo chmod 666 /etc/nginx/conf.d/scout-off-upstream.conf
+   echo "upstream scout_off_backend { server 127.0.0.1:4000; }" > /etc/nginx/conf.d/scout-off-upstream.conf
+   ```
+2. In your main Nginx site config (e.g., `/etc/nginx/sites-available/scout-off`), use the upstream:
+   ```nginx
+   location / {
+       proxy_pass http://scout_off_backend;
+       # ... other proxy headers ...
+   }
+   ```
+
+### Manual Override & Rollback
+If you need to manually rollback traffic to the previously active slot:
+```bash
+# From the deployment root path:
+bash scripts/deploy-staging.sh . rollback
+```
+
+To manually view the PM2 processes:
+```bash
+pm2 status
+pm2 logs scout-off-backend-blue
+pm2 logs scout-off-backend-green
+```

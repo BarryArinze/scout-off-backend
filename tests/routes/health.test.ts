@@ -74,6 +74,23 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     expect(res.body.status).toBe('degraded');
     expect(res.body.services.db).toBe('unavailable');
   });
+
+  it('returns 503 with db:unavailable when the DB is read-only (writes fail, reads still succeed)', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    const realDb = jest.requireActual<typeof import('../../src/db')>('../../src/db').getDb();
+    mockGetDb.mockImplementation(() => ({
+      prepare: (sql: string) => {
+        if (sql.includes('INSERT INTO indexer_state')) {
+          throw new Error('SQLITE_READONLY: attempt to write a readonly database');
+        }
+        return realDb.prepare(sql);
+      },
+    }));
+    const res = await request(app).get(path);
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('degraded');
+    expect(res.body.services.db).toBe('unavailable');
+  });
 });
 
 // ─── /health ─────────────────────────────────────────────────────────────────
