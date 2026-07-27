@@ -12,7 +12,8 @@
     "test": "node node_modules/jest/bin/jest.js --runInBand",
     "test:watch": "node node_modules/jest/bin/jest.js --watch",
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts' --ext .ts",
-    "seed": "ts-node --project tsconfig.scripts.json scripts/seed.ts"
+    "seed": "ts-node --project tsconfig.scripts.json scripts/seed.ts",
+    "migration:status": "ts-node --project tsconfig.scripts.json scripts/migration-status.ts"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.0",
