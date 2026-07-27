@@ -706,12 +706,14 @@ export interface IdempotencyRecord {
   response: string; // raw JSON string
   created_at: number;
   expires_at: number;
+  /** 'pending' while the originating request is in-flight; 'complete' once saved. */
+  status: 'pending' | 'complete';
 }
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
- * Look up a non-expired idempotency key.
+ * Look up a non-expired idempotency key regardless of its status.
  * Returns the stored record, or null when the key is absent or expired.
  */
 export function getIdempotencyRecord(key: string): IdempotencyRecord | null {
@@ -723,10 +725,61 @@ export function getIdempotencyRecord(key: string): IdempotencyRecord | null {
 }
 
 /**
+ * Attempt to claim an idempotency key by inserting a 'pending' marker.
+ *
+ * Uses INSERT OR IGNORE so that the insert is a single atomic operation:
+ * exactly one concurrent request will succeed and receive `true`; every
+ * other request for the same key receives `false` and must not run the
+ * downstream handler.
+ *
+ * Returns true  — this caller owns the key; proceed with the handler.
+ * Returns false — another request already claimed the key; caller must wait.
+ */
+export function claimIdempotencyKey(key: string): boolean {
+  const now = Date.now();
+  const sql = `
+    INSERT OR IGNORE INTO idempotency_keys (key, status_code, response, created_at, expires_at, status)
+    VALUES (?, 0, '', ?, ?, 'pending')
+  `;
+  const result = timedQuery(sql, () =>
+    getDb()
+      .prepare(sql)
+      .run(key, now, now + IDEMPOTENCY_TTL_MS)
+  );
+  // changes === 1 means a new row was inserted (this caller won the race).
+  return result.changes === 1;
+}
+
+/**
+ * Transition a 'pending' idempotency key to 'complete', recording the final
+ * response.  Called by the middleware after the handler has written its response.
+ */
+export function updateIdempotencyRecord(
+  key: string,
+  statusCode: number,
+  body: unknown,
+): void {
+  const sql = `
+    UPDATE idempotency_keys
+    SET status_code = ?, response = ?, status = 'complete'
+    WHERE key = ?
+  `;
+  timedQuery(sql, () =>
+    getDb()
+      .prepare(sql)
+      .run(statusCode, JSON.stringify(body), key)
+  );
+}
+
+/**
  * Persist a new idempotency key with its response payload.
  * Silently ignores conflicts — two concurrent requests with the same key
  * will both compute a response but only the first one to commit wins; the
  * second one will then be served the stored value by getIdempotencyRecord.
+ *
+ * @deprecated Prefer claimIdempotencyKey + updateIdempotencyRecord for proper
+ * race-condition protection.  This function is retained for backwards
+ * compatibility with tests and external callers.
  */
 export function saveIdempotencyRecord(
   key: string,
@@ -735,8 +788,8 @@ export function saveIdempotencyRecord(
 ): void {
   const now = Date.now();
   const sql = `
-    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status)
+    VALUES (?, ?, ?, ?, ?, 'complete')
     ON CONFLICT(key) DO NOTHING
   `;
   timedQuery(sql, () =>
@@ -1453,6 +1506,8 @@ export function getContactUnlockCount(playerId: string): number {
     getDb().prepare(sql).get(playerId) as { count: number }
   );
   return row.count;
+}
+
 // ─── Feature flags (#494) ─────────────────────────────────────────────────────
 
 export interface FeatureFlagRow {
