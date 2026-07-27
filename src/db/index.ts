@@ -398,6 +398,7 @@ export interface QueryPlayersOptions {
 }
 
 export interface PlayerProfileHistoryRow {
+  id: number;
   metadata_uri: string;
   changed_at: number;
   tx_hash: string;
@@ -422,12 +423,33 @@ export function getPlayerProfileHistory(
 ): PlayerProfileHistoryRow[] {
   return getDb()
     .prepare(
-      `SELECT metadata_uri, changed_at, tx_hash
+      `SELECT id, metadata_uri, changed_at, tx_hash
        FROM player_profile_history
        WHERE player_id = ?
        ORDER BY changed_at DESC`,
     )
     .all(playerId) as PlayerProfileHistoryRow[];
+}
+
+/**
+ * Returns all history rows for a player ordered oldest-first (ASC), with a
+ * 1-based `version` number assigned by insertion order. The version number is
+ * derived from the row's position in the ascending sequence so it is stable
+ * even after rows are inserted concurrently.
+ */
+export function getPlayerProfileHistoryVersioned(
+  playerId: string,
+): Array<PlayerProfileHistoryRow & { version: number }> {
+  const rows = getDb()
+    .prepare(
+      `SELECT id, metadata_uri, changed_at, tx_hash
+       FROM player_profile_history
+       WHERE player_id = ?
+       ORDER BY id ASC`,
+    )
+    .all(playerId) as PlayerProfileHistoryRow[];
+
+  return rows.map((row, idx) => ({ ...row, version: idx + 1 }));
 }
 
 export function insertOrUpdatePlayer(p: {

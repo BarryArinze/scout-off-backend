@@ -17,7 +17,7 @@ import {
   deactivatePlayerEndpoint,
   reactivatePlayerEndpoint,
 } from "../controllers/playerController";
-import { getPlayerHistory } from "../controllers/playerHistoryController";
+import { getPlayerHistory, getPlayerHistoryVersion, getPlayerHistoryDiff } from "../controllers/playerHistoryController";
 import { acceptTrialOffer, rejectTrialOffer, rejectOfferSchema } from "../controllers/trialOfferController";
 import { getPlayerTokenHolders, buyPlayerToken } from "../controllers/playerTokenController";
 
@@ -82,11 +82,42 @@ router.route("/:playerId/history")
   .get(
     optionalAuth,
     (req: Request, res: Response, next: NextFunction) => {
-      if (req.role === "admin") {
-        return getPlayerHistory(req, res, next);
-      }
+      if (req.role === "admin") return next();
       return requireRole("player")(req, res, () => requireOwner(req, res, next));
     },
+    getPlayerHistory,
+  )
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * GET /api/players/:playerId/history/:version
+ * Returns the full profile snapshot at the given version number.
+ * Admin or profile owner only.
+ */
+router.route("/:playerId/history/:version")
+  .get(
+    optionalAuth,
+    (req: Request, res: Response, next: NextFunction) => {
+      if (req.role === "admin") return next();
+      return requireRole("player")(req, res, () => requireOwner(req, res, next));
+    },
+    getPlayerHistoryVersion,
+  )
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * GET /api/players/:playerId/history/:version/diff
+ * Returns a field-level diff between version N and N-1.
+ * Admin or profile owner only.
+ */
+router.route("/:playerId/history/:version/diff")
+  .get(
+    optionalAuth,
+    (req: Request, res: Response, next: NextFunction) => {
+      if (req.role === "admin") return next();
+      return requireRole("player")(req, res, () => requireOwner(req, res, next));
+    },
+    getPlayerHistoryDiff,
   )
   .all(methodNotAllowed(['GET', 'HEAD']));
 
