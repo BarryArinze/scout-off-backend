@@ -87,9 +87,26 @@ describe('positionAliases', () => {
   describe('edge cases', () => {
     it('unknown alias: normalizePosition returns undefined', () => {
       expect(normalizePosition('winger')).toBeUndefined();
-      expect(normalizePosition('ST')).toBeUndefined();
-      expect(normalizePosition('cb')).toBeUndefined();
-      expect(normalizePosition('lb')).toBeUndefined();
+      expect(normalizePosition('rw')).toBeUndefined();
+      expect(normalizePosition('lw')).toBeUndefined();
+    });
+
+    it('ST resolves to forward', () => {
+      expect(normalizePosition('ST')).toBe('forward');
+      expect(normalizePosition('st')).toBe('forward');
+      expect(normalizePosition('St')).toBe('forward');
+    });
+
+    it('CM resolves to midfielder', () => {
+      expect(normalizePosition('CM')).toBe('midfielder');
+      expect(normalizePosition('cm')).toBe('midfielder');
+    });
+
+    it('CB and LB resolve to defender', () => {
+      expect(normalizePosition('CB')).toBe('defender');
+      expect(normalizePosition('cb')).toBe('defender');
+      expect(normalizePosition('lb')).toBe('defender');
+      expect(normalizePosition('LB')).toBe('defender');
     });
 
     it('unknown alias: normalizePositionOrFallback returns the trimmed input unchanged', () => {
