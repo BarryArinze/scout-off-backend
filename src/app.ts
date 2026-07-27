@@ -1,5 +1,5 @@
 import express from 'express';
-import cors from 'cors';
+import cors, { CorsOptions } from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import config from './config';
@@ -26,6 +26,7 @@ import { getDb } from './db';
 import { getVersionInfo } from './version';
 import { apiVersion } from './middleware/apiVersion';
 import docsRouter from './routes/docs';
+import { logger } from './utils/logger';
 
 /** Probe the SQLite database with a lightweight SELECT 1.
  *  Resolves 'ok' or 'error'; never rejects.
@@ -68,6 +69,68 @@ async function probeDbWritable(timeoutMs = 2_000): Promise<'ok' | 'error'> {
   });
 }
 
+// ─── CORS ─────────────────────────────────────────────────────────────────────
+//
+// Allowed origins are driven by the CORS_ALLOWED_ORIGINS env var (comma-separated).
+// In development and test we default to '*' (any origin).
+// In production/staging we use an explicit allowlist; if none is configured we
+// log a warning and reject all cross-origin requests.
+
+const isDevOrTest = config.nodeEnv === 'development' || config.nodeEnv === 'test';
+const allowedOrigins = config.corsAllowedOrigins;
+
+if (!isDevOrTest && (!allowedOrigins || allowedOrigins.length === 0)) {
+  logger.warn(
+    '[cors] WARNING: CORS_ALLOWED_ORIGINS is not set in production. ' +
+    'All cross-origin requests will be rejected.',
+  );
+}
+
+const isWildcard = allowedOrigins.includes('*');
+
+const corsOptions: CorsOptions = {
+  // Callback-based origin so we can do per-request allow/deny
+  origin: (origin, callback) => {
+    // Same-origin or server-to-server (no Origin header) — always allow
+    if (!origin) {
+      callback(null, true);
+      return;
+    }
+
+    // Wildcard: allow all (dev / test only)
+    if (isWildcard) {
+      callback(null, '*');
+      return;
+    }
+
+    // Explicit allowlist check (case-sensitive, exact match)
+    if (allowedOrigins.includes(origin)) {
+      callback(null, origin);
+      return;
+    }
+
+    // Not in the allowlist — suppress the CORS header (no error thrown so the
+    // request still gets a response body, but the browser will block it)
+    callback(null, false);
+  },
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-API-Key',
+    'X-Correlation-ID',
+    'X-Idempotency-Key',
+    'X-API-Version',
+  ],
+  exposedHeaders: ['ETag', 'X-Correlation-ID', 'X-Response-Time', 'X-API-Version'],
+  // credentials cannot be used with a wildcard origin (CORS spec); only enable
+  // it when we are using an explicit allowlist
+  credentials: !isWildcard,
+  maxAge: 86400, // 24 hours — browsers cache pre-flight for this duration
+  preflightContinue: false,
+  optionsSuccessStatus: 204,
+};
+
 const app = express();
 // Disable Express's default X-Powered-By header. helmet() also does this, but
 // being explicit here ensures it is suppressed regardless of middleware order.
@@ -77,11 +140,11 @@ app.disable('x-powered-by');
 // support is actually implemented (see getPlayer).
 app.set('etag', false);
 
-const corsOrigin =
-  config.allowedOrigins.includes('*')
-    ? '*'
-    : config.allowedOrigins;
-app.use(cors({ origin: corsOrigin }));
+// Apply CORS with the callback-based options built above.
+// Also handle pre-flight OPTIONS requests explicitly so they short-circuit
+// before any auth or body-parser middleware runs.
+app.options('*', cors(corsOptions));
+app.use(cors(corsOptions));
 app.use(compression({ threshold: parseInt(process.env.COMPRESSION_THRESHOLD ?? '1024', 10) }));
 app.use(requestTimeout);
 app.use(correlationId);
