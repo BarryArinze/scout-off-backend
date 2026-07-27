@@ -250,6 +250,37 @@ export interface EventExportRow {
 }
 
 /**
+ * Count indexed events at the SQL level, filtered by type and/or created_at range.
+ * Used to populate the `total` field in paginated event responses without loading
+ * all matching rows into memory.
+ */
+export function countEventsFiltered(filter: EventsPageFilter): number {
+  const db = getDb();
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (filter.type) {
+    clauses.push('type = ?');
+    params.push(filter.type);
+  }
+  if (filter.startDate) {
+    clauses.push('created_at >= ?');
+    params.push(filter.startDate.getTime());
+  }
+  if (filter.endDate) {
+    clauses.push('created_at <= ?');
+    params.push(filter.endDate.getTime());
+  }
+
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const sql = 'SELECT COUNT(*) AS count FROM events ' + where;
+  const row = timedQuery(sql, () =>
+    db.prepare(sql).get(...(params as unknown[])) as { count: number } | undefined,
+  );
+  return row?.count ?? 0;
+}
+
+/**
  * Fetches one bounded page of indexed events (LIMIT/OFFSET), filtered at the
  * SQL level by type and/or created_at range, ordered by ledger ascending
  * (ties broken by insertion order via `id`).
