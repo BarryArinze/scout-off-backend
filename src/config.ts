@@ -33,6 +33,33 @@ if (!adminWalletValue) {
   }
 }
 
+// Validate SEP10_SERVER_SECRET.
+// This is the signing keypair secret for SEP-10 challenge transactions.  It
+// must be the same across every backend instance so that a challenge built by
+// instance A can be verified by instance B.  In production the process refuses
+// to start without it.  In staging a warning is emitted.  In development/test
+// the absence is silently tolerated — a fallback is generated at the service
+// layer so tests can run without extra config.
+const sep10ServerSecretValue = process.env.SEP10_SERVER_SECRET ?? '';
+if (!sep10ServerSecretValue) {
+  if (nodeEnv === 'production') {
+    throw new Error(
+      'SEP10_SERVER_SECRET is required in production but is not set. ' +
+      'Generate a Stellar keypair secret with `stellar keys generate` and set this variable. ' +
+      'All backend instances must share the same value for challenge verification to work ' +
+      'across a horizontally-scaled deployment.',
+    );
+  }
+  if (nodeEnv === 'staging') {
+    console.warn(
+      '[config] WARNING: SEP10_SERVER_SECRET is not set in staging. ' +
+      'Each process will generate an ephemeral keypair, causing cross-instance ' +
+      'SEP-10 verification failures under load balancing. ' +
+      'Set SEP10_SERVER_SECRET to suppress this warning.',
+    );
+  }
+}
+
 // Validate PINATA_GATEWAY when set — it must be a valid HTTPS URL. An invalid
 // gateway would otherwise only surface as a runtime failure when resolving
 // IPFS content, with no clear indication of the misconfiguration.
@@ -81,6 +108,12 @@ const config = {
     process.env.SOROBAN_RPC_URL ?? 'https://soroban-testnet.stellar.org',
   contractId: required('CONTRACT_ID'),
   jwtSecret: required('JWT_SECRET'),
+  /**
+   * SEP-10 server signing keypair secret (Stellar strkey starting with 'S').
+   * Must be identical on every backend instance.  See docs/auth.md for
+   * configuration details and key-rotation guidance.
+   */
+  sep10ServerSecret: sep10ServerSecretValue,
   platformSecret: process.env.PLATFORM_SECRET ?? '',
   pinata: {
     apiKey: process.env.PINATA_API_KEY ?? '',
