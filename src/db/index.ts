@@ -1298,6 +1298,73 @@ export function deleteSavedSearch(id: number, scoutWallet: string): boolean {
   });
 }
 
+// ─── Profile views helpers ────────────────────────────────────────────────────
+
+/**
+ * Record a profile view from a scout.
+ * Inserts a new row into the profile_views table with scout wallet, player ID,
+ * and timestamps. Used to track scout engagement with player profiles.
+ */
+export function recordProfileView(p: {
+  scout_wallet: string;
+  player_id: string;
+  viewed_at: number;
+  created_at: number;
+}): void {
+  const sql = `INSERT INTO profile_views (scout_wallet, player_id, viewed_at, created_at) VALUES (?, ?, ?, ?)`;
+  timedQuery(sql, () => getDb().prepare(sql).run(p.scout_wallet, p.player_id, p.viewed_at, p.created_at));
+}
+
+/**
+ * Get the timestamp of the most recent profile view from a scout for a specific player.
+ * Returns the Unix timestamp of the most recent view, or null if no view exists.
+ * Used by deduplication logic to check the 5-minute dedup window.
+ */
+export function getLastProfileView(scoutWallet: string, playerId: string): number | null {
+  const sql = `SELECT viewed_at FROM profile_views WHERE player_id = ? AND scout_wallet = ? ORDER BY viewed_at DESC LIMIT 1`;
+  const row = timedQuery(sql, () =>
+    getDb().prepare(sql).get(playerId, scoutWallet) as { viewed_at: number } | undefined
+  );
+  return row?.viewed_at ?? null;
+}
+
+/**
+ * Get the total count of profile views for a player.
+ * Returns the count of all profile_views records for the given player_id.
+ * Used in analytics aggregation.
+ */
+export function getProfileViewCount(playerId: string): number {
+  const sql = `SELECT COUNT(*) as count FROM profile_views WHERE player_id = ?`;
+  const row = timedQuery(sql, () =>
+    getDb().prepare(sql).get(playerId) as { count: number }
+  );
+  return row.count;
+}
+
+/**
+ * Get the count of unique scout wallets that have viewed a player's profile.
+ * Counts distinct scout_wallet values (excluding NULL) from profile_views for the given player.
+ * Used in analytics aggregation to determine viewer_count.
+ */
+export function getUniqueViewerCount(playerId: string): number {
+  const sql = `SELECT COUNT(DISTINCT scout_wallet) as count FROM profile_views WHERE player_id = ? AND scout_wallet IS NOT NULL`;
+  const row = timedQuery(sql, () =>
+    getDb().prepare(sql).get(playerId) as { count: number }
+  );
+  return row.count;
+}
+
+/**
+ * Get the count of unique scout wallets that have unlocked contact information for a player.
+ * Counts distinct scout_wallet values from the contact_unlocks table for the given player.
+ * Used in analytics aggregation to determine contact_unlock_count.
+ */
+export function getContactUnlockCount(playerId: string): number {
+  const sql = `SELECT COUNT(DISTINCT scout_wallet) as count FROM contact_unlocks WHERE player_id = ?`;
+  const row = timedQuery(sql, () =>
+    getDb().prepare(sql).get(playerId) as { count: number }
+  );
+  return row.count;
 // ─── Feature flags (#494) ─────────────────────────────────────────────────────
 
 export interface FeatureFlagRow {
