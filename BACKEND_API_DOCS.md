@@ -942,6 +942,43 @@ The following routes currently return data sourced entirely from indexed on-chai
 
 ---
 
+## Request Timeouts
+
+A global request timeout (`REQUEST_TIMEOUT_MS`, default **30 s**) is applied to all routes via the `requestTimeout` middleware in `app.ts`. When a response has not been sent within the configured window, the middleware writes:
+
+```json
+{
+  "success": false,
+  "error": "Request timed out",
+  "code": "REQUEST_TIMEOUT"
+}
+```
+
+with HTTP status **503**.
+
+### Per-route overrides
+
+Certain routes override the default timeout because their expected duration differs significantly:
+
+| Route | Timeout | Reason |
+|-------|---------|--------|
+| `GET /api/admin/events/export` | **120 s** | Streaming CSV export of large tables can take up to 60 s; the longer window prevents a spurious 503 on a slow-but-healthy export. |
+| `POST /api/admin/reindex` | **none (0)** | Returns 202 immediately — the actual ledger backfill runs as a background job and must never be killed by a network timeout. |
+| `GET /health/liveness` | **5 s** | Kubernetes liveness probe — if the process cannot respond in 5 s it should be restarted. |
+| `GET /health/readiness` | **5 s** | Kubernetes readiness probe — if the DB is unresponsive for more than 5 s the pod should be removed from the load-balancer. |
+
+### Using `createTimeout` in new routes
+
+Import the factory from the timeout middleware to apply a custom value on a specific route:
+
+```ts
+import { createTimeout } from '../middleware/timeout';
+
+router.get('/slow-endpoint', createTimeout(60_000), requireRole('admin'), myHandler);
+```
+
+---
+
 ## Error Format
 
 All error responses follow this shape:
