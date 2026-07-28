@@ -8,6 +8,50 @@ It covers SEP-10 challenge/response, JWT issuance, token claims, refresh behavio
 ScoutOff uses Stellar SEP-10 for wallet-based authentication.
 The client proves ownership of a Stellar account by signing a server-issued challenge transaction.
 
+## SEP-10 Server Keypair (`SEP10_SERVER_SECRET`)
+
+Every SEP-10 challenge transaction is signed by the server with a dedicated Stellar keypair.
+`verifyAndIssueToken` checks that the challenge carries this server signature before accepting the client's signature — this proves the challenge was issued by a trusted ScoutOff backend and not forged by a third party.
+
+### Why it must be shared across all instances
+
+In a horizontally-scaled deployment (multiple backend pods behind a load balancer), every instance must use **the same keypair**.
+Without a shared keypair, instance A signs the challenge with its own random key, but if the wallet's `POST /auth/token` request is routed to instance B, the server-signature check fails — not because of anything wrong on the client side, but because instance B has a different random key.
+This produces intermittent, load-distribution-dependent auth failures that are extremely hard to diagnose.
+
+### Configuration
+
+Set `SEP10_SERVER_SECRET` to the same Stellar secret key on every backend instance.
+
+```bash
+# Generate a new keypair (requires the Stellar CLI)
+stellar keys generate sep10-server --network testnet
+# Copy the secret key (starts with 'S') into your env / secrets manager
+
+# Or generate a raw 32-byte key that can be imported as a Stellar keypair:
+# openssl rand -hex 32
+```
+
+| Behaviour | Environment |
+|-----------|-------------|
+| Process refuses to start if unset | `production` |
+| Warning logged on startup if unset | `staging` |
+| Ephemeral per-process key used (single-instance local dev only) | `development` / `test` |
+
+**The ephemeral fallback is intentionally unsafe for multi-instance deployments** — it exists only so developers can run the project locally without extra config.
+
+### Key rotation
+
+Rotating the SEP-10 server keypair invalidates any outstanding challenge transactions that have not yet been exchanged for a JWT.  Challenges have a 5-minute TTL, so the impact window is short.  Follow this procedure to minimise disruption:
+
+1. **Generate a new keypair** — `stellar keys generate sep10-server-new --network mainnet`
+2. **Deploy with both keys in parallel** is not required because challenges expire in 5 minutes — a brief auth interruption is acceptable during the rollout window.
+3. **Update the secret** — replace `SEP10_SERVER_SECRET` in your secrets manager / Kubernetes Secret.
+4. **Rolling-restart all instances** — each pod picks up the new key on startup.  Pods with the old key will reject challenges built after the restart; pods with the new key will reject challenges built before.  The 5-minute window means at most one failed auth attempt per affected client during the rollout.
+5. **Verify** — run a full SEP-10 auth flow end-to-end against the updated deployment before closing the change.
+
+> ⚠️ **Security note**: `SEP10_SERVER_SECRET` is a Stellar secret key — treat it with the same care as `JWT_SECRET`.  Never commit it to source control.  Store it in a secrets manager (AWS Secrets Manager, GCP Secret Manager, HashiCorp Vault, Kubernetes Secrets) and inject it as an environment variable at runtime.  See [docs/secrets-rotation.md](secrets-rotation.md) for the general rotation policy.
+
 ### 1. Request a SEP-10 challenge
 
 `GET /auth/challenge?account=G...`
