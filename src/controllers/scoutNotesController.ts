@@ -1,6 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { upsertScoutNote, getScoutNote, getScoutNotes } from '../db';
+import {
+  upsertScoutNote,
+  getScoutNote,
+  getScoutNotes,
+  insertScoutPlayerNote,
+  getScoutPlayerNotes,
+  updateScoutPlayerNote,
+  deleteScoutPlayerNote,
+} from '../db';
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { sanitizeInput } from '../utils/sanitizer';
 import { sendForbidden } from '../utils/authError';
@@ -150,6 +158,226 @@ export async function listScoutNotesHandler(
         updated_at: r.updated_at,
       })),
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Multi-note CRUD (#488 v2) ────────────────────────────────────────────────
+
+const MAX_NOTE_CONTENT_LENGTH = 2_000;
+
+/**
+ * Zod schema for the note content field used by POST and PUT.
+ */
+export const noteContentSchema = z.object({
+  content: z
+    .string()
+    .min(1, 'content is required')
+    .max(MAX_NOTE_CONTENT_LENGTH, `content must be ${MAX_NOTE_CONTENT_LENGTH} characters or fewer`),
+});
+
+/**
+ * POST /api/scouts/:wallet/players/:playerId/notes
+ *
+ * Create a new private note for the authenticated scout on the given player.
+ * Content is sanitised (HTML stripped, whitespace trimmed) before storage.
+ *
+ * @body { content: string } – max 2 000 characters
+ * @response 201 { success: true, data: { id, scout_wallet, player_id, content, created_at, updated_at } }
+ * @response 400 Invalid or missing content / content too long
+ * @response 403 Wallet mismatch
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+export async function createPlayerNote(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    if (!validateWalletOwnership(req, res)) return;
+
+    const parsed = noteContentSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
+      });
+      return;
+    }
+
+    const { playerId } = req.params;
+    const sanitized = sanitizeInput(parsed.data.content);
+    const now = Math.floor(Date.now() / 1000);
+
+    const id = insertScoutPlayerNote({
+      scout_wallet: req.params.wallet,
+      player_id: playerId,
+      content: sanitized,
+      created_at: now,
+      updated_at: now,
+    });
+
+    logger.info({ scout: req.params.wallet, playerId, noteId: id, action: 'player_note_created' });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        id,
+        scout_wallet: req.params.wallet,
+        player_id: playerId,
+        content: sanitized,
+        created_at: now,
+        updated_at: now,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/scouts/:wallet/players/:playerId/notes
+ *
+ * List all private notes for the authenticated scout on the given player,
+ * ordered newest-first.
+ *
+ * @response 200 { success: true, data: Array<{ id, scout_wallet, player_id, content, created_at, updated_at }> }
+ * @response 403 Wallet mismatch
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+export async function listPlayerNotes(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    if (!validateWalletOwnership(req, res)) return;
+
+    const { playerId } = req.params;
+    const rows = getScoutPlayerNotes(req.params.wallet, playerId);
+
+    res.json({
+      success: true,
+      data: rows.map((r) => ({
+        id: r.id,
+        scout_wallet: r.scout_wallet,
+        player_id: r.player_id,
+        content: r.content,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * PUT /api/scouts/:wallet/players/:playerId/notes/:noteId
+ *
+ * Update an existing note's content.
+ * Returns 404 when the note doesn't exist or belongs to another scout.
+ *
+ * @body { content: string } – max 2 000 characters
+ * @response 200 { success: true, data: { id, scout_wallet, player_id, content, updated_at } }
+ * @response 400 Invalid or missing content / content too long
+ * @response 403 Wallet mismatch
+ * @response 404 Note not found
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+export async function updatePlayerNote(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    if (!validateWalletOwnership(req, res)) return;
+
+    const { playerId, noteId } = req.params;
+    const id = parseInt(noteId, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ success: false, error: 'Invalid note id' });
+      return;
+    }
+
+    const parsed = noteContentSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
+      });
+      return;
+    }
+
+    const sanitized = sanitizeInput(parsed.data.content);
+    const now = Math.floor(Date.now() / 1000);
+
+    const updated = updateScoutPlayerNote({
+      id,
+      scout_wallet: req.params.wallet,
+      content: sanitized,
+      updated_at: now,
+    });
+
+    if (!updated) {
+      res.status(404).json({ success: false, error: 'Note not found' });
+      return;
+    }
+
+    logger.info({ scout: req.params.wallet, playerId, noteId: id, action: 'player_note_updated' });
+
+    res.json({
+      success: true,
+      data: {
+        id,
+        scout_wallet: req.params.wallet,
+        player_id: playerId,
+        content: sanitized,
+        updated_at: now,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * DELETE /api/scouts/:wallet/players/:playerId/notes/:noteId
+ *
+ * Delete a note by id.
+ * Returns 404 when the note doesn't exist or belongs to another scout.
+ *
+ * @response 200 { success: true, data: { removed: true, id } }
+ * @response 403 Wallet mismatch
+ * @response 404 Note not found
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+export async function deletePlayerNote(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    if (!validateWalletOwnership(req, res)) return;
+
+    const { playerId, noteId } = req.params;
+    const id = parseInt(noteId, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ success: false, error: 'Invalid note id' });
+      return;
+    }
+
+    const removed = deleteScoutPlayerNote(id, req.params.wallet);
+
+    if (!removed) {
+      res.status(404).json({ success: false, error: 'Note not found' });
+      return;
+    }
+
+    logger.info({ scout: req.params.wallet, playerId, noteId: id, action: 'player_note_deleted' });
+
+    res.json({ success: true, data: { removed: true, id } });
   } catch (err) {
     next(err);
   }

@@ -15,7 +15,15 @@ import {
   unlockContactSchema,
 } from '../controllers/scoutController';
 import { getScoutRecommendations } from '../controllers/scoutRecommendationsController';
-import { putScoutNote, getScoutNoteHandler, listScoutNotesHandler } from '../controllers/scoutNotesController';
+import {
+  putScoutNote,
+  getScoutNoteHandler,
+  listScoutNotesHandler,
+  createPlayerNote,
+  listPlayerNotes,
+  updatePlayerNote,
+  deletePlayerNote,
+} from '../controllers/scoutNotesController';
 import { issueApiKey, listApiKeys, revokeApiKey } from '../controllers/apiKeyController';
 import { addBookmark, removeBookmark, listBookmarks } from '../controllers/scoutBookmarksController';
 import { createSavedSearch, listSavedSearches, deleteSavedSearchHandler } from '../controllers/scoutSavedSearchesController';
@@ -189,6 +197,37 @@ router.route('/:wallet/notes/:playerId')
 router.route('/:wallet/notes')
   .get(requireRole('scout'), listScoutNotesHandler)
   .all(methodNotAllowed(['GET', 'HEAD']));
+
+// ─── Multi-note CRUD for scout-player notes ───────────────────────────────────
+
+/**
+ * POST /api/scouts/:wallet/players/:playerId/notes
+ * Create a new private note for the authenticated scout on the given player.
+ * Body: { content: string } — max 2 000 characters.
+ *
+ * GET /api/scouts/:wallet/players/:playerId/notes
+ * List all private notes for the scout-player pair, newest-first.
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/players/:playerId/notes')
+  .post(requireRole('scout'), createPlayerNote)
+  .get(requireRole('scout'), listPlayerNotes)
+  .all(methodNotAllowed(['POST', 'GET', 'HEAD']));
+
+/**
+ * PUT /api/scouts/:wallet/players/:playerId/notes/:noteId
+ * Update a note's content.  Returns 404 when not found.
+ *
+ * DELETE /api/scouts/:wallet/players/:playerId/notes/:noteId
+ * Delete a note.  Returns 404 when not found.
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/players/:playerId/notes/:noteId')
+  .put(requireRole('scout'), updatePlayerNote)
+  .delete(requireRole('scout'), deletePlayerNote)
+  .all(methodNotAllowed(['PUT', 'DELETE']));
 
 // ─── API key management (#490) ────────────────────────────────────────────────
 
