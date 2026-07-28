@@ -22,6 +22,7 @@ import { createSavedSearch, listSavedSearches, deleteSavedSearchHandler } from '
 import { requireFeatureFlag } from '../middleware/requireFeatureFlag';
 import { FeatureFlags } from '../services/featureFlags';
 import { requireRole } from '../middleware/auth';
+import { idempotency } from '../middleware/idempotency';
 import { validateBody } from '../middleware/validate';
 import { walletRateLimit } from '../middleware/rateLimit';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
@@ -84,7 +85,7 @@ router.route('/:wallet/subscription')
  * @auth Bearer (scout role required)
  */
 router.route('/:wallet/subscribe')
-  .post(requireRole('scout'), walletRateLimit(), subscribe)
+  .post(requireRole('scout'), walletRateLimit(), idempotency, subscribe)
   .put(requireRole('scout'), walletRateLimit(), renewSubscription)
   .delete(requireRole('scout'), cancelSubscription)
   .all(methodNotAllowed(['POST', 'PUT', 'DELETE']));

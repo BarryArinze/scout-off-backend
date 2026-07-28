@@ -538,11 +538,6 @@ function recordProfileViewForRequest(req: Request): void {
   }
 }
 
-/**
- * GET /api/players/:playerId/analytics
- * Return aggregated profile view and contact unlock analytics for the player (owner-only).
- */
-export async function getPlayerAnalytics(
 /** POST /api/players/:playerId/deactivate */
 export async function deactivatePlayerEndpoint(
   req: Request,
@@ -578,6 +573,37 @@ export async function reactivatePlayerEndpoint(
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {
+      res.status(400).json({ success: false, error: idResult.error.errors[0]?.message ?? "Invalid playerId", code: ErrorCode.VALIDATION_ERROR });
+      return;
+    }
+    const playerId = sanitizeInput(req.params.playerId);
+    const row = getPlayerById(playerId);
+    if (!row) {
+      res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
+    }
+    reactivatePlayer(playerId);
+    await invalidatePlayerCache(playerId);
+    res.json({ success: true, message: "Player profile reactivated successfully" });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Profile Analytics ──────────────────────────────────────────────────────
+
+/**
+ * GET /api/players/:playerId/analytics
+ * Return aggregated profile view and contact unlock analytics for the player (owner-only).
+ */
+export async function getPlayerAnalytics(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const idResult = playerIdSchema.safeParse(req.params.playerId);
+    if (!idResult.success) {
       res.status(400).json({
         success: false,
         error: idResult.error.errors[0]?.message ?? "Invalid playerId",
@@ -588,7 +614,6 @@ export async function reactivatePlayerEndpoint(
 
     const playerId = sanitizeInput(req.params.playerId);
 
-    // Verify player exists
     const player = getPlayerById(playerId);
     if (!player) {
       res.status(404).json({
@@ -599,7 +624,6 @@ export async function reactivatePlayerEndpoint(
       return;
     }
 
-    // Get aggregated metrics
     const viewCount = getProfileViewCount(playerId);
     const viewerCount = getUniqueViewerCount(playerId);
     const contactUnlockCount = getContactUnlockCount(playerId);
@@ -614,18 +638,6 @@ export async function reactivatePlayerEndpoint(
         lastUpdated,
       },
     });
-      res.status(400).json({ success: false, error: idResult.error.errors[0]?.message ?? "Invalid playerId", code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const playerId = sanitizeInput(req.params.playerId);
-    const row = getPlayerById(playerId);
-    if (!row) {
-      res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
-      return;
-    }
-    reactivatePlayer(playerId);
-    await invalidatePlayerCache(playerId);
-    res.json({ success: true, message: "Player profile reactivated successfully" });
   } catch (err) {
     next(err);
   }
