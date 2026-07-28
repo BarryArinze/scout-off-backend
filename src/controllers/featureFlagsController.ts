@@ -2,6 +2,8 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { getAllFeatureFlags } from '../db';
 import { setFeatureFlag } from '../services/featureFlags';
+import { clearFeatureFlagCache } from '../services/featureFlags';
+
 
 const updateFeatureFlagSchema = z.object({
   name: z
@@ -19,12 +21,15 @@ export async function getFeatureFlags(
   next: NextFunction,
 ): Promise<void> {
   try {
+    clearFeatureFlagCache();
+
     const flags = getAllFeatureFlags().map((row) => ({
       name: row.name,
       enabled: row.enabled === 1,
       updated_at: row.updated_at,
       updated_by: row.updated_by,
     }));
+
     res.json({ success: true, data: flags });
   } catch (err) {
     next(err);
@@ -49,6 +54,7 @@ export async function updateFeatureFlag(
 
     const { name, enabled } = parsed.data;
     const updatedBy = req.account ?? 'unknown';
+
     setFeatureFlag(name, enabled, updatedBy);
 
     res.json({
