@@ -1746,22 +1746,32 @@ export interface WebhookSubscription {
   id: number;
   url: string;
   secret: string;
+  scout_wallet: string | null;
+  event_types: string | null; // JSON array of ContractEventType strings, or null = all
   created_at: string;
 }
 
-export function createWebhookSubscription(url: string, secret?: string): WebhookSubscription {
+export function createWebhookSubscription(
+  url: string,
+  secret?: string,
+  scoutWallet?: string,
+  eventTypes?: string[],
+): WebhookSubscription {
   const finalSecret = secret ?? crypto.randomBytes(32).toString('hex');
   // Encrypted at rest (#686) — only the ciphertext is ever persisted. The
   // plaintext is returned to the caller here (e.g. for the API response at
   // issuance time) but is never written back to storage.
   const encryptedSecret = encryptWebhookSecret(finalSecret);
-  const sql = 'INSERT INTO webhook_subscriptions (url, secret) VALUES (?, ?)';
+  const eventTypesJson = eventTypes && eventTypes.length > 0 ? JSON.stringify(eventTypes) : null;
+  const sql = 'INSERT INTO webhook_subscriptions (url, secret, scout_wallet, event_types) VALUES (?, ?, ?, ?)';
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(url, encryptedSecret);
+    const info = getDb().prepare(sql).run(url, encryptedSecret, scoutWallet ?? null, eventTypesJson);
     return {
       id: Number(info.lastInsertRowid),
       url,
       secret: finalSecret,
+      scout_wallet: scoutWallet ?? null,
+      event_types: eventTypesJson,
       created_at: new Date().toISOString(),
     };
   });
@@ -1774,6 +1784,42 @@ export function listWebhookSubscriptions(): WebhookSubscription[] {
     // Decrypted only here, in memory, immediately before the caller signs a
     // delivery with it (src/services/webhooks.ts) — never persisted.
     return rows.map((row) => ({ ...row, secret: decryptWebhookSecret(row.secret) }));
+  });
+}
+
+/**
+ * Look up a single webhook subscription by its row id.
+ * Returns the row with the secret still encrypted (callers that need the
+ * plaintext secret must call decryptWebhookSecret themselves).
+ * Returns undefined when not found.
+ */
+export function getWebhookSubscriptionById(id: number): WebhookSubscription | undefined {
+  const sql = 'SELECT * FROM webhook_subscriptions WHERE id = ?';
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).get(id) as WebhookSubscription | undefined,
+  );
+}
+
+/**
+ * List all webhook subscriptions owned by a specific scout wallet.
+ * Secrets are returned encrypted — decrypt before use.
+ */
+export function getWebhookSubscriptionsByScout(scoutWallet: string): WebhookSubscription[] {
+  const sql = 'SELECT * FROM webhook_subscriptions WHERE scout_wallet = ? ORDER BY id ASC';
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).all(scoutWallet) as WebhookSubscription[],
+  );
+}
+
+/**
+ * Delete a webhook subscription by id, scoped to a specific scout wallet to
+ * prevent cross-scout deletion. Returns true when a row was deleted.
+ */
+export function deleteWebhookSubscription(id: number, scoutWallet: string): boolean {
+  const sql = 'DELETE FROM webhook_subscriptions WHERE id = ? AND scout_wallet = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(id, scoutWallet);
+    return info.changes > 0;
   });
 }
 
