@@ -1,4 +1,5 @@
 import { server } from './stellar';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import {
   getDb,
@@ -14,6 +15,8 @@ import {
 import { dispatchEventWebhook } from './webhooks';
 import { logger } from '../utils/logger';
 import { tierForApprovedMilestones } from './tierPromotion';
+
+const tracer = trace.getTracer('scout-off-backend');
 
 // Lazy import cache service to avoid circular dependency
 function getCache() {
@@ -87,6 +90,8 @@ function onAfterInsert(_eventId: string): void { /* hook */ }
 // ─── Indexer ──────────────────────────────────────────────────────────────────
 
 export async function indexEvents(): Promise<void> {
+  return tracer.startActiveSpan('indexer.poll', async (span) => {
+  try {
   const db = getDb();
   const insert = db.prepare(
     'INSERT OR IGNORE INTO events (type, ledger, ledger_hash, tx_hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
@@ -95,11 +100,14 @@ export async function indexEvents(): Promise<void> {
   const lastIndexed = fetchLastIndexedLedger();
   const margin = getFinalityMargin();
   const fromLedger = Math.max(0, lastIndexed > margin ? lastIndexed - margin : 0);
+  span.setAttribute('indexer.ledger_start', fromLedger);
 
   const response = await server.getEvents({
     startLedger: fromLedger || undefined,
     filters: [{ type: 'contract', contractIds: [config.contractId] }],
   });
+  span.setAttribute('indexer.ledger_end', response.latestLedger);
+  span.setAttribute('indexer.events_processed', response.events.length);
 
   const lagAfterPoll = Math.max(0, response.latestLedger - (lastIndexed > 0 ? lastIndexed - 1 : response.latestLedger));
   indexerLedgerLag = lagAfterPoll;
@@ -201,6 +209,14 @@ export async function indexEvents(): Promise<void> {
 
   const latest = response.events.at(-1)!;
   indexerLedgerLag = Math.max(0, response.latestLedger - latest.ledger);
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+  }
+  });
 }
 
 // ─── Trial offer event log (#285) ──────────────────────────────────────────────
