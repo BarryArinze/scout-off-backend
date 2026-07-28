@@ -1241,6 +1241,92 @@ export function getScoutNotes(scoutWallet: string): ScoutPlayerNoteRow[] {
   );
 }
 
+// ─── Scout player notes v2 helpers (multi-note CRUD) ─────────────────────────
+
+export interface ScoutPlayerNoteV2Row {
+  id: number;
+  scout_wallet: string;
+  player_id: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * Insert a new private note for a scout on a specific player.
+ * Returns the new row id.
+ */
+export function insertScoutPlayerNote(p: {
+  scout_wallet: string;
+  player_id: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+}): number {
+  const sql = `
+    INSERT INTO scout_player_notes_v2 (scout_wallet, player_id, content, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+  `;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(p.scout_wallet, p.player_id, p.content, p.created_at, p.updated_at);
+    return info.lastInsertRowid as number;
+  });
+}
+
+/**
+ * List all notes for a scout-player pair, ordered newest-first.
+ */
+export function getScoutPlayerNotes(
+  scoutWallet: string,
+  playerId: string,
+): ScoutPlayerNoteV2Row[] {
+  const sql = `
+    SELECT * FROM scout_player_notes_v2
+    WHERE scout_wallet = ? AND player_id = ?
+    ORDER BY created_at DESC
+  `;
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).all(scoutWallet, playerId) as ScoutPlayerNoteV2Row[],
+  );
+}
+
+/**
+ * Update the content of a note identified by id and scout_wallet.
+ * Scoping the update to scout_wallet prevents cross-scout tampering.
+ * Returns true when a row was updated, false when not found.
+ */
+export function updateScoutPlayerNote(p: {
+  id: number;
+  scout_wallet: string;
+  content: string;
+  updated_at: number;
+}): boolean {
+  const sql = `
+    UPDATE scout_player_notes_v2
+    SET content = ?, updated_at = ?
+    WHERE id = ? AND scout_wallet = ?
+  `;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(p.content, p.updated_at, p.id, p.scout_wallet);
+    return info.changes > 0;
+  });
+}
+
+/**
+ * Delete a note by id, scoped to the owning scout wallet.
+ * Returns true when a row was deleted, false when not found.
+ */
+export function deleteScoutPlayerNote(id: number, scoutWallet: string): boolean {
+  const sql = `
+    DELETE FROM scout_player_notes_v2
+    WHERE id = ? AND scout_wallet = ?
+  `;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(id, scoutWallet);
+    return info.changes > 0;
+  });
+}
+
 // ─── API key helpers (#490) ───────────────────────────────────────────────────
 
 export interface ApiKeyRow {
