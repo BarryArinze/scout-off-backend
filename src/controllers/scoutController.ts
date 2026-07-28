@@ -11,6 +11,8 @@ import {
   insertContactUnlock,
   getContactUnlocksByScout,
   hasContactUnlock,
+  updatePlayerProgress,
+  insertTrialOffer as insertTrialOfferRow,
 } from '../db';
 import {
   submitContactPayment,
@@ -24,6 +26,7 @@ import {
 } from '../services/stellar';
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { logger } from '../utils/logger';
+import { broadcaster } from '../services/eventBroadcaster';
 import config from '../config';
 import { ErrorCode } from '../utils/errorCodes';
 import { insertTrialOffer, getTrialOffers } from '../services/indexer';
@@ -193,7 +196,7 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
 
     const result = await purchaseSubscription(wallet, tier, duration);
 
-    // Persist locally
+    // Persist locally — grace period is applied at query time, not stored
     insertSubscription({
       scout_wallet: wallet,
       tier,
@@ -201,7 +204,29 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
       created_at: Math.floor(Date.now() / 1000),
     });
 
-    const body = { success: true, data: result };
+    logger.info(`[scout] action=new_subscription scout=${wallet} tier=${tier} duration=${duration} expiry=${result.expiresAt}`);
+
+    // Broadcast SSE event to any connected subscribers
+    broadcaster.broadcast({
+      type: 'scout_subscribed',
+      payload: {
+        scout: wallet,
+        tier,
+        expires_at: result.expiresAt,
+        tx_hash: result.transactionId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    const body = {
+      success: true,
+      data: {
+        transactionId: result.transactionId,
+        tier,
+        expiresAt: result.expiresAt,
+        status: result.status,
+      },
+    };
     res.status(201).json(body);
   } catch (err) {
     if (err instanceof PaymentError) {
