@@ -19,6 +19,12 @@ import { putScoutNote, getScoutNoteHandler, listScoutNotesHandler } from '../con
 import { issueApiKey, listApiKeys, revokeApiKey } from '../controllers/apiKeyController';
 import { addBookmark, removeBookmark, listBookmarks } from '../controllers/scoutBookmarksController';
 import { createSavedSearch, listSavedSearches, deleteSavedSearchHandler } from '../controllers/scoutSavedSearchesController';
+import {
+  registerWebhook,
+  listWebhooks,
+  deleteWebhook,
+  testWebhook,
+} from '../controllers/webhookSubscriptionController';
 import { requireFeatureFlag } from '../middleware/requireFeatureFlag';
 import { FeatureFlags } from '../services/featureFlags';
 import { requireRole } from '../middleware/auth';
@@ -265,5 +271,44 @@ router.route('/:wallet/saved-searches')
 router.route('/:wallet/saved-searches/:id')
   .delete(requireRole('scout'), requireFeatureFlag(FeatureFlags.SAVED_SEARCHES), deleteSavedSearchHandler)
   .all(methodNotAllowed(['DELETE']));
+
+// ─── Webhook subscription management (#806) ───────────────────────────────────
+
+/**
+ * POST /api/scouts/:wallet/webhooks
+ * Register a webhook URL. Generates a per-subscription HMAC secret returned
+ * once in plaintext; subsequent GETs show a masked value only.
+ * Body: { url: string, eventTypes?: ContractEventType[] }
+ *
+ * GET /api/scouts/:wallet/webhooks
+ * List all active subscriptions (secrets masked).
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/webhooks')
+  .post(requireRole('scout'), registerWebhook)
+  .get(requireRole('scout'), listWebhooks)
+  .all(methodNotAllowed(['POST', 'GET', 'HEAD']));
+
+/**
+ * DELETE /api/scouts/:wallet/webhooks/:id
+ * Delete a subscription. Returns 404 when not found or owned by another scout.
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/webhooks/:id')
+  .delete(requireRole('scout'), deleteWebhook)
+  .all(methodNotAllowed(['DELETE']));
+
+/**
+ * POST /api/scouts/:wallet/webhooks/:id/test
+ * Send a test ping to the registered URL, signed with the subscription secret.
+ * Returns 502 when the remote server does not respond with 2xx.
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/webhooks/:id/test')
+  .post(requireRole('scout'), testWebhook)
+  .all(methodNotAllowed(['POST']));
 
 export default router;
