@@ -11,8 +11,8 @@ import {
   insertContactUnlock,
   getContactUnlocksByScout,
   hasContactUnlock,
-  getIdempotencyRecord,
-  saveIdempotencyRecord,
+  updatePlayerProgress,
+  insertTrialOffer as insertTrialOfferRow,
 } from '../db';
 import {
   submitContactPayment,
@@ -26,12 +26,12 @@ import {
 } from '../services/stellar';
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { logger } from '../utils/logger';
+import { broadcaster } from '../services/eventBroadcaster';
 import config from '../config';
 import { ErrorCode } from '../utils/errorCodes';
 import { insertTrialOffer, getTrialOffers } from '../services/indexer';
 import { invokeContract, strVal } from '../utils/contract';
 import { isValidEvidenceUri } from '../utils/uriValidator';
-import { inFlightLock } from '../utils/inflightLock';
 
 // ─── Validation schemas ────────────────────────────────────────────────────────
 
@@ -180,22 +180,11 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
 
 /** POST /api/scouts/:wallet/subscribe — new subscription */
 export async function subscribe(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
   try {
     const { wallet } = req.params;
     if (req.account !== wallet) {
       res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account' });
       return;
-    }
-
-    // Safe retries (#idempotency): a duplicate key within the TTL returns the
-    // cached response instead of triggering a new on-chain transaction.
-    if (idempotencyKey) {
-      const cached = getIdempotencyRecord(idempotencyKey);
-      if (cached) {
-        res.status(cached.status_code).json(JSON.parse(cached.response));
-        return;
-      }
     }
 
     const parsed = subscribeSchema.safeParse(req.body);
@@ -205,12 +194,9 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
     }
     const { tier, duration } = parsed.data;
 
-    // Use in-flight lock to prevent concurrent subscription requests for the same wallet
-    const result = await inFlightLock.withLock(`subscribe:${wallet}`, async () => {
-      return await purchaseSubscription(wallet, tier, duration);
-    });
+    const result = await purchaseSubscription(wallet, tier, duration);
 
-    // Persist locally
+    // Persist locally — grace period is applied at query time, not stored
     insertSubscription({
       scout_wallet: wallet,
       tier,
@@ -218,13 +204,33 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
       created_at: Math.floor(Date.now() / 1000),
     });
 
-    const body = { success: true, data: result };
-    if (idempotencyKey) saveIdempotencyRecord(idempotencyKey, 201, body);
+    logger.info(`[scout] action=new_subscription scout=${wallet} tier=${tier} duration=${duration} expiry=${result.expiresAt}`);
+
+    // Broadcast SSE event to any connected subscribers
+    broadcaster.broadcast({
+      type: 'scout_subscribed',
+      payload: {
+        scout: wallet,
+        tier,
+        expires_at: result.expiresAt,
+        tx_hash: result.transactionId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    const body = {
+      success: true,
+      data: {
+        transactionId: result.transactionId,
+        tier,
+        expiresAt: result.expiresAt,
+        status: result.status,
+      },
+    };
     res.status(201).json(body);
   } catch (err) {
     if (err instanceof PaymentError) {
       const body = { success: false, error: err.message, code: err.code };
-      if (idempotencyKey) saveIdempotencyRecord(idempotencyKey, 402, body);
       res.status(402).json(body);
       return;
     }
