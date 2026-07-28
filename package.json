@@ -17,22 +17,23 @@
     "test": "node node_modules/jest/bin/jest.js --runInBand",
     "test:coverage": "node node_modules/jest/bin/jest.js --runInBand --coverage",
     "test:watch": "node node_modules/jest/bin/jest.js --watch",
-    "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts' --ext .ts",
-    "seed": "ts-node --project tsconfig.scripts.json scripts/seed.ts",
-    "migration:status": "ts-node --project tsconfig.scripts.json scripts/migration-status.ts"
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts' 'scripts/*.ts' --ext .ts",
+    "seed": "ts-node --project tsconfig.scripts.json scripts/seed.ts",
+    "migration:status": "ts-node --project tsconfig.scripts.json scripts/migration-status.ts",
+    "migrate": "ts-node --project tsconfig.scripts.json scripts/migrate.ts",
     "build:openapi": "node scripts/generate-openapi-json.js",
     "validate:openapi": "node scripts/validate-openapi.js",
     "loadtest": "ts-node --project tsconfig.scripts.json scripts/loadtest.ts",
-    "seed": "ts-node --project tsconfig.scripts.json scripts/seed.ts",
     "backfill": "node scripts/backfill.js",
     "backup-db": "bash scripts/backup-db.sh",
     "verify-backup": "bash scripts/verify-backup.sh"
   },
   "lint-staged": {
-    "*.ts": [
-      "eslint --fix",
-      "prettier --write"
+    "src/**/*.ts": [
+      "eslint --fix --ext .ts"
+    ],
+    "tests/**/*.ts": [
+      "eslint --fix --ext .ts"
     ]
   },
   "dependencies": {
@@ -87,14 +88,6 @@
     "ts-node-dev": "2.0.0",
     "typescript": "5.4.5"
   },
-  "lint-staged": {
-    "src/**/*.ts": [
-      "eslint --fix --ext .ts"
-    ],
-    "tests/**/*.ts": [
-      "eslint --fix --ext .ts"
-    ]
-  },
   "jest": {
     "projects": [
       {
@@ -108,6 +101,11 @@
         "setupFiles": [
           "<rootDir>/tests/setup.ts"
         ],
+        "transform": {
+          "^.+\\.tsx?$": ["ts-jest", {
+            "diagnostics": false
+          }]
+        },
         "moduleNameMapper": {
           "^@paralleldrive/cuid2$": "<rootDir>/__mocks__/@paralleldrive/cuid2.js"
         },

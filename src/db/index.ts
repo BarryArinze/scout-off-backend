@@ -1453,6 +1453,8 @@ export function getContactUnlockCount(playerId: string): number {
     getDb().prepare(sql).get(playerId) as { count: number }
   );
   return row.count;
+}
+
 // ─── Feature flags (#494) ─────────────────────────────────────────────────────
 
 export interface FeatureFlagRow {
