@@ -153,20 +153,34 @@ function processUpMigrations(
   return results;
 }
 
-function processDownMigrations(
-  driver: DbDriver,
-  migrationFiles: string[],
-  allFiles: string[],
-  steps?: number,
-  dryRun: boolean = false
-): MigrationResult[] {
-  const results: MigrationResult[] = [];
-
-  const appliedMigrations = getAppliedMigrations(driver);
-  const appliedUpFiles = migrationFiles.filter((f) => appliedMigrations.has(f)).sort();
-
-  if (appliedUpFiles.length === 0) {
-    return results;
+    try {
+      driver.transaction(() => {
+        driver.exec(sql);
+        driver.run('INSERT INTO migrations (id, applied_at) VALUES (?, ?)', [
+          file,
+          Date.now(),
+        ]);
+      });
+    } catch (err) {
+      // Some migration files ADD COLUMN a column that a later change to the
+      // inline schema in initDb() started creating from the start (e.g.
+      // 014_indexer_reorgs.sql's `ledger_hash` is already part of the
+      // `events` table definition). On any database that never ran this
+      // migration against an older schema — a fresh :memory: test DB, a new
+      // deployment — the column already exists in the desired final state,
+      // so treat "duplicate column" as success and record the migration as
+      // applied instead of aborting the rest of the migration run. Any other
+      // failure still aborts, as before.
+      const message = err instanceof Error ? err.message : String(err);
+      const isDuplicateColumn = /duplicate column name|already exists/i.test(message);
+      if (!isDuplicateColumn) {
+        throw err;
+      }
+      driver.run('INSERT INTO migrations (id, applied_at) VALUES (?, ?)', [
+        file,
+        Date.now(),
+      ]);
+    }
   }
 
   const maxSteps = steps !== undefined ? steps : appliedUpFiles.length;

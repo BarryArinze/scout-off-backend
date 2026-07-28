@@ -11,7 +11,37 @@ import {
 import jwt from 'jsonwebtoken';
 import config from '../config';
 
-const SERVER_KEYPAIR = Keypair.random(); // ephemeral; use a persisted key in production
+/**
+ * Resolve the SEP-10 server signing keypair.
+ *
+ * Priority:
+ *   1. `config.sep10ServerSecret` — the persisted secret loaded from the
+ *      SEP10_SERVER_SECRET environment variable.  All backend instances in a
+ *      horizontally-scaled deployment **must** share this value so that a
+ *      challenge issued by one instance can be verified by any other.
+ *   2. Ephemeral fallback — generated once at module load when the secret is
+ *      absent.  This is intentionally tolerated only in development and test
+ *      environments (production and staging emit a warning / error at config
+ *      load time before reaching this point).  The fallback is acceptable for
+ *      single-process local dev but will cause cross-instance failures under a
+ *      load balancer, which is exactly the scenario SEP10_SERVER_SECRET solves.
+ */
+function resolveServerKeypair(): Keypair {
+  if (config.sep10ServerSecret) {
+    try {
+      return Keypair.fromSecret(config.sep10ServerSecret);
+    } catch (err) {
+      throw new Error(
+        `SEP10_SERVER_SECRET is set but is not a valid Stellar secret key (strkey starting with 'S'). ` +
+        `Generate a valid keypair with \`stellar keys generate\`. Original error: ${(err as Error).message}`,
+      );
+    }
+  }
+  // Ephemeral fallback for development / test only.
+  return Keypair.random();
+}
+
+const SERVER_KEYPAIR = resolveServerKeypair();
 const CHALLENGE_TTL_SECONDS = 300; // 5 min to sign the challenge
 const TOKEN_TTL_SECONDS = 86400;   // 24 h JWT validity
 
