@@ -13,6 +13,7 @@ import { idempotency } from '../middleware/idempotency';
 import { ipAllowlistMiddleware } from '../middleware/ipAllowlist';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
 import { rateLimit } from '../middleware/rateLimit';
+import { createTimeout } from '../middleware/timeout';
 
 /** Stricter rate limit for bulk import — 5 requests per minute per IP. */
 const importRateLimit = rateLimit({ windowMs: 60_000, max: 5 });
@@ -58,6 +59,8 @@ router.route('/events')
  *
  * Query params (same semantics as GET /api/admin/events): startDate, endDate (ISO 8601), eventType
  *
+ * Timeout: 120 s (overrides the 30 s default — large exports can take up to 60 s).
+ *
  * @response 200 CSV file with columns: event_type, ledger, timestamp, payload
  * @response 400 { success: false, error: string } - Invalid date range
  * @response 401 { success: false, error: string } - Missing token
@@ -65,7 +68,7 @@ router.route('/events')
  * @auth Bearer (admin role required)
  */
 router.route('/events/export')
-  .get(requireRole('admin'), exportEvents)
+  .get(createTimeout(120_000), requireRole('admin'), exportEvents)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
 /**
@@ -466,6 +469,9 @@ router.route('/actions/:id/approve')
  * delay. Duplicate events are silently discarded via the UNIQUE constraint on
  * tx_hash. The job status is available via GET /api/admin/reindex/status.
  *
+ * Timeout: disabled (0). The endpoint returns 202 immediately — the actual
+ * backfill runs as a background job and must never be killed by a network timeout.
+ *
  * @body { fromLedger: number, toLedger: number }
  * @response 202 { success: true, data: { fromLedger, toLedger, status: 'running' } }
  * @response 409 { success: false, error: string } - job already running
@@ -473,7 +479,7 @@ router.route('/actions/:id/approve')
  * @auth Bearer (admin role required)
  */
 router.route('/reindex')
-  .post(requireRole('admin'), triggerReindex)
+  .post(createTimeout(0), requireRole('admin'), triggerReindex)
   .all(methodNotAllowed(['POST']));
 
 /**

@@ -20,7 +20,7 @@ import { API_PREFIX, API_V1_PREFIX, API_V2_PREFIX } from './config';
 import { mountGraphQL } from './graphql';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
 import { ipReputationMiddleware } from './middleware/ipReputation';
-import { requestTimeout } from './middleware/timeout';
+import { createTimeout, requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
 import { getDb } from './db';
 import { getVersionInfo } from './version';
@@ -250,11 +250,11 @@ app.get('/ready', async (_req, res) => {
 });
 
 // Kubernetes-style liveness and readiness probes
-app.get('/health/liveness', (_req, res) => {
+app.get('/health/liveness', createTimeout(5_000), (_req, res) => {
   res.json({ status: 'ok' });
 });
 
-app.get('/health/readiness', async (_req, res) => {
+app.get('/health/readiness', createTimeout(5_000), async (_req, res) => {
   const services = await checkReadiness();
   const allOk = Object.values(services).every(v => v === 'ok' || v === 'disabled');
   if (allOk) {

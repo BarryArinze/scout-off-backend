@@ -15,10 +15,24 @@ import {
   unlockContactSchema,
 } from '../controllers/scoutController';
 import { getScoutRecommendations } from '../controllers/scoutRecommendationsController';
-import { putScoutNote, getScoutNoteHandler, listScoutNotesHandler } from '../controllers/scoutNotesController';
+import {
+  putScoutNote,
+  getScoutNoteHandler,
+  listScoutNotesHandler,
+  createPlayerNote,
+  listPlayerNotes,
+  updatePlayerNote,
+  deletePlayerNote,
+} from '../controllers/scoutNotesController';
 import { issueApiKey, listApiKeys, revokeApiKey } from '../controllers/apiKeyController';
 import { addBookmark, removeBookmark, listBookmarks } from '../controllers/scoutBookmarksController';
 import { createSavedSearch, listSavedSearches, deleteSavedSearchHandler } from '../controllers/scoutSavedSearchesController';
+import {
+  registerWebhook,
+  listWebhooks,
+  deleteWebhook,
+  testWebhook,
+} from '../controllers/webhookSubscriptionController';
 import { requireFeatureFlag } from '../middleware/requireFeatureFlag';
 import { FeatureFlags } from '../services/featureFlags';
 import { requireRole } from '../middleware/auth';
@@ -142,6 +156,8 @@ router.route('/:wallet/trial-offers')
   .get(requireRole('scout'), listTrialOffers)
   .post(
     requireRole('scout'),
+    walletRateLimit(),
+    idempotency,
     validateBody(trialOfferSchema),
     createTrialOffer,
   )
@@ -183,6 +199,37 @@ router.route('/:wallet/notes/:playerId')
 router.route('/:wallet/notes')
   .get(requireRole('scout'), listScoutNotesHandler)
   .all(methodNotAllowed(['GET', 'HEAD']));
+
+// ─── Multi-note CRUD for scout-player notes ───────────────────────────────────
+
+/**
+ * POST /api/scouts/:wallet/players/:playerId/notes
+ * Create a new private note for the authenticated scout on the given player.
+ * Body: { content: string } — max 2 000 characters.
+ *
+ * GET /api/scouts/:wallet/players/:playerId/notes
+ * List all private notes for the scout-player pair, newest-first.
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/players/:playerId/notes')
+  .post(requireRole('scout'), createPlayerNote)
+  .get(requireRole('scout'), listPlayerNotes)
+  .all(methodNotAllowed(['POST', 'GET', 'HEAD']));
+
+/**
+ * PUT /api/scouts/:wallet/players/:playerId/notes/:noteId
+ * Update a note's content.  Returns 404 when not found.
+ *
+ * DELETE /api/scouts/:wallet/players/:playerId/notes/:noteId
+ * Delete a note.  Returns 404 when not found.
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/players/:playerId/notes/:noteId')
+  .put(requireRole('scout'), updatePlayerNote)
+  .delete(requireRole('scout'), deletePlayerNote)
+  .all(methodNotAllowed(['PUT', 'DELETE']));
 
 // ─── API key management (#490) ────────────────────────────────────────────────
 
@@ -265,5 +312,44 @@ router.route('/:wallet/saved-searches')
 router.route('/:wallet/saved-searches/:id')
   .delete(requireRole('scout'), requireFeatureFlag(FeatureFlags.SAVED_SEARCHES), deleteSavedSearchHandler)
   .all(methodNotAllowed(['DELETE']));
+
+// ─── Webhook subscription management (#806) ───────────────────────────────────
+
+/**
+ * POST /api/scouts/:wallet/webhooks
+ * Register a webhook URL. Generates a per-subscription HMAC secret returned
+ * once in plaintext; subsequent GETs show a masked value only.
+ * Body: { url: string, eventTypes?: ContractEventType[] }
+ *
+ * GET /api/scouts/:wallet/webhooks
+ * List all active subscriptions (secrets masked).
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/webhooks')
+  .post(requireRole('scout'), registerWebhook)
+  .get(requireRole('scout'), listWebhooks)
+  .all(methodNotAllowed(['POST', 'GET', 'HEAD']));
+
+/**
+ * DELETE /api/scouts/:wallet/webhooks/:id
+ * Delete a subscription. Returns 404 when not found or owned by another scout.
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/webhooks/:id')
+  .delete(requireRole('scout'), deleteWebhook)
+  .all(methodNotAllowed(['DELETE']));
+
+/**
+ * POST /api/scouts/:wallet/webhooks/:id/test
+ * Send a test ping to the registered URL, signed with the subscription secret.
+ * Returns 502 when the remote server does not respond with 2xx.
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/webhooks/:id/test')
+  .post(requireRole('scout'), testWebhook)
+  .all(methodNotAllowed(['POST']));
 
 export default router;
