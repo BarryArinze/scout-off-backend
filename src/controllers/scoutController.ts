@@ -463,14 +463,101 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
 export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
 
-    const result = await invokeContract('log_trial_offer', [strVal(wallet), strVal(playerId), strVal(detailsUri)]);
+    if (req.account !== wallet) {
+      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account', code: ErrorCode.WALLET_MISMATCH });
+      return;
+    }
+
+    const parsed = trialOfferSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body' });
+      return;
+    }
+    const { playerId, detailsUri } = parsed.data;
+
+    // Verify player exists
+    const playerExists = queryEvents('player_registered').some((e) => e.payload.player_id === playerId);
+    if (!playerExists) {
+      res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
+    }
+
+    // Check scout has active subscription or prior contact unlock
+    const hasAccess = await scoutHasPlayerAccess(wallet, playerId);
+    if (!hasAccess) {
+      res.status(402).json({
+        success: false,
+        error: 'Scout must be subscribed or have paid the contact fee for this player',
+        code: ErrorCode.SUBSCRIPTION_REQUIRED,
+      });
+      return;
+    }
+
+    logger.info(`[scout] action=create_trial_offer scout=${wallet} playerId=${playerId} detailsUri=${detailsUri}`);
+
+    // Submit on-chain via Soroban
+    const result = await stellarLogTrialOffer(wallet, playerId, detailsUri);
     const createdAt = Math.floor(Date.now() / 1000);
-    insertTrialOffer(wallet, playerId, detailsUri, result.hash, createdAt);
+    const offerId = `offer-${createdAt}-${playerId}`;
 
-    res.status(201).json({ success: true, data: { transactionId: result.hash } });
+    // Persist to trial_offer_events (indexer event log, deduped by tx_hash)
+    insertTrialOffer(wallet, playerId, detailsUri, result.transactionId, createdAt);
+
+    // Persist to trial_offers (offer/response workflow table)
+    insertTrialOfferRow({
+      offer_id: offerId,
+      scout_wallet: wallet,
+      player_id: playerId,
+      details_uri: detailsUri,
+      created_at: createdAt,
+    });
+
+    // Promote player to Elite Tier (Level 3)
+    updatePlayerProgress(playerId, 3);
+
+    // Emit SSE: trial offer logged
+    broadcaster.broadcast({
+      type: 'trial_offer_logged',
+      payload: {
+        offer_id: offerId,
+        scout: wallet,
+        player_id: playerId,
+        details_uri: detailsUri,
+        tx_hash: result.transactionId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    // Emit SSE: tier promoted to Elite
+    broadcaster.broadcast({
+      type: 'milestone_approved',
+      payload: {
+        player_id: playerId,
+        new_tier: 3,
+        reason: 'trial_offer_logged',
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        offerId,
+        transactionId: result.transactionId,
+        scout: wallet,
+        playerId,
+        detailsUri,
+        createdAt,
+        tierPromoted: true,
+        newTier: 3,
+      },
+    });
   } catch (err) {
+    if (err instanceof PaymentError) {
+      res.status(402).json({ success: false, error: err.message, code: err.code });
+      return;
+    }
     next(err);
   }
 }

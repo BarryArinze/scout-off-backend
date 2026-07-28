@@ -156,6 +156,8 @@ router.route('/:wallet/trial-offers')
   .get(requireRole('scout'), listTrialOffers)
   .post(
     requireRole('scout'),
+    walletRateLimit(),
+    idempotency,
     validateBody(trialOfferSchema),
     createTrialOffer,
   )
