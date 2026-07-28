@@ -11,6 +11,7 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 |---|---|---|
 | `CONTRACT_ID` | ✅ | Deployed Soroban contract address |
 | `JWT_SECRET` | ✅ | Min 32 chars; rotate on compromise |
+| `SEP10_SERVER_SECRET` | ✅ | Stellar secret key (starts with `S`) used to sign and verify SEP-10 challenge transactions. **Must be identical across every backend instance** — without it each process generates an ephemeral random keypair, causing cross-instance auth failures under a load balancer. Generate with `stellar keys generate` and store in your secrets manager. See [docs/auth.md](docs/auth.md#sep-10-server-keypair-sep10_server_secret) for rotation guidance. |
 | `HORIZON_URL` | ✅ | e.g. `https://horizon-testnet.stellar.org` |
 | `SOROBAN_RPC_URL` | ✅ | e.g. `https://soroban-testnet.stellar.org` |
 | `NETWORK` | ✅ | `testnet` or `mainnet` |
@@ -54,8 +55,21 @@ control.
 kubectl create secret generic scout-off-secrets \
   --from-literal=CONTRACT_ID=<your-soroban-contract-id> \
   --from-literal=JWT_SECRET=<min-32-char-random-string> \
+  --from-literal=SEP10_SERVER_SECRET=<stellar-secret-key-starting-with-S> \
   --namespace <your-namespace>
 ```
+
+> **Horizontal scaling note:** `SEP10_SERVER_SECRET` is the most important variable to
+> get right in a multi-pod deployment. Every pod **must** receive the same value.
+> If pods receive different keys (or any pod falls back to the ephemeral random
+> key because the variable is absent), a challenge built by one pod will be
+> rejected by any other pod — causing intermittent, hard-to-diagnose auth
+> failures proportional to `(N-1)/N` where N is the replica count.
+> Store the key in the Kubernetes Secret (as shown above) and reference it in
+> the Deployment's `envFrom` / `env.valueFrom.secretKeyRef` block so all pods
+> share the exact same value. See
+> [docs/auth.md](docs/auth.md#sep-10-server-keypair-sep10_server_secret) for
+> generation instructions and the safe rotation procedure.
 
 Rotate values by deleting and re-creating the Secret, then triggering a rollout:
 

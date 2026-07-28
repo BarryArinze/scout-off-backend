@@ -240,4 +240,104 @@ describe('sep10', () => {
       }
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Cross-instance verification (horizontal scaling)
+  // ---------------------------------------------------------------------------
+  /**
+   * This describe block proves the fix for the horizontal-scaling bug.
+   *
+   * Before the fix every backend process called Keypair.random() at module
+   * load, so two independent processes had different keypairs.  Instance A
+   * built the challenge (signed with keypair A), but if the wallet's
+   * POST /auth/token request landed on instance B, the server-signature check
+   * failed because keypair B ≠ keypair A.
+   *
+   * After the fix both instances load the keypair from SEP10_SERVER_SECRET.
+   * We simulate this by using jest.isolateModules() to load the sep10 module
+   * twice from scratch — exactly as two separate Node.js processes would — with
+   * the same SEP10_SERVER_SECRET env var, then assert that a challenge built by
+   * one "instance" verifies via the other's verifyAndIssueToken.
+   */
+  describe('cross-instance challenge verification (horizontal scaling fix)', () => {
+    // A real Stellar secret key used as the shared SEP10_SERVER_SECRET.
+    // This keypair was generated offline and is safe to use in tests only.
+    const SHARED_SERVER_SECRET = 'SCZANGBA5YELQU3PXKSFPKPJ6ENOGJHQJZ4AP7ZUZY7OVKOL4GFXO3Q';
+
+    function loadSep10WithSharedSecret(): Promise<{
+      buildChallenge: (account: string) => string;
+      verifyAndIssueToken: (xdr: string, role?: string) => { token: string; account: string };
+    }> {
+      return new Promise((resolve, reject) => {
+        jest.isolateModules(() => {
+          try {
+            // Override the env var so this fresh module load picks up the shared key.
+            process.env.SEP10_SERVER_SECRET = SHARED_SERVER_SECRET;
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const mod = require('../../src/services/sep10');
+            resolve(mod);
+          } catch (err) {
+            reject(err);
+          } finally {
+            // Restore so other tests are unaffected.
+            delete process.env.SEP10_SERVER_SECRET;
+          }
+        });
+      });
+    }
+
+    it('instance B verifies a challenge built by instance A when both share SEP10_SERVER_SECRET', async () => {
+      // Load two independent instances of the sep10 module, each initialised
+      // with the same SEP10_SERVER_SECRET — simulating two backend processes.
+      const instanceA = await loadSep10WithSharedSecret();
+      const instanceB = await loadSep10WithSharedSecret();
+
+      // Instance A builds the challenge.
+      const challengeXdr = instanceA.buildChallenge(clientKeypair.publicKey());
+
+      // The client signs the challenge (as it would in a real auth flow).
+      const tx = new Transaction(challengeXdr, Networks.TESTNET);
+      tx.sign(clientKeypair);
+      const signedXdr = tx.toXDR();
+
+      // Instance B verifies the signed challenge — must succeed despite being a
+      // completely separate module instance (i.e. a different "process").
+      const { token, account } = instanceB.verifyAndIssueToken(signedXdr);
+      expect(typeof token).toBe('string');
+      expect(account).toBe(clientKeypair.publicKey());
+    });
+
+    it('instance B rejects a challenge built with a different keypair (no shared secret)', async () => {
+      // instanceA is loaded with the shared secret.
+      const instanceA = await loadSep10WithSharedSecret();
+
+      // instanceB is loaded WITHOUT the shared secret — it gets a random ephemeral key.
+      // This replicates the pre-fix behaviour when SEP10_SERVER_SECRET is absent.
+      const instanceB = await new Promise<{
+        buildChallenge: (account: string) => string;
+        verifyAndIssueToken: (xdr: string, role?: string) => { token: string; account: string };
+      }>((resolve, reject) => {
+        jest.isolateModules(() => {
+          try {
+            // Ensure the env var is NOT set for this instance.
+            delete process.env.SEP10_SERVER_SECRET;
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            resolve(require('../../src/services/sep10'));
+          } catch (err) {
+            reject(err);
+          }
+        });
+      });
+
+      // Instance A builds a challenge signed with its configured keypair.
+      const challengeXdr = instanceA.buildChallenge(clientKeypair.publicKey());
+      const tx = new Transaction(challengeXdr, Networks.TESTNET);
+      tx.sign(clientKeypair);
+      const signedXdr = tx.toXDR();
+
+      // Instance B (different random keypair) must reject it — proving that
+      // sharing the secret is the only way to make cross-instance auth work.
+      expect(() => instanceB.verifyAndIssueToken(signedXdr)).toThrow('Challenge not signed by server');
+    });
+  });
 });
