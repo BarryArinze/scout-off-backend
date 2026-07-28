@@ -11,8 +11,6 @@ import {
   insertContactUnlock,
   getContactUnlocksByScout,
   hasContactUnlock,
-  getIdempotencyRecord,
-  saveIdempotencyRecord,
 } from '../db';
 import {
   submitContactPayment,
@@ -31,7 +29,6 @@ import { ErrorCode } from '../utils/errorCodes';
 import { insertTrialOffer, getTrialOffers } from '../services/indexer';
 import { invokeContract, strVal } from '../utils/contract';
 import { isValidEvidenceUri } from '../utils/uriValidator';
-import { inFlightLock } from '../utils/inflightLock';
 
 // ─── Validation schemas ────────────────────────────────────────────────────────
 
@@ -180,22 +177,11 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
 
 /** POST /api/scouts/:wallet/subscribe — new subscription */
 export async function subscribe(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
   try {
     const { wallet } = req.params;
     if (req.account !== wallet) {
       res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account' });
       return;
-    }
-
-    // Safe retries (#idempotency): a duplicate key within the TTL returns the
-    // cached response instead of triggering a new on-chain transaction.
-    if (idempotencyKey) {
-      const cached = getIdempotencyRecord(idempotencyKey);
-      if (cached) {
-        res.status(cached.status_code).json(JSON.parse(cached.response));
-        return;
-      }
     }
 
     const parsed = subscribeSchema.safeParse(req.body);
@@ -205,10 +191,7 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
     }
     const { tier, duration } = parsed.data;
 
-    // Use in-flight lock to prevent concurrent subscription requests for the same wallet
-    const result = await inFlightLock.withLock(`subscribe:${wallet}`, async () => {
-      return await purchaseSubscription(wallet, tier, duration);
-    });
+    const result = await purchaseSubscription(wallet, tier, duration);
 
     // Persist locally
     insertSubscription({
@@ -219,12 +202,10 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
     });
 
     const body = { success: true, data: result };
-    if (idempotencyKey) saveIdempotencyRecord(idempotencyKey, 201, body);
     res.status(201).json(body);
   } catch (err) {
     if (err instanceof PaymentError) {
       const body = { success: false, error: err.message, code: err.code };
-      if (idempotencyKey) saveIdempotencyRecord(idempotencyKey, 402, body);
       res.status(402).json(body);
       return;
     }
