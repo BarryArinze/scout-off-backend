@@ -3,7 +3,7 @@ import express from 'express';
 import { getStats, getAllEvents, getFeeSummary, listValidators, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, withdrawFeesV2Controller, introspectToken, revokeTokenController, reindex, getValidatorStatsEndpoint, getAuditLog, getAuditChainVerification, importValidators, getPendingActions, getPendingActionById, approvePendingAction, getAuditTrail } from '../controllers/adminController';
 import { importPlayers } from '../controllers/adminPlayerImportController';
 import { adminDeactivatePlayer, adminReactivatePlayer } from '../controllers/adminPlayerDeactivationController';
-import { getFeatureFlags, updateFeatureFlag } from '../controllers/featureFlagsController';
+import { getFeatureFlags, updateFeatureFlag, toggleFeatureFlag } from '../controllers/featureFlagsController';
 import { exportEvents } from '../controllers/exportController';
 import { listDeadLetters, replayDeadLetter, purgeOldDeadLetters, requeueDeadLetter, purgeDeadLetter } from '../controllers/webhookAdminController';
 import { setIpReputationController, getIpReputationController } from '../controllers/ipReputationController';
@@ -391,10 +391,12 @@ router.route('/validators/:wallet/stats')
  * GET /api/admin/feature-flags
  *
  * Returns all runtime feature flags and their current enabled state.
+ * Cache is cleared before reading so the response always reflects DB state.
  *
  * PUT /api/admin/feature-flags
  *
  * Updates a feature flag without restarting the process.
+ * Writes a feature_flag_toggled audit entry on every change.
  *
  * @body { name: string, enabled: boolean }
  * @response 200 { success: true, data: FeatureFlag }
@@ -404,6 +406,24 @@ router.route('/feature-flags')
   .get(requireRole('admin'), getFeatureFlags)
   .put(requireRole('admin'), updateFeatureFlag)
   .all(methodNotAllowed(['GET', 'PUT', 'HEAD']));
+
+/**
+ * PUT /api/admin/feature-flags/:name
+ *
+ * Toggle a specific feature flag by name. Body only needs { enabled: boolean }.
+ * Returns 404 when the flag has not been seeded into the DB yet.
+ * Writes a feature_flag_toggled audit entry on every change.
+ *
+ * @param name  {string} - snake_case flag name
+ * @body { enabled: boolean }
+ * @response 200 { success: true, data: { name, enabled, updated_by, updated_at } }
+ * @response 400 Invalid flag name or body
+ * @response 404 Flag not found
+ * @auth Bearer (admin role required)
+ */
+router.route('/feature-flags/:name')
+  .put(requireRole('admin'), toggleFeatureFlag)
+  .all(methodNotAllowed(['PUT']));
 
 /**
  * GET /api/admin/actions/pending
