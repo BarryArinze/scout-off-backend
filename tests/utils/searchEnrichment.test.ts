@@ -60,14 +60,21 @@ describe('normalizePositionQuery', () => {
     expect(normalizePositionQuery('lb')).toBe('defender');
   });
 
+  it('normalises winger / LW / RW to forward', () => {
+    expect(normalizePositionQuery('winger')).toBe('forward');
+    expect(normalizePositionQuery('Winger')).toBe('forward');
+    expect(normalizePositionQuery('lw')).toBe('forward');
+    expect(normalizePositionQuery('RW')).toBe('forward');
+  });
+
   it('passes through unknown positions without error', () => {
-    expect(normalizePositionQuery('winger')).toBe('winger');
-    expect(normalizePositionQuery('Winger')).toBe('Winger');
+    expect(normalizePositionQuery('quarterback')).toBe('quarterback');
+    expect(normalizePositionQuery('Quarterback')).toBe('Quarterback');
   });
 
   it('trims whitespace around the input', () => {
     expect(normalizePositionQuery('  ST  ')).toBe('forward');
-    expect(normalizePositionQuery('  winger  ')).toBe('winger');
+    expect(normalizePositionQuery('  quarterback  ')).toBe('quarterback');
   });
 
   it('returns empty string for empty input', () => {
