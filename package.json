@@ -9,7 +9,7 @@
   },
   "scripts": {
     "prepare": "husky install",
-    "predev": "node scripts/validate-env.js",
+    "predev": "node scripts/validatehttps://github.com/scout-off/scout-off-backend/pulse-env.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc",
     "prestart": "node scripts/validate-env.js",
@@ -100,6 +100,11 @@
         "setupFiles": [
           "<rootDir>/tests/setup.ts"
         ],
+        "transform": {
+          "^.+\\.tsx?$": ["ts-jest", {
+            "diagnostics": false
+          }]
+        },
         "moduleNameMapper": {
           "^@paralleldrive/cuid2$": "<rootDir>/__mocks__/@paralleldrive/cuid2.js"
         },
