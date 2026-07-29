@@ -33,7 +33,7 @@ import {
   listBookmarkFolders,
   deleteBookmarkFolderHandler,
 } from '../controllers/scoutBookmarksController';
-import { createSavedSearch, listSavedSearches, deleteSavedSearchHandler } from '../controllers/scoutSavedSearchesController';
+import { createSavedSearch, listSavedSearches, deleteSavedSearchHandler, updateSavedSearchHandler, runSavedSearch } from '../controllers/scoutSavedSearchesController';
 import {
   registerWebhook,
   listWebhooks,
@@ -343,8 +343,19 @@ router.route('/:wallet/saved-searches')
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/saved-searches/:id')
+  .put(requireRole('scout'), requireFeatureFlag(FeatureFlags.SAVED_SEARCHES), updateSavedSearchHandler)
   .delete(requireRole('scout'), requireFeatureFlag(FeatureFlags.SAVED_SEARCHES), deleteSavedSearchHandler)
-  .all(methodNotAllowed(['DELETE']));
+  .all(methodNotAllowed(['PUT', 'DELETE']));
+
+/**
+ * GET /api/scouts/:wallet/saved-searches/:id/run
+ * Execute a saved search and return matching players (paginated).
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/saved-searches/:id/run')
+  .get(requireRole('scout'), requireFeatureFlag(FeatureFlags.SAVED_SEARCHES), runSavedSearch)
+  .all(methodNotAllowed(['GET', 'HEAD']));
 
 // ─── Webhook subscription management (#806) ───────────────────────────────────
 

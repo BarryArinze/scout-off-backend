@@ -1757,6 +1757,64 @@ export function deleteSavedSearch(id: number, scoutWallet: string): boolean {
   });
 }
 
+/**
+ * Get a saved search by id.
+ * Only returns rows belonging to the given scout wallet for security.
+ * Returns null when not found.
+ */
+export function getSavedSearchById(id: number, scoutWallet: string): SavedSearchRow | null {
+  const sql = `SELECT * FROM scout_saved_searches WHERE id = ? AND scout_wallet = ?`;
+  return timedQuery(sql, () =>
+    (getDb().prepare(sql).get(id, scoutWallet) as SavedSearchRow | undefined) ?? null
+  );
+}
+
+/**
+ * Update a saved search's name and/or filters.
+ * Only updates rows belonging to the given scout wallet for security.
+ * Returns true when a row was updated, false when it did not exist.
+ */
+export function updateSavedSearch(
+  id: number,
+  scoutWallet: string,
+  updates: { name?: string; filters?: string }
+): boolean {
+  const fields: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (updates.name !== undefined) {
+    fields.push('name = ?');
+    params.push(updates.name);
+  }
+  if (updates.filters !== undefined) {
+    fields.push('filters = ?');
+    params.push(updates.filters);
+  }
+
+  if (fields.length === 0) {
+    return false;
+  }
+
+  params.push(id, scoutWallet);
+  const sql = `UPDATE scout_saved_searches SET ${fields.join(', ')} WHERE id = ? AND scout_wallet = ?`;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(...params);
+    return info.changes > 0;
+  });
+}
+
+/**
+ * Count saved searches for a scout.
+ * Used to enforce the 20 saved searches limit.
+ */
+export function countSavedSearchesByScout(scoutWallet: string): number {
+  const sql = `SELECT COUNT(*) as count FROM scout_saved_searches WHERE scout_wallet = ?`;
+  const row = timedQuery(sql, () =>
+    getDb().prepare(sql).get(scoutWallet) as { count: number }
+  );
+  return row.count;
+}
+
 // ─── Profile views helpers ────────────────────────────────────────────────────
 
 /**
