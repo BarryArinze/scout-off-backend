@@ -344,4 +344,33 @@ export async function retryPendingPins(): Promise<void> {
   }
 }
 
-export default { pinJson, pinFile, gatewayUrl, getCid, checkHealth, retryPendingPins, clearPinJsonCache, getPinJsonCacheSize };
+// ── Unpin ────────────────────────────────────────────────────────────────────
+
+const PINATA_UNPIN_URL = 'https://api.pinata.cloud/pinning/unpin';
+
+/**
+ * Unpin a CID from Pinata.
+ *
+ * Best-effort: in dev/test without Pinata credentials this is a no-op. In
+ * production a failure is logged but does not throw — caller should catch.
+ */
+export async function unpinCid(cid: string): Promise<void> {
+  if (!isPinataConfigured()) {
+    logger.debug(`[ipfs] unpin skipped (no Pinata creds): ${cid}`);
+    return;
+  }
+  try {
+    await axios.delete(`${PINATA_UNPIN_URL}/${cid}`, { headers: pinataHeaders() });
+    logger.info(`[ipfs] unpinned ${cid}`);
+  } catch (err) {
+    // 404 means already unpinned — not an error.
+    if (axios.isAxiosError(err) && err.response?.status === 404) {
+      logger.debug(`[ipfs] unpin: CID already gone: ${cid}`);
+      return;
+    }
+    logger.warn(`[ipfs] unpin failed: ${cid}`, err instanceof Error ? err.message : String(err));
+    throw err;
+  }
+}
+
+export default { pinJson, pinFile, gatewayUrl, getCid, checkHealth, retryPendingPins, clearPinJsonCache, getPinJsonCacheSize, unpinCid };
