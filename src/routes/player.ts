@@ -19,6 +19,7 @@ import {
   reactivatePlayerEndpoint,
 } from "../controllers/playerController";
 import { getPlayerHistory, getPlayerHistoryVersion, getPlayerHistoryDiff } from "../controllers/playerHistoryController";
+import { anonymizePlayer } from "../controllers/playerAnonymizationController";
 import { acceptTrialOffer, rejectTrialOffer, rejectOfferSchema } from "../controllers/trialOfferController";
 import { getPlayerTokenHolders, buyPlayerToken } from "../controllers/playerTokenController";
 
@@ -72,6 +73,14 @@ router.route("/:playerId/reactivate")
     requireRole("player"),
     requireOwner,
     reactivatePlayerEndpoint,
+  )
+  .all(methodNotAllowed(['POST']));
+
+router.route("/:playerId/anonymize")
+  .post(
+    requireRole("player"),
+    requireOwner,
+    anonymizePlayer,
   )
   .all(methodNotAllowed(['POST']));
 
