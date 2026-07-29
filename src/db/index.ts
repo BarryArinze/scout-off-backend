@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { EventRecord, ContractEventType } from '../types';
 import { runMigrations } from './migrate';
@@ -10,6 +11,29 @@ import { DbDriver } from './driver';
 import { SqliteDriver } from './sqlite-driver';
 import { PostgresDriver } from './postgres-driver';
 import { observeDbQueryDuration } from '../middleware/metrics';
+
+const dbTracer = trace.getTracer('scout-off-backend');
+
+/**
+ * Thin wrapper that creates a DB span, runs fn(), sets ipfs.cid on success,
+ * records exception and ERROR status on throw. Zero-cost when OTEL is not
+ * configured (noop tracer).
+ */
+function withDbSpan<T>(name: string, sql: string, fn: () => T): T {
+  const span = dbTracer.startSpan(`db.${name}`, {
+    attributes: { 'db.system': 'sqlite', 'db.statement': sql.slice(0, 200) },
+  });
+  try {
+    const result = fn();
+    span.end();
+    return result;
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    span.end();
+    throw err;
+  }
+}
 
 function slowQueryThresholdMs(): number {
   return parseInt(process.env.SLOW_QUERY_THRESHOLD_MS ?? '50', 10);
@@ -491,8 +515,10 @@ export function insertOrUpdatePlayer(p: {
          position     = excluded.position,
          region       = excluded.region,
          metadata_uri = excluded.metadata_uri`;
-  timedQuery(sql, () =>
-    getDb().prepare(sql).run(p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null)
+  withDbSpan('insertOrUpdatePlayer', sql, () =>
+    timedQuery(sql, () =>
+      getDb().prepare(sql).run(p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null)
+    )
   );
 }
 
@@ -501,7 +527,9 @@ export const upsertPlayer = insertOrUpdatePlayer;
 
 export function updatePlayerProgress(playerId: string, level: number): void {
   const sql = 'UPDATE players SET progress_level = ? WHERE player_id = ?';
-  timedQuery(sql, () => getDb().prepare(sql).run(level, playerId));
+  withDbSpan('updatePlayerProgress', sql, () =>
+    timedQuery(sql, () => getDb().prepare(sql).run(level, playerId))
+  );
 }
 
 export interface ValidatorStatsRow {
@@ -824,8 +852,10 @@ export interface SubscriptionRow {
 
 export function getLatestSubscription(scoutWallet: string): SubscriptionRow | null {
   const sql = `SELECT * FROM subscriptions WHERE scout_wallet = ? AND cancelled_at IS NULL ORDER BY expires_at DESC LIMIT 1`;
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(scoutWallet) as SubscriptionRow | undefined) ?? null
+  return withDbSpan('getLatestSubscription', sql, () =>
+    timedQuery(sql, () =>
+      (getDb().prepare(sql).get(scoutWallet) as SubscriptionRow | undefined) ?? null
+    )
   );
 }
 
@@ -847,10 +877,12 @@ export function insertSubscription(p: {
   created_at: number;
 }): number {
   const sql = `INSERT INTO subscriptions (scout_wallet, tier, expires_at, created_at) VALUES (?, ?, ?, ?)`;
-  return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.scout_wallet, p.tier, p.expires_at, p.created_at);
-    return info.lastInsertRowid as number;
-  });
+  return withDbSpan('insertSubscription', sql, () =>
+    timedQuery(sql, () => {
+      const info = getDb().prepare(sql).run(p.scout_wallet, p.tier, p.expires_at, p.created_at);
+      return info.lastInsertRowid as number;
+    })
+  );
 }
 
 export function dbRenewSubscription(p: { id: number; tier: string; expires_at: number }): void {
@@ -879,7 +911,9 @@ export function insertContactUnlock(p: {
   unlocked_at: number;
 }): void {
   const sql = `INSERT INTO contact_unlocks (scout_wallet, player_id, tx_hash, unlocked_at) VALUES (?, ?, ?, ?) ON CONFLICT(scout_wallet, player_id) DO NOTHING`;
-  timedQuery(sql, () => getDb().prepare(sql).run(p.scout_wallet, p.player_id, p.tx_hash, p.unlocked_at));
+  withDbSpan('insertContactUnlock', sql, () =>
+    timedQuery(sql, () => getDb().prepare(sql).run(p.scout_wallet, p.player_id, p.tx_hash, p.unlocked_at))
+  );
 }
 
 export function getContactUnlocksByScout(scoutWallet: string): ContactUnlockRow[] {

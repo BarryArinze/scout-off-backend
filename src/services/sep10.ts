@@ -9,7 +9,10 @@ import {
   Transaction,
 } from '@stellar/stellar-sdk';
 import jwt from 'jsonwebtoken';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
+
+const tracer = trace.getTracer('scout-off-backend');
 
 /**
  * Resolve the SEP-10 server signing keypair.
@@ -58,6 +61,8 @@ export function getServerKeypair(): Keypair {
  * The client must sign it with their Stellar keypair and return the XDR.
  */
 export function buildChallenge(accountId: string): string {
+  const span = tracer.startSpan('sep10.buildChallenge', { attributes: { 'sep10.account': accountId } });
+  try {
   const serverAccount = new Account(SERVER_KEYPAIR.publicKey(), '-1');
   const tx = new TransactionBuilder(serverAccount, {
     fee: BASE_FEE,
@@ -76,6 +81,13 @@ export function buildChallenge(accountId: string): string {
 
   tx.sign(SERVER_KEYPAIR);
   return tx.toXDR();
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+  }
 }
 
 /**
@@ -111,6 +123,8 @@ export function extractAccount(xdr: string): string | null {
  * @throws Error if challenge structure is invalid or signature verification fails
  */
 export function verifyAndIssueToken(xdr: string, role?: string): { token: string; account: string } {
+  const span = tracer.startSpan('sep10.verifyAndIssueToken');
+  try {
   const network =
     config.network === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
@@ -185,5 +199,13 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
     expiresIn: TOKEN_TTL_SECONDS,
   });
 
+  span.setAttribute('sep10.account', clientAccountId);
   return { token, account: clientAccountId };
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+  }
 }

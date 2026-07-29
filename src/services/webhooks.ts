@@ -7,6 +7,9 @@ import {
 } from '../db';
 import { logger } from '../utils/logger';
 import { recordWebhookDelivery } from '../middleware/metrics';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
+
+const tracer = trace.getTracer('scout-off-backend');
 
 type WebhookRetryOptions = {
   retries?: number;
@@ -44,6 +47,8 @@ export async function postWebhookWithRetry(
   payload: unknown,
   options: WebhookRetryOptions = {}
 ): Promise<void> {
+  const span = tracer.startSpan('webhooks.postWithRetry', { attributes: { 'webhook.url': url } });
+  try {
   const retries = options.retries ?? 3;
   const baseDelayMs = options.baseDelayMs ?? 500;
   const maxDelayMs = options.maxDelayMs ?? 5000;
@@ -57,6 +62,7 @@ export async function postWebhookWithRetry(
   }
 
   for (let attempt = 1; attempt <= retries; attempt += 1) {
+    span.setAttribute('webhook.attempt', attempt);
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -65,8 +71,10 @@ export async function postWebhookWithRetry(
       });
 
       if (!response.ok) {
+        span.setAttribute('webhook.status', response.status);
         throw new Error(`Webhook dispatch failed with status ${response.status}`);
       }
+      span.setAttribute('webhook.status', response.status);
       return;
     } catch (err) {
       lastError = err;
@@ -79,6 +87,13 @@ export async function postWebhookWithRetry(
   }
 
   throw lastError;
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+  }
 }
 
 const RETRY_OPTIONS = { retries: 3, baseDelayMs: 500, maxDelayMs: 5000 };

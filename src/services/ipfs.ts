@@ -45,10 +45,13 @@
 import { createHash } from 'crypto';
 import axios from 'axios';
 import FormData from 'form-data';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { logger } from '../utils/logger';
 import { insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts, setPendingPinResolvedCid, getResolvedCidByHash } from '../db';
 import { observeIpfsLatency } from '../middleware/metrics';
+
+const tracer = trace.getTracer('scout-off-backend');
 
 const PINATA_PIN_JSON_URL = 'https://api.pinata.cloud/pinning/pinJSONToIPFS';
 const PINATA_PIN_FILE_URL = 'https://api.pinata.cloud/pinning/pinFileToIPFS';
@@ -141,6 +144,7 @@ export function getPinJsonCacheSize(): number {
  */
 export async function pinJson(body: object): Promise<string> {
   const start = Date.now();
+  const span = tracer.startSpan('ipfs.pinJson');
   try {
     return await (async () => {
       const hash = hashMetadata(body);
@@ -226,15 +230,22 @@ export async function pinJson(body: object): Promise<string> {
       })();
 
       pinJsonCache.set(hash, { cid, timestamp: Date.now() });
+      span.setAttribute('ipfs.cid', cid);
       return cid;
     })();
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
   } finally {
+    span.end();
     observeIpfsLatency('pinJson', Date.now() - start);
   }
 }
 
 export async function pinFile(buffer: Buffer, filename: string, mimeType: string): Promise<string> {
   const start = Date.now();
+  const span = tracer.startSpan('ipfs.pinFile', { attributes: { 'ipfs.filename': filename, 'ipfs.mime_type': mimeType } });
   try {
     if (!isPinataConfigured()) {
       if (process.env.NODE_ENV === 'production') assertPinataConfigured();
@@ -247,8 +258,15 @@ export async function pinFile(buffer: Buffer, filename: string, mimeType: string
       headers: { ...pinataHeaders(), ...form.getHeaders() },
       maxBodyLength: Infinity,
     });
-    return res.data.IpfsHash as string;
+    const cid = res.data.IpfsHash as string;
+    span.setAttribute('ipfs.cid', cid);
+    return cid;
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
   } finally {
+    span.end();
     observeIpfsLatency('pinFile', Date.now() - start);
   }
 }
