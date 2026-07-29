@@ -258,6 +258,9 @@ const config = {
   /** TTL for multi-admin action proposals in milliseconds (default: 1 hour). */
   adminActionTtlMs: parseInt(process.env.ADMIN_ACTION_TTL_MS ?? '3600000', 10),
 
+  /** Minimum response size in bytes to trigger compression (default: 1024 bytes). */
+  compressionThresholdBytes: parseInt(process.env.COMPRESSION_THRESHOLD ?? process.env.COMPRESSION_THRESHOLD_BYTES ?? '1024', 10),
+
 };
 
 export default config;

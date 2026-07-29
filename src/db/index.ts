@@ -902,6 +902,105 @@ export function hasContactUnlock(scoutWallet: string, playerId: string): boolean
   return timedQuery(sql, () => getDb().prepare(sql).get(scoutWallet, playerId) !== undefined);
 }
 
+// ─── Time-series stats helpers ───────────────────────────────────────────────────
+
+export interface TimeSeriesPoint {
+  date: string;
+  count: number;
+}
+
+export interface RegionBreakdownPoint {
+  date: string;
+  region: string;
+  count: number;
+}
+
+/**
+ * Get daily counts of new players registered within a time window.
+ * Uses SQLite's strftime to group by date at the SQL level.
+ */
+export function getNewPlayersTimeSeries(startDateMs: number, endDateMs: number): TimeSeriesPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') as date, COUNT(*) as count
+    FROM players
+    WHERE created_at >= ? AND created_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, count: r.count }));
+}
+
+/**
+ * Get daily counts of milestones approved within a time window.
+ */
+export function getMilestonesApprovedTimeSeries(startDateMs: number, endDateMs: number): TimeSeriesPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') as date, COUNT(*) as count
+    FROM events
+    WHERE type = 'milestone_approved' AND created_at >= ? AND created_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, count: r.count }));
+}
+
+/**
+ * Get daily counts of contact unlocks within a time window.
+ */
+export function getContactUnlocksTimeSeries(startDateMs: number, endDateMs: number): TimeSeriesPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', unlocked_at / 1000, 'unixepoch') as date, COUNT(*) as count
+    FROM contact_unlocks
+    WHERE unlocked_at >= ? AND unlocked_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, count: r.count }));
+}
+
+/**
+ * Get daily counts of subscriptions started within a time window.
+ */
+export function getSubscriptionsStartedTimeSeries(startDateMs: number, endDateMs: number): TimeSeriesPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') as date, COUNT(*) as count
+    FROM subscriptions
+    WHERE created_at >= ? AND created_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, count: r.count }));
+}
+
+/**
+ * Get daily counts of new players grouped by region within a time window.
+ */
+export function getNewPlayersByRegionTimeSeries(startDateMs: number, endDateMs: number): RegionBreakdownPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') as date, region, COUNT(*) as count
+    FROM players
+    WHERE created_at >= ? AND created_at <= ?
+    GROUP BY date, region
+    ORDER BY date ASC, region ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; region: string | null; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, region: r.region ?? 'unknown', count: r.count }));
+}
+
 // ─── Audit log helpers ────────────────────────────────────────────────────────
 //
 // audit_log is a single, tamper-evident hash chain (see db/012_audit_log_hash_chain.sql
@@ -1426,6 +1525,15 @@ export interface ScoutBookmarkRow {
   id: number;
   scout_wallet: string;
   player_id: string;
+  folder_id: number | null;
+  note: string | null;
+  created_at: number;
+}
+
+export interface ScoutBookmarkFolderRow {
+  id: number;
+  scout_wallet: string;
+  name: string;
   created_at: number;
 }
 
@@ -1436,14 +1544,22 @@ export interface ScoutBookmarkRow {
 export function insertBookmark(p: {
   scout_wallet: string;
   player_id: string;
+  folder_id?: number | null;
+  note?: string | null;
   created_at: number;
 }): boolean {
   const sql = `
-    INSERT OR IGNORE INTO scout_bookmarks (scout_wallet, player_id, created_at)
-    VALUES (?, ?, ?)
+    INSERT OR IGNORE INTO scout_bookmarks (scout_wallet, player_id, folder_id, note, created_at)
+    VALUES (?, ?, ?, ?, ?)
   `;
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.scout_wallet, p.player_id, p.created_at);
+    const info = getDb().prepare(sql).run(
+      p.scout_wallet,
+      p.player_id,
+      p.folder_id ?? null,
+      p.note ?? null,
+      p.created_at
+    );
     return info.changes > 0;
   });
 }
@@ -1462,16 +1578,107 @@ export function deleteBookmark(scoutWallet: string, playerId: string): boolean {
 
 /**
  * List all bookmarks for a scout, ordered by creation time (newest first).
+ * Optionally filter by folder_id.
  */
-export function getBookmarksByScout(scoutWallet: string): ScoutBookmarkRow[] {
+export function getBookmarksByScout(scoutWallet: string, folderId?: number | null): ScoutBookmarkRow[] {
+  let sql: string;
+  let params: (string | number | null)[];
+  
+  if (folderId !== undefined) {
+    sql = `
+      SELECT * FROM scout_bookmarks
+      WHERE scout_wallet = ? AND folder_id = ?
+      ORDER BY created_at DESC
+    `;
+    params = [scoutWallet, folderId];
+  } else {
+    sql = `
+      SELECT * FROM scout_bookmarks
+      WHERE scout_wallet = ?
+      ORDER BY created_at DESC
+    `;
+    params = [scoutWallet];
+  }
+  
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).all(...params) as ScoutBookmarkRow[],
+  );
+}
+
+/**
+ * Insert a bookmark folder. Returns the new folder id.
+ */
+export function insertBookmarkFolder(p: {
+  scout_wallet: string;
+  name: string;
+  created_at: number;
+}): number {
   const sql = `
-    SELECT * FROM scout_bookmarks
+    INSERT INTO scout_bookmark_folders (scout_wallet, name, created_at)
+    VALUES (?, ?, ?)
+  `;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(p.scout_wallet, p.name, p.created_at);
+    return info.lastInsertRowid as number;
+  });
+}
+
+/**
+ * List all bookmark folders for a scout, ordered by creation time (newest first).
+ */
+export function getBookmarkFoldersByScout(scoutWallet: string): ScoutBookmarkFolderRow[] {
+  const sql = `
+    SELECT * FROM scout_bookmark_folders
     WHERE scout_wallet = ?
     ORDER BY created_at DESC
   `;
   return timedQuery(sql, () =>
-    getDb().prepare(sql).all(scoutWallet) as ScoutBookmarkRow[],
+    getDb().prepare(sql).all(scoutWallet) as ScoutBookmarkFolderRow[],
   );
+}
+
+/**
+ * Get a bookmark folder by id, ensuring it belongs to the scout.
+ */
+export function getBookmarkFolderById(folderId: number, scoutWallet: string): ScoutBookmarkFolderRow | null {
+  const sql = `
+    SELECT * FROM scout_bookmark_folders
+    WHERE id = ? AND scout_wallet = ?
+  `;
+  return timedQuery(sql, () =>
+    (getDb().prepare(sql).get(folderId, scoutWallet) as ScoutBookmarkFolderRow | undefined) ?? null
+  );
+}
+
+/**
+ * Delete a bookmark folder by id, ensuring it belongs to the scout.
+ * Returns true when a row was deleted, false when it did not exist.
+ */
+export function deleteBookmarkFolder(folderId: number, scoutWallet: string): boolean {
+  const sql = `DELETE FROM scout_bookmark_folders WHERE id = ? AND scout_wallet = ?`;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(folderId, scoutWallet);
+    return info.changes > 0;
+  });
+}
+
+/**
+ * Move bookmarks from a folder to root (set folder_id to NULL) when folder is deleted.
+ */
+export function moveBookmarksToRoot(folderId: number, scoutWallet: string): void {
+  const sql = `UPDATE scout_bookmarks SET folder_id = NULL WHERE folder_id = ? AND scout_wallet = ?`;
+  timedQuery(sql, () => getDb().prepare(sql).run(folderId, scoutWallet));
+}
+
+/**
+ * Count bookmarks in a folder.
+ */
+export function countBookmarksInFolder(folderId: number): number {
+  const sql = `SELECT COUNT(*) as count FROM scout_bookmarks WHERE folder_id = ?`;
+  return timedQuery(sql, () => {
+    const row = getDb().prepare(sql).get(folderId) as { count: number } | undefined;
+    return row?.count ?? 0;
+  });
 }
 
 // ─── Scout saved-search helpers (#486) ───────────────────────────────────────
@@ -1548,6 +1755,64 @@ export function deleteSavedSearch(id: number, scoutWallet: string): boolean {
     const info = getDb().prepare(sql).run(id, scoutWallet);
     return info.changes > 0;
   });
+}
+
+/**
+ * Get a saved search by id.
+ * Only returns rows belonging to the given scout wallet for security.
+ * Returns null when not found.
+ */
+export function getSavedSearchById(id: number, scoutWallet: string): SavedSearchRow | null {
+  const sql = `SELECT * FROM scout_saved_searches WHERE id = ? AND scout_wallet = ?`;
+  return timedQuery(sql, () =>
+    (getDb().prepare(sql).get(id, scoutWallet) as SavedSearchRow | undefined) ?? null
+  );
+}
+
+/**
+ * Update a saved search's name and/or filters.
+ * Only updates rows belonging to the given scout wallet for security.
+ * Returns true when a row was updated, false when it did not exist.
+ */
+export function updateSavedSearch(
+  id: number,
+  scoutWallet: string,
+  updates: { name?: string; filters?: string }
+): boolean {
+  const fields: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (updates.name !== undefined) {
+    fields.push('name = ?');
+    params.push(updates.name);
+  }
+  if (updates.filters !== undefined) {
+    fields.push('filters = ?');
+    params.push(updates.filters);
+  }
+
+  if (fields.length === 0) {
+    return false;
+  }
+
+  params.push(id, scoutWallet);
+  const sql = `UPDATE scout_saved_searches SET ${fields.join(', ')} WHERE id = ? AND scout_wallet = ?`;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(...params);
+    return info.changes > 0;
+  });
+}
+
+/**
+ * Count saved searches for a scout.
+ * Used to enforce the 20 saved searches limit.
+ */
+export function countSavedSearchesByScout(scoutWallet: string): number {
+  const sql = `SELECT COUNT(*) as count FROM scout_saved_searches WHERE scout_wallet = ?`;
+  const row = timedQuery(sql, () =>
+    getDb().prepare(sql).get(scoutWallet) as { count: number }
+  );
+  return row.count;
 }
 
 // ─── Profile views helpers ────────────────────────────────────────────────────
