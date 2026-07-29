@@ -9,6 +9,7 @@ import { extractClientIp } from '../utils/ipExtractor';
 import config from '../config';
 import { ErrorCode } from '../utils/errorCodes';
 import { revokeToken, isTokenRevoked } from '../services/tokenBlocklist';
+import { signJwt, verifyJwt } from '../utils/jwt';
 
 // ─── Schema ────────────────────────────────────────────────────────────────────
 
@@ -33,13 +34,13 @@ const refreshSchema = z.object({
 /**
  * Issue a short-lived access token (JWT_ACCESS_TTL_SECONDS, default 15 min).
  * Includes a unique jti so the token can be individually revoked.
+ * Always signed with the *current* JWT_SECRET (never the previous rotation key).
  */
 function issueAccessToken(account: string, role: string): { token: string; expiresAt: number } {
   const ttl = config.jwtAccessTtlSeconds;
   const expiresAt = Math.floor(Date.now() / 1000) + ttl;
-  const token = jwt.sign(
+  const token = signJwt(
     { sub: account, role, jti: crypto.randomUUID() },
-    config.jwtSecret,
     { expiresIn: ttl },
   );
   return { token, expiresAt };
@@ -50,12 +51,12 @@ function issueAccessToken(account: string, role: string): { token: string; expir
  * Type claim 'refresh' distinguishes it from access tokens so the auth
  * middleware rejects it if someone tries to use it as a bearer token.
  * The jti is stored in the revocation blocklist on rotation / logout.
+ * Always signed with the *current* JWT_SECRET.
  */
 function issueRefreshToken(account: string, role: string): { token: string; jti: string } {
   const jti = crypto.randomUUID();
-  const token = jwt.sign(
+  const token = signJwt(
     { sub: account, role, type: 'refresh', jti },
-    config.jwtSecret,
     { expiresIn: config.jwtRefreshTtlSeconds },
   );
   return { token, jti };
@@ -169,10 +170,10 @@ export function postRefresh(req: Request, res: Response, next: NextFunction): vo
 
     const { refreshToken } = parsed.data;
 
-    // Verify signature and decode claims.
+    // Verify signature and decode claims (current secret, then previous within grace window).
     let payload: jwt.JwtPayload;
     try {
-      payload = jwt.verify(refreshToken, config.jwtSecret) as jwt.JwtPayload;
+      payload = verifyJwt(refreshToken);
     } catch (err) {
       logger.warn('[auth] refresh_token_invalid', { reason: err instanceof Error ? err.message : String(err) });
       res.status(401).json({ success: false, error: 'Invalid or expired refresh token' });
@@ -254,7 +255,7 @@ export function postLogout(req: Request, res: Response, next: NextFunction): voi
     const parsed = logoutSchema.safeParse(req.body);
     if (parsed.success && parsed.data.refreshToken) {
       try {
-        const rtPayload = jwt.verify(parsed.data.refreshToken, config.jwtSecret) as jwt.JwtPayload;
+        const rtPayload = verifyJwt(parsed.data.refreshToken);
         if (rtPayload.jti && rtPayload.exp && rtPayload.type === 'refresh') {
           revokeToken(rtPayload.jti, rtPayload.exp);
         }

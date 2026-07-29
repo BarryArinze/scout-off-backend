@@ -10,7 +10,9 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | Variable | Required | Notes |
 |---|---|---|
 | `CONTRACT_ID` | ✅ | Deployed Soroban contract address |
-| `JWT_SECRET` | ✅ | Min 32 chars; rotate on compromise |
+| `JWT_SECRET` | ✅ | Min 32 chars; rotate via dual-key window (see below) |
+| `JWT_SECRET_PREVIOUS` | — | Previous signing secret during rotation grace window |
+| `JWT_SECRET_PREVIOUS_UNTIL` | — | Absolute grace-window end (Unix seconds or ISO-8601). After this time previous tokens are rejected even if `JWT_SECRET_PREVIOUS` is still set |
 | `SEP10_SERVER_SECRET` | ✅ | Stellar secret key (starts with `S`) used to sign and verify SEP-10 challenge transactions. **Must be identical across every backend instance** — without it each process generates an ephemeral random keypair, causing cross-instance auth failures under a load balancer. Generate with `stellar keys generate` and store in your secrets manager. See [docs/auth.md](docs/auth.md#sep-10-server-keypair-sep10_server_secret) for rotation guidance. |
 | `HORIZON_URL` | ✅ | e.g. `https://horizon-testnet.stellar.org` |
 | `SOROBAN_RPC_URL` | ✅ | e.g. `https://soroban-testnet.stellar.org` |
@@ -47,9 +49,9 @@ The `helm/scout-off-backend/` directory contains a production-grade Helm 3 chart
 
 ### 1. Create the Kubernetes Secret
 
-Sensitive env vars (`CONTRACT_ID`, `JWT_SECRET`) are sourced exclusively from a
-Kubernetes Secret — they are never stored in the ConfigMap or committed to source
-control.
+Sensitive env vars (`CONTRACT_ID`, `JWT_SECRET`, and optional rotation keys) are
+sourced exclusively from a Kubernetes Secret — they are never stored in the
+ConfigMap or committed to source control.
 
 ```bash
 kubectl create secret generic scout-off-secrets \
@@ -71,7 +73,41 @@ kubectl create secret generic scout-off-secrets \
 > [docs/auth.md](docs/auth.md#sep-10-server-keypair-sep10_server_secret) for
 > generation instructions and the safe rotation procedure.
 
-Rotate values by deleting and re-creating the Secret, then triggering a rollout:
+### JWT secret rotation runbook (zero-downtime dual-key)
+
+Do **not** hard-cutover `JWT_SECRET` alone — that instantly invalidates every
+active access and refresh token. Use the dual-key window instead:
+
+1. **Stage previous secret + grace deadline**
+   ```bash
+   # Capture the currently deployed secret, then create a new one
+   OLD_JWT_SECRET=$(kubectl get secret scout-off-secrets -n <ns> -o jsonpath='{.data.JWT_SECRET}' | base64 -d)
+   NEW_JWT_SECRET=$(openssl rand -hex 32)
+   # Grace window must cover the longest-lived token (refresh TTL = 7 days)
+   UNTIL=$(date -u -v+7d +%Y-%m-%dT%H:%M:%SZ)   # macOS; on Linux: date -u -d '+7 days' --iso-8601=seconds
+   ```
+
+2. **Apply both secrets and redeploy**
+   ```bash
+   kubectl create secret generic scout-off-secrets \
+     --from-literal=CONTRACT_ID=<same-as-before> \
+     --from-literal=JWT_SECRET="$NEW_JWT_SECRET" \
+     --from-literal=JWT_SECRET_PREVIOUS="$OLD_JWT_SECRET" \
+     --from-literal=JWT_SECRET_PREVIOUS_UNTIL="$UNTIL" \
+     --from-literal=SEP10_SERVER_SECRET=<same-as-before> \
+     --dry-run=client -o yaml | kubectl apply -f - --namespace <your-namespace>
+   kubectl rollout restart deployment/scout-off-backend --namespace <your-namespace>
+   ```
+   New tokens are signed only with `JWT_SECRET`. Tokens signed with the old
+   secret continue to verify until `JWT_SECRET_PREVIOUS_UNTIL`.
+
+3. **After the grace window**
+   Remove `JWT_SECRET_PREVIOUS` / `JWT_SECRET_PREVIOUS_UNTIL` from the Secret
+   and roll out again. Compromised individual sessions should still be killed
+   via the token blocklist (`tokenBlocklist`), not by rotating the secret.
+
+For non-JWT secrets, rotate by deleting and re-creating the Secret, then
+triggering a rollout:
 
 ```bash
 kubectl delete secret scout-off-secrets --namespace <your-namespace>
