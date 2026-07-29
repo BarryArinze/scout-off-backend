@@ -27,6 +27,7 @@ import { getVersionInfo } from './version';
 import { apiVersion } from './middleware/apiVersion';
 import { versionRouting } from './middleware/versionRouting';
 import docsRouter from './routes/docs';
+import { logger } from './utils/logger';
 import {
   playerRoutes as playerRoutesV2,
   scoutRoutes as scoutRoutesV2,
@@ -151,7 +152,30 @@ app.set('etag', false);
 // before any auth or body-parser middleware runs.
 app.options('*', cors(corsOptions));
 app.use(cors(corsOptions));
-app.use(compression({ threshold: parseInt(process.env.COMPRESSION_THRESHOLD ?? '1024', 10) }));
+app.use(compression({
+  threshold: config.compressionThresholdBytes,
+  filter: (req, res) => {
+    // Skip compression for SSE endpoints
+    if (req.path === '/api/events/stream' || req.path.startsWith('/api/v1/events/stream') || req.path.startsWith('/api/v2/events/stream')) {
+      return false;
+    }
+    return compression.filter(req, res);
+  },
+}));
+// Set Vary: Accept-Encoding header and log compressed response sizes
+app.use((req, res, next) => {
+  const originalEnd = res.end;
+  res.end = function (chunk?: any, encoding?: any) {
+    if (res.getHeader('content-encoding')) {
+      res.setHeader('Vary', 'Accept-Encoding');
+      if (config.logLevel === 'debug') {
+        logger.debug(`[compression] ${req.method} ${req.path} - encoding: ${res.getHeader('content-encoding')}`);
+      }
+    }
+    return originalEnd.call(this, chunk, encoding);
+  };
+  next();
+});
 app.use(requestTimeout);
 app.use(correlationId);
 app.use(traceId);
