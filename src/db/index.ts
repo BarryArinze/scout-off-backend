@@ -902,6 +902,105 @@ export function hasContactUnlock(scoutWallet: string, playerId: string): boolean
   return timedQuery(sql, () => getDb().prepare(sql).get(scoutWallet, playerId) !== undefined);
 }
 
+// ─── Time-series stats helpers ───────────────────────────────────────────────────
+
+export interface TimeSeriesPoint {
+  date: string;
+  count: number;
+}
+
+export interface RegionBreakdownPoint {
+  date: string;
+  region: string;
+  count: number;
+}
+
+/**
+ * Get daily counts of new players registered within a time window.
+ * Uses SQLite's strftime to group by date at the SQL level.
+ */
+export function getNewPlayersTimeSeries(startDateMs: number, endDateMs: number): TimeSeriesPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') as date, COUNT(*) as count
+    FROM players
+    WHERE created_at >= ? AND created_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, count: r.count }));
+}
+
+/**
+ * Get daily counts of milestones approved within a time window.
+ */
+export function getMilestonesApprovedTimeSeries(startDateMs: number, endDateMs: number): TimeSeriesPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') as date, COUNT(*) as count
+    FROM events
+    WHERE type = 'milestone_approved' AND created_at >= ? AND created_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, count: r.count }));
+}
+
+/**
+ * Get daily counts of contact unlocks within a time window.
+ */
+export function getContactUnlocksTimeSeries(startDateMs: number, endDateMs: number): TimeSeriesPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', unlocked_at / 1000, 'unixepoch') as date, COUNT(*) as count
+    FROM contact_unlocks
+    WHERE unlocked_at >= ? AND unlocked_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, count: r.count }));
+}
+
+/**
+ * Get daily counts of subscriptions started within a time window.
+ */
+export function getSubscriptionsStartedTimeSeries(startDateMs: number, endDateMs: number): TimeSeriesPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') as date, COUNT(*) as count
+    FROM subscriptions
+    WHERE created_at >= ? AND created_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, count: r.count }));
+}
+
+/**
+ * Get daily counts of new players grouped by region within a time window.
+ */
+export function getNewPlayersByRegionTimeSeries(startDateMs: number, endDateMs: number): RegionBreakdownPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') as date, region, COUNT(*) as count
+    FROM players
+    WHERE created_at >= ? AND created_at <= ?
+    GROUP BY date, region
+    ORDER BY date ASC, region ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; region: string | null; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, region: r.region ?? 'unknown', count: r.count }));
+}
+
 // ─── Audit log helpers ────────────────────────────────────────────────────────
 //
 // audit_log is a single, tamper-evident hash chain (see db/012_audit_log_hash_chain.sql
