@@ -25,7 +25,14 @@ import {
   deletePlayerNote,
 } from '../controllers/scoutNotesController';
 import { issueApiKey, listApiKeys, revokeApiKey } from '../controllers/apiKeyController';
-import { addBookmark, removeBookmark, listBookmarks } from '../controllers/scoutBookmarksController';
+import {
+  addBookmark,
+  removeBookmark,
+  listBookmarks,
+  createBookmarkFolder,
+  listBookmarkFolders,
+  deleteBookmarkFolderHandler,
+} from '../controllers/scoutBookmarksController';
 import { createSavedSearch, listSavedSearches, deleteSavedSearchHandler } from '../controllers/scoutSavedSearchesController';
 import {
   registerWebhook,
@@ -261,29 +268,55 @@ router.route('/:wallet/api-keys/:id')
 // ─── Scout bookmarks (#487) ───────────────────────────────────────────────────
 
 /**
- * POST /api/scouts/:wallet/bookmarks/:playerId
- * Bookmark a player. Idempotent — no error if already bookmarked.
+ * POST /api/scouts/:wallet/bookmarks
+ * Bookmark a player with optional folder and note. Idempotent — no error if already bookmarked.
+ * Body: { playerId: string, folderId?: number, note?: string }
  * Returns 404 when the player does not exist.
  *
+ * GET /api/scouts/:wallet/bookmarks
+ * List all bookmarked players with full profile summaries.
+ * Supports ?folderId= query parameter to filter by folder.
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/bookmarks')
+  .post(requireRole('scout'), addBookmark)
+  .get(requireRole('scout'), listBookmarks)
+  .all(methodNotAllowed(['POST', 'GET', 'HEAD']));
+
+/**
  * DELETE /api/scouts/:wallet/bookmarks/:playerId
  * Remove a bookmark. Returns 404 when the bookmark does not exist.
  *
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/bookmarks/:playerId')
-  .post(requireRole('scout'), addBookmark)
   .delete(requireRole('scout'), removeBookmark)
-  .all(methodNotAllowed(['POST', 'DELETE']));
+  .all(methodNotAllowed(['DELETE']));
 
 /**
- * GET /api/scouts/:wallet/bookmarks
- * List all bookmarked players with full profile summaries.
+ * POST /api/scouts/:wallet/bookmark-folders
+ * Create a new bookmark folder. Body: { name: string }
+ *
+ * GET /api/scouts/:wallet/bookmark-folders
+ * List all bookmark folders with bookmark counts.
  *
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
-router.route('/:wallet/bookmarks')
-  .get(requireRole('scout'), listBookmarks)
-  .all(methodNotAllowed(['GET', 'HEAD']));
+router.route('/:wallet/bookmark-folders')
+  .post(requireRole('scout'), createBookmarkFolder)
+  .get(requireRole('scout'), listBookmarkFolders)
+  .all(methodNotAllowed(['POST', 'GET', 'HEAD']));
+
+/**
+ * DELETE /api/scouts/:wallet/bookmark-folders/:folderId
+ * Delete a bookmark folder. Bookmarks move to root (not deleted).
+ *
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/bookmark-folders/:folderId')
+  .delete(requireRole('scout'), deleteBookmarkFolderHandler)
+  .all(methodNotAllowed(['DELETE']));
 
 // ─── Scout saved searches (#486) ──────────────────────────────────────────────
 

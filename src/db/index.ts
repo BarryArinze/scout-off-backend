@@ -1426,6 +1426,15 @@ export interface ScoutBookmarkRow {
   id: number;
   scout_wallet: string;
   player_id: string;
+  folder_id: number | null;
+  note: string | null;
+  created_at: number;
+}
+
+export interface ScoutBookmarkFolderRow {
+  id: number;
+  scout_wallet: string;
+  name: string;
   created_at: number;
 }
 
@@ -1436,14 +1445,22 @@ export interface ScoutBookmarkRow {
 export function insertBookmark(p: {
   scout_wallet: string;
   player_id: string;
+  folder_id?: number | null;
+  note?: string | null;
   created_at: number;
 }): boolean {
   const sql = `
-    INSERT OR IGNORE INTO scout_bookmarks (scout_wallet, player_id, created_at)
-    VALUES (?, ?, ?)
+    INSERT OR IGNORE INTO scout_bookmarks (scout_wallet, player_id, folder_id, note, created_at)
+    VALUES (?, ?, ?, ?, ?)
   `;
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.scout_wallet, p.player_id, p.created_at);
+    const info = getDb().prepare(sql).run(
+      p.scout_wallet,
+      p.player_id,
+      p.folder_id ?? null,
+      p.note ?? null,
+      p.created_at
+    );
     return info.changes > 0;
   });
 }
@@ -1462,16 +1479,107 @@ export function deleteBookmark(scoutWallet: string, playerId: string): boolean {
 
 /**
  * List all bookmarks for a scout, ordered by creation time (newest first).
+ * Optionally filter by folder_id.
  */
-export function getBookmarksByScout(scoutWallet: string): ScoutBookmarkRow[] {
+export function getBookmarksByScout(scoutWallet: string, folderId?: number | null): ScoutBookmarkRow[] {
+  let sql: string;
+  let params: (string | number | null)[];
+  
+  if (folderId !== undefined) {
+    sql = `
+      SELECT * FROM scout_bookmarks
+      WHERE scout_wallet = ? AND folder_id = ?
+      ORDER BY created_at DESC
+    `;
+    params = [scoutWallet, folderId];
+  } else {
+    sql = `
+      SELECT * FROM scout_bookmarks
+      WHERE scout_wallet = ?
+      ORDER BY created_at DESC
+    `;
+    params = [scoutWallet];
+  }
+  
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).all(...params) as ScoutBookmarkRow[],
+  );
+}
+
+/**
+ * Insert a bookmark folder. Returns the new folder id.
+ */
+export function insertBookmarkFolder(p: {
+  scout_wallet: string;
+  name: string;
+  created_at: number;
+}): number {
   const sql = `
-    SELECT * FROM scout_bookmarks
+    INSERT INTO scout_bookmark_folders (scout_wallet, name, created_at)
+    VALUES (?, ?, ?)
+  `;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(p.scout_wallet, p.name, p.created_at);
+    return info.lastInsertRowid as number;
+  });
+}
+
+/**
+ * List all bookmark folders for a scout, ordered by creation time (newest first).
+ */
+export function getBookmarkFoldersByScout(scoutWallet: string): ScoutBookmarkFolderRow[] {
+  const sql = `
+    SELECT * FROM scout_bookmark_folders
     WHERE scout_wallet = ?
     ORDER BY created_at DESC
   `;
   return timedQuery(sql, () =>
-    getDb().prepare(sql).all(scoutWallet) as ScoutBookmarkRow[],
+    getDb().prepare(sql).all(scoutWallet) as ScoutBookmarkFolderRow[],
   );
+}
+
+/**
+ * Get a bookmark folder by id, ensuring it belongs to the scout.
+ */
+export function getBookmarkFolderById(folderId: number, scoutWallet: string): ScoutBookmarkFolderRow | null {
+  const sql = `
+    SELECT * FROM scout_bookmark_folders
+    WHERE id = ? AND scout_wallet = ?
+  `;
+  return timedQuery(sql, () =>
+    (getDb().prepare(sql).get(folderId, scoutWallet) as ScoutBookmarkFolderRow | undefined) ?? null
+  );
+}
+
+/**
+ * Delete a bookmark folder by id, ensuring it belongs to the scout.
+ * Returns true when a row was deleted, false when it did not exist.
+ */
+export function deleteBookmarkFolder(folderId: number, scoutWallet: string): boolean {
+  const sql = `DELETE FROM scout_bookmark_folders WHERE id = ? AND scout_wallet = ?`;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(folderId, scoutWallet);
+    return info.changes > 0;
+  });
+}
+
+/**
+ * Move bookmarks from a folder to root (set folder_id to NULL) when folder is deleted.
+ */
+export function moveBookmarksToRoot(folderId: number, scoutWallet: string): void {
+  const sql = `UPDATE scout_bookmarks SET folder_id = NULL WHERE folder_id = ? AND scout_wallet = ?`;
+  timedQuery(sql, () => getDb().prepare(sql).run(folderId, scoutWallet));
+}
+
+/**
+ * Count bookmarks in a folder.
+ */
+export function countBookmarksInFolder(folderId: number): number {
+  const sql = `SELECT COUNT(*) as count FROM scout_bookmarks WHERE folder_id = ?`;
+  return timedQuery(sql, () => {
+    const row = getDb().prepare(sql).get(folderId) as { count: number } | undefined;
+    return row?.count ?? 0;
+  });
 }
 
 // ─── Scout saved-search helpers (#486) ───────────────────────────────────────
