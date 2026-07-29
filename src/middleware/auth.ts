@@ -1,32 +1,17 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-import config from '../config';
 import { JwtPayload } from '../types';
 import { sendUnauthorized, sendForbidden } from '../utils/authError';
 import { logger } from '../utils/logger';
 import { isTokenRevoked } from '../services/tokenBlocklist';
 import { logAuditEvent } from '../services/audit';
+import { verifyJwt } from '../utils/jwt';
 
 export interface AuthPayload extends jwt.JwtPayload, Partial<JwtPayload> {}
 
-/** Ordered list of secrets to try during verification. Current secret first. */
-function jwtSecrets(): string[] {
-  const secrets = [config.jwtSecret];
-  if (config.jwtSecretPrevious) secrets.push(config.jwtSecretPrevious);
-  return secrets;
-}
-
-/** Verify a token against the current secret, then the previous secret. */
+/** Verify a token against the current secret, then the previous secret (grace window). */
 function verifyToken(token: string): AuthPayload {
-  const secrets = jwtSecrets();
-  for (const secret of secrets) {
-    try {
-      return jwt.verify(token, secret) as AuthPayload;
-    } catch {
-      // try next
-    }
-  }
-  throw new Error('Invalid or expired token');
+  return verifyJwt(token) as AuthPayload;
 }
 
 /**

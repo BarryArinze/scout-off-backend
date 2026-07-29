@@ -127,6 +127,28 @@ const config = {
   },
   platformFeeBps: parseInt(process.env.PLATFORM_FEE_BPS ?? '500', 10),
   jwtSecretPrevious: process.env.JWT_SECRET_PREVIOUS ?? '',
+  /**
+   * Absolute end of the previous-secret grace window (epoch milliseconds).
+   * Parsed from `JWT_SECRET_PREVIOUS_UNTIL` (Unix seconds or ISO-8601).
+   * `null` means "no explicit expiry" — previous secret stays accepted until
+   * operators clear `JWT_SECRET_PREVIOUS`.
+   */
+  jwtSecretPreviousUntil: (() => {
+    const raw = process.env.JWT_SECRET_PREVIOUS_UNTIL?.trim();
+    if (!raw) return null as number | null;
+    // Pure digits → Unix seconds (or ms if already 13 digits)
+    if (/^\d+$/.test(raw)) {
+      const n = Number(raw);
+      return n < 1e12 ? n * 1000 : n;
+    }
+    const parsed = Date.parse(raw);
+    if (Number.isNaN(parsed)) {
+      throw new Error(
+        'JWT_SECRET_PREVIOUS_UNTIL must be a Unix timestamp (seconds) or ISO-8601 datetime',
+      );
+    }
+    return parsed;
+  })(),
   platformSecretKey: (() => {
     const isTest = (process.env.NODE_ENV ?? 'development') === 'test';
     const val = process.env.PLATFORM_SECRET_KEY ?? '';

@@ -10,11 +10,10 @@
  */
 
 import { Request } from 'express';
-import jwt from 'jsonwebtoken';
-import config from '../config';
 import { createLoaders, type RequestLoaders } from './loaders';
 import { isTokenRevoked } from '../services/tokenBlocklist';
 import { logger } from '../utils/logger';
+import { tryVerifyJwt } from '../utils/jwt';
 
 export interface GraphQLContext {
   account: string | undefined;
@@ -22,25 +21,6 @@ export interface GraphQLContext {
   loaders: RequestLoaders;
   /** Raw Express request, available to resolvers that need it. */
   req: Request;
-}
-
-interface JwtLike {
-  sub?: string;
-  role?: string;
-  jti?: string;
-}
-
-function tryVerifyJwt(token: string): JwtLike | null {
-  const secrets = [config.jwtSecret];
-  if (config.jwtSecretPrevious) secrets.push(config.jwtSecretPrevious);
-  for (const secret of secrets) {
-    try {
-      return jwt.verify(token, secret) as JwtLike;
-    } catch {
-      // try next secret
-    }
-  }
-  return null;
 }
 
 /**

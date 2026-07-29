@@ -69,6 +69,18 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: JWT_SECRET
+            - name: JWT_SECRET_PREVIOUS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: JWT_SECRET_PREVIOUS
+                  optional: true
+            - name: JWT_SECRET_PREVIOUS_UNTIL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: JWT_SECRET_PREVIOUS_UNTIL
+                  optional: true
           # ── Liveness probe ────────────────────────────────────────────────────
           # Restarts the container if this fails failureThreshold times in a row.
           # /health/liveness is a lightweight check with no external dependencies.
