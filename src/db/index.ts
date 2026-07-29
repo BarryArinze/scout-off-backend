@@ -129,11 +129,13 @@ export async function initDb(): Promise<void> {
         region         TEXT,
         metadata_uri   TEXT,
         progress_level INTEGER DEFAULT 0,
-        created_at     INTEGER
+        created_at     INTEGER,
+        registered_at  INTEGER DEFAULT 0
       );
-      CREATE INDEX IF NOT EXISTS idx_players_region   ON players (region);
-      CREATE INDEX IF NOT EXISTS idx_players_position ON players (position);
-      CREATE INDEX IF NOT EXISTS idx_players_tier     ON players (progress_level);
+      CREATE INDEX IF NOT EXISTS idx_players_region        ON players (region);
+      CREATE INDEX IF NOT EXISTS idx_players_position      ON players (position);
+      CREATE INDEX IF NOT EXISTS idx_players_tier          ON players (progress_level);
+      CREATE INDEX IF NOT EXISTS idx_players_registered_at ON players (registered_at);
       CREATE TABLE IF NOT EXISTS validator_stats (
         wallet             TEXT PRIMARY KEY,
         milestones_approved INTEGER DEFAULT 0,
@@ -433,7 +435,12 @@ export interface PlayerRow {
   metadata_uri: string | null;
   progress_level: number;
   created_at: number | null;
+  registered_at: number;
   is_active: number;
+}
+
+export interface ScoredPlayerRow extends PlayerRow {
+  search_score: number;
 }
 
 export interface QueryPlayersOptions {
@@ -507,9 +514,10 @@ export function insertOrUpdatePlayer(p: {
   region?: string;
   metadata_uri?: string;
   created_at?: number;
+  registered_at?: number;
 }): void {
-  const sql = `INSERT INTO players (player_id, wallet, position, region, metadata_uri, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+  const sql = `INSERT INTO players (player_id, wallet, position, region, metadata_uri, created_at, registered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(player_id) DO UPDATE SET
          wallet       = excluded.wallet,
          position     = excluded.position,
@@ -517,7 +525,7 @@ export function insertOrUpdatePlayer(p: {
          metadata_uri = excluded.metadata_uri`;
   withDbSpan('insertOrUpdatePlayer', sql, () =>
     timedQuery(sql, () =>
-      getDb().prepare(sql).run(p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null)
+      getDb().prepare(sql).run(p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null, p.registered_at ?? 0)
     )
   );
 }
@@ -724,6 +732,184 @@ export function countPlayers(opts: Omit<QueryPlayersOptions, 'limit' | 'offset'>
     const row = getDb().prepare(sql).get(...params) as { count: number };
     return row.count;
   });
+}
+
+// ─── Player search ranking & cursor pagination (#577) ─────────────────────────
+
+export interface SearchPlayersOptions {
+  region?: string;
+  position?: string;
+  minTier?: number;
+  limit?: number;
+  offset?: number;
+  sortBy?: 'relevance' | 'tier' | 'region' | 'created_at';
+  sortOrder?: 'asc' | 'desc';
+  cursor?: string | null;
+  includeDeactivated?: boolean;
+}
+
+export interface SearchPlayersResult {
+  data: PlayerRow[];
+  nextCursor: string | null;
+}
+
+function encodeCursor(values: (string | number)[]): string {
+  return Buffer.from(JSON.stringify(values)).toString('base64');
+}
+
+function decodeCursor(cursor: string): (string | number)[] | null {
+  try {
+    return JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+export function searchPlayers(opts: SearchPlayersOptions): SearchPlayersResult {
+  const db = getDb();
+  const sortBy = opts.sortBy ?? 'relevance';
+  const sortOrder = opts.sortOrder ?? 'desc';
+  const direction = sortOrder === 'asc' ? 'ASC' : 'DESC';
+  const limit = opts.limit ?? 20;
+
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (opts.region) {
+    conditions.push('region = ?');
+    params.push(opts.region);
+  }
+  if (opts.position) {
+    conditions.push('position = ?');
+    params.push(opts.position);
+  }
+  if (opts.minTier !== undefined) {
+    conditions.push('progress_level >= ?');
+    params.push(opts.minTier);
+  }
+  if (!opts.includeDeactivated) {
+    conditions.push('is_active = 1');
+  }
+
+  const baseWhere = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+  const useCursor = !!opts.cursor;
+
+  if (sortBy === 'relevance') {
+    let cursorWhere = '';
+    const cursorParams: (string | number)[] = [];
+    const offsetClause = (!useCursor && opts.offset) ? `OFFSET ${opts.offset}` : '';
+
+    if (useCursor) {
+      const decoded = decodeCursor(opts.cursor);
+      if (decoded && decoded.length >= 2) {
+        cursorWhere = 'AND (search_score, player_id) < (?, ?)';
+        cursorParams.push(decoded[0] as number, decoded[1] as string);
+      }
+    }
+
+    const fetchLimit = useCursor ? limit + 1 : limit;
+    const sql = `WITH scored AS (
+      SELECT *,
+        (CAST(progress_level AS REAL) * 10.0) +
+        (CASE WHEN registered_at > 0 THEN 5.0 ELSE 0.0 END) AS search_score
+      FROM players
+      ${baseWhere}
+    )
+    SELECT * FROM scored
+    ${cursorWhere}
+    ORDER BY search_score DESC, player_id ASC
+    LIMIT ? ${offsetClause}`;
+
+    const allParams = [...params, ...cursorParams, fetchLimit];
+    const rows = timedQuery(sql, () =>
+      db.prepare(sql).all(...allParams) as ScoredPlayerRow[]
+    );
+
+    if (useCursor) {
+      return processCursorResults(rows, limit, sortBy, sortOrder);
+    }
+    return { data: rows as PlayerRow[], nextCursor: null };
+  }
+
+  let orderColumn: string;
+  switch (sortBy) {
+    case 'tier':
+      orderColumn = 'progress_level';
+      break;
+    case 'region':
+      orderColumn = 'region';
+      break;
+    case 'created_at':
+      orderColumn = 'registered_at';
+      break;
+    default:
+      orderColumn = 'registered_at';
+  }
+
+  let cursorWhere = '';
+  const cursorParams: (string | number)[] = [];
+  const offsetClause = (!useCursor && opts.offset) ? `OFFSET ${opts.offset}` : '';
+
+  if (useCursor) {
+    const decoded = decodeCursor(opts.cursor);
+    if (decoded && decoded.length >= 2) {
+      const lastVal = decoded[0] as string | number;
+      const lastPlayerId = decoded[1] as string;
+      const op = direction === 'ASC' ? '>' : '<';
+      cursorWhere = `AND (${orderColumn}, player_id) ${op} (?, ?)`;
+      cursorParams.push(lastVal, lastPlayerId);
+    }
+  }
+
+  const fetchLimit = useCursor ? limit + 1 : limit;
+  const sql = `SELECT * FROM players ${baseWhere} ${cursorWhere} ORDER BY ${orderColumn} ${direction}, player_id ASC LIMIT ? ${offsetClause}`;
+  const allParams = [...params, ...cursorParams, fetchLimit];
+  const rows = timedQuery(sql, () =>
+    db.prepare(sql).all(...allParams) as PlayerRow[]
+  );
+
+  if (useCursor) {
+    return processCursorResults(rows, limit, sortBy, sortOrder);
+  }
+  return { data: rows as PlayerRow[], nextCursor: null };
+}
+
+function processCursorResults(
+  rows: (PlayerRow | ScoredPlayerRow)[],
+  limit: number,
+  sortBy: string,
+  sortOrder: string,
+): SearchPlayersResult {
+  const hasMore = rows.length > limit;
+  const data = hasMore ? rows.slice(0, limit) : rows;
+
+  let nextCursor: string | null = null;
+  if (hasMore && data.length > 0) {
+    const last = data[data.length - 1];
+    if (sortBy === 'relevance') {
+      const scored = last as ScoredPlayerRow;
+      nextCursor = encodeCursor([scored.search_score, scored.player_id]);
+    } else {
+      let lastVal: string | number;
+      switch (sortBy) {
+        case 'tier':
+          lastVal = last.progress_level;
+          break;
+        case 'region':
+          lastVal = last.region ?? '';
+          break;
+        case 'created_at':
+          lastVal = last.registered_at;
+          break;
+        default:
+          lastVal = last.registered_at;
+      }
+      nextCursor = encodeCursor([lastVal, last.player_id]);
+    }
+  }
+
+  return { data, nextCursor };
 }
 
 // ─── Idempotency key helpers ──────────────────────────────────────────────────

@@ -157,13 +157,17 @@ export async function indexEvents(): Promise<void> {
 
       if (type === 'player_registered') {
         const playerId = payload.player_id as string;
+        const registeredAt = raw.ledgerClosedAt
+          ? new Date(raw.ledgerClosedAt).getTime()
+          : Date.now();
         insertOrUpdatePlayer({
           player_id: playerId,
           wallet: payload.wallet as string,
           position: payload.position as string | undefined,
           region: payload.region as string | undefined,
           metadata_uri: payload.metadata_uri as string | undefined,
-          created_at: raw.ledger,
+          created_at: registeredAt,
+          registered_at: registeredAt,
         });
         // Invalidate cache after player registration
         const cache = getCache();

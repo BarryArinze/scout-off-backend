@@ -198,6 +198,7 @@ export async function processPlayerImportBatch(
             region: p.region,
             metadata_uri: p.metadataUri,
             created_at: now,
+            registered_at: now,
           });
         }
       });
@@ -236,7 +237,7 @@ export async function processPlayerImportBatch(
       insertOrUpdatePlayer({
         player_id: p.playerId, wallet: p.wallet,
         position: p.position, region: p.region,
-        metadata_uri: p.metadataUri, created_at: now,
+        metadata_uri: p.metadataUri, created_at: now, registered_at: now,
       });
       dispatchEventWebhook('player_registered', {
         player_id: p.playerId, wallet: p.wallet,
