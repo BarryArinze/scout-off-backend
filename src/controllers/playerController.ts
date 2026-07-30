@@ -10,9 +10,9 @@ import {
   queryEvents,
   getPlayerById,
   insertPlayerProfileHistory,
-  queryPlayers,
   countPlayers,
-  upsertPlayer,
+  searchPlayers,
+  PlayerRow,
   recordProfileView,
   getLastProfileView,
   getProfileViewCount,
@@ -59,8 +59,11 @@ export const filterSchema = z.object({
   region: z.string().optional(),
   position: z.string().optional(),
   minTier: z.coerce.number().int().min(0).max(3).optional(),
-  page: z.coerce.number().int().min(1).default(1),
+  sortBy: z.enum(['relevance', 'tier', 'region', 'created_at']).default('relevance'),
+  sortOrder: z.enum(['asc', 'desc']).default('desc'),
+  page: z.coerce.number().int().min(1).optional(),
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  cursor: z.string().optional(),
   /**
    * Comma-separated list of field names to include in each player object.
    * Unknown field names are silently ignored.
@@ -105,13 +108,15 @@ export async function registerPlayer(
     // Write to DB immediately so GET /players/:playerId returns 200 without
     // waiting for the indexer to process the blockchain event (#282).
     const playerId = createId();
+    const now = Date.now();
     insertOrUpdatePlayer({
       player_id: playerId,
       wallet: parsed.wallet,
       position: canonicalPosition,
       region: sanitizedRegion,
       metadata_uri: metadataUri,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: now,
+      registered_at: now,
     });
 
     await dispatchEventWebhook("player_registered", {
@@ -231,7 +236,7 @@ function projectFields(
   return result;
 }
 
-/** GET /api/players?region=&position=&minTier= */
+/** GET /api/players?region=&position=&minTier=&sortBy=&sortOrder=&cursor= */
 export async function filterPlayers(
   req: Request,
   res: Response,
@@ -240,22 +245,18 @@ export async function filterPlayers(
   try {
     const tierResult = validateMinTier(req.query.minTier);
     if (!tierResult.valid) {
-      // minTier is a valid integer but outside the 0–3 range → semantic error (422).
-      // A non-integer or wrong type is caught by Zod as a format error (400).
       const isRangeError = typeof tierResult.error === 'string' && tierResult.error.includes('out of range');
       res.status(isRangeError ? 422 : 400).json({ success: false, error: tierResult.error, code: ErrorCode.VALIDATION_ERROR });
       return;
     }
     const minTier = tierResult.tier;
-    const { region, position, page, pageSize, fields } = filterSchema.parse(req.query);
+    const { region, position, sortBy, sortOrder, page, pageSize, cursor, fields } = filterSchema.parse(req.query);
     const sanitizedRegion = region ? sanitizeInput(region) : undefined;
     const sanitizedPosition = position ? sanitizeInput(position) : undefined;
     const normalizedPosition = sanitizedPosition
       ? normalizePositionOrFallback(sanitizedPosition)
       : undefined;
 
-    // Parse the ?fields= param into a Set for O(1) lookup.
-    // An empty param or absent param means "return all fields".
     const requestedFields = fields
       ? new Set(fields.split(',').map((f) => f.trim()).filter(Boolean))
       : null;
@@ -264,13 +265,15 @@ export async function filterPlayers(
       region: sanitizedRegion ?? null,
       position: normalizedPosition ?? null,
       minTier: minTier ?? null,
-      page,
+      sortBy,
+      sortOrder,
+      page: page ?? null,
+      cursor: cursor ?? null,
       pageSize,
     })}`;
 
     const cached = await cacheGet<FilterPlayersResult>(cacheKey);
     if (cached) {
-      // Apply field projection to the cached result when requested
       const responseData = requestedFields
         ? cached.data.map((p) => projectFields(p, requestedFields))
         : cached.data;
@@ -278,19 +281,43 @@ export async function filterPlayers(
       return;
     }
 
-    const rows = queryPlayers({
-      region: sanitizedRegion,
-      position: normalizedPosition,
-      minTier,
-      limit: pageSize,
-      offset: (page - 1) * pageSize,
-    });
+    const resolvedPage = page ?? 1;
+
+    let rows: PlayerRow[];
+    let nextCursor: string | null;
+
+    if (cursor) {
+      const searchResult = searchPlayers({
+        region: sanitizedRegion,
+        position: normalizedPosition,
+        minTier,
+        sortBy,
+        sortOrder,
+        limit: pageSize,
+        cursor,
+      });
+      rows = searchResult.data;
+      nextCursor = searchResult.nextCursor;
+    } else {
+      const searchResult = searchPlayers({
+        region: sanitizedRegion,
+        position: normalizedPosition,
+        minTier,
+        sortBy,
+        sortOrder,
+        limit: pageSize,
+        offset: (resolvedPage - 1) * pageSize,
+      });
+      rows = searchResult.data;
+      nextCursor = searchResult.nextCursor;
+    }
 
     const total = countPlayers({
       region: sanitizedRegion,
       position: normalizedPosition,
       minTier,
     });
+
     const pages = Math.ceil(total / pageSize);
     const enriched = rows.map((row) => ({
       player_id: row.player_id,
@@ -300,11 +327,19 @@ export async function filterPlayers(
       metadataUri: row.metadata_uri,
       progress_level: row.progress_level,
       created_at: row.created_at,
+      registered_at: row.registered_at,
       progress_tier_name: tierName(row.progress_level as number),
       ...enrichPlayerResult(row.progress_level),
     }));
 
-    const result: FilterPlayersResult = { data: enriched, total, page, pageSize, pages };
+    const result: FilterPlayersResult & { nextCursor: string | null } = {
+      data: enriched,
+      total,
+      page: resolvedPage,
+      pageSize,
+      pages,
+      nextCursor,
+    };
     await cacheSet(cacheKey, result);
 
     const scoutWallet = req.account ?? 'anonymous';
@@ -312,13 +347,14 @@ export async function filterPlayers(
       region: sanitizedRegion ?? null,
       position: normalizedPosition ?? null,
       minTier: minTier ?? null,
-      page,
+      sortBy,
+      sortOrder,
+      page: resolvedPage,
       pageSize,
+      cursor: cursor ?? null,
       resultCount: total,
     });
 
-    // Apply field projection after caching the full result so the cache always
-    // stores all fields (enabling different ?fields= requests to reuse it).
     const responseData = requestedFields
       ? enriched.map((p) => projectFields(p, requestedFields))
       : enriched;
