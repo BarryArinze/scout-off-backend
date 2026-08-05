@@ -28,7 +28,7 @@ const CID_V1_RE = /^(bafy|bafk)[2-7a-z]{46,}$/;
 
 // HTTPS URL — requires a proper hostname (no raw IPs, no localhost).
 // Rejects path traversal ("..") anywhere in the URL string.
-const HTTPS_HOSTNAME_RE = /^https:\/\/[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)+/;
+const HTTPS_HOSTNAME_RE = /^https:\/\/[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+/;
 
 /** Standard error message returned by Zod refinements and HTTP 400 responses. */
 export const URI_VALIDATION_ERROR =
