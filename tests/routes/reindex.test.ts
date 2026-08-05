@@ -5,7 +5,7 @@
  *   POST /api/admin/reindex
  *   GET  /api/admin/reindex/status
  *
- * The Soroban RPC (server.queryEvents) is fully mocked so the tests run
+ * The Soroban RPC (server.getEvents) is fully mocked so the tests run
  * offline without a real network. The DB is the in-memory SQLite instance
  * shared by the test suite (configured in tests/setup.ts via DB_PATH=:memory:).
  */
@@ -15,16 +15,16 @@ import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
 
 // ── Mock the Soroban RPC ──────────────────────────────────────────────────────
 //
-// We mock the entire stellar service so server.queryEvents resolves with a
+// We mock the entire stellar service so server.getEvents resolves with a
 // controlled set of fake events. The real indexer.ts and reindexService.ts
 // are loaded normally, exercising the full normalizePayload / dedup path.
 
-const mockQueryEvents = jest.fn();
+const mockGetEvents = jest.fn();
 
 jest.mock('../../src/services/stellar', () => ({
   ...jest.requireActual('../../src/services/stellar'),
   server: {
-    queryEvents: (...args: unknown[]) => mockQueryEvents(...args),
+    getEvents: (...args: unknown[]) => mockGetEvents(...args),
   },
 }));
 
@@ -82,7 +82,7 @@ function makeFakeRpcResponse(ledger: number, txHash: string) {
 
 beforeEach(() => {
   _resetReindexState();
-  mockQueryEvents.mockReset();
+  mockGetEvents.mockReset();
 });
 
 // ─── Authentication & authorisation ──────────────────────────────────────────
@@ -177,7 +177,7 @@ describe('POST /api/admin/reindex — triggers background job', () => {
   });
 
   it('returns 202 and starts a job for a valid range', async () => {
-    mockQueryEvents.mockResolvedValue({ latestLedger: 9_999_999, events: [] });
+    mockGetEvents.mockResolvedValue({ latestLedger: 9_999_999, events: [] });
 
     const res = await request(app)
       .post('/api/admin/reindex')
@@ -193,7 +193,7 @@ describe('POST /api/admin/reindex — triggers background job', () => {
 
   it('returns 409 when a job is already running', async () => {
     // Keep the first job perpetually "in progress" by never resolving the mock.
-    mockQueryEvents.mockReturnValue(new Promise(() => { /* intentionally pending */ }));
+    mockGetEvents.mockReturnValue(new Promise(() => { /* intentionally pending */ }));
 
     await request(app)
       .post('/api/admin/reindex')
@@ -233,7 +233,7 @@ describe('GET /api/admin/reindex/status', () => {
   });
 
   it('returns running status while a job is in progress', async () => {
-    mockQueryEvents.mockReturnValue(new Promise(() => { /* intentionally pending */ }));
+    mockGetEvents.mockReturnValue(new Promise(() => { /* intentionally pending */ }));
 
     await request(app)
       .post('/api/admin/reindex')
@@ -267,7 +267,7 @@ describe('POST /api/admin/reindex — idempotent replay', () => {
     const fakeResponse = makeFakeRpcResponse(1_000, txHash);
 
     // Both runs return the same event.
-    mockQueryEvents.mockResolvedValue(fakeResponse);
+    mockGetEvents.mockResolvedValue(fakeResponse);
 
     // First run.
     const res1 = await request(app)
@@ -277,7 +277,7 @@ describe('POST /api/admin/reindex — idempotent replay', () => {
     expect(res1.status).toBe(202);
 
     // Wait briefly for the async job to complete (it resolves instantly because
-    // mockQueryEvents resolves immediately).
+    // mockGetEvents resolves immediately).
     await new Promise((r) => setTimeout(r, 100));
 
     // Check status: should be complete.
@@ -290,7 +290,7 @@ describe('POST /api/admin/reindex — idempotent replay', () => {
 
     // Reset singleton and run again with the same tx_hash.
     _resetReindexState();
-    mockQueryEvents.mockResolvedValue(fakeResponse);
+    mockGetEvents.mockResolvedValue(fakeResponse);
 
     const res2 = await request(app)
       .post('/api/admin/reindex')

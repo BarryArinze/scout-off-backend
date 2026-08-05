@@ -62,9 +62,9 @@ export function timedQuery<T>(sql: string, fn: () => T): T {
       result !== null &&
       typeof result === 'object' &&
       'changes' in (result as object) &&
-      typeof (result as { changes: unknown }).changes === 'number'
+      typeof (result as unknown as { changes: unknown }).changes === 'number'
     ) {
-      row_count = (result as { changes: number }).changes;
+      row_count = (result as unknown as { changes: number }).changes;
     } else if (result !== null && result !== undefined && !Array.isArray(result) && typeof result !== 'object') {
       // scalar (number, boolean, string) — treat as 1 row
       row_count = 1;
@@ -808,7 +808,7 @@ export function searchPlayers(opts: SearchPlayersOptions): SearchPlayersResult {
     const offsetClause = (!useCursor && opts.offset) ? `OFFSET ${opts.offset}` : '';
 
     if (useCursor) {
-      const decoded = decodeCursor(opts.cursor);
+      const decoded = decodeCursor(opts.cursor as string);
       if (decoded && decoded.length >= 2) {
         cursorWhere = 'AND (search_score, player_id) < (?, ?)';
         cursorParams.push(decoded[0] as number, decoded[1] as string);
@@ -859,7 +859,7 @@ export function searchPlayers(opts: SearchPlayersOptions): SearchPlayersResult {
   const offsetClause = (!useCursor && opts.offset) ? `OFFSET ${opts.offset}` : '';
 
   if (useCursor) {
-    const decoded = decodeCursor(opts.cursor);
+    const decoded = decodeCursor(opts.cursor as string);
     if (decoded && decoded.length >= 2) {
       const lastVal = decoded[0] as string | number;
       const lastPlayerId = decoded[1] as string;

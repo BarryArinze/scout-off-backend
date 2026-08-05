@@ -505,8 +505,8 @@ export async function getPlayerMilestones(
     ];
 
     combined.sort((a, b) => {
-      const av = Number(a[sortBy] ?? 0);
-      const bv = Number(b[sortBy] ?? 0);
+      const av = Number((a as Record<string, unknown>)[sortBy] ?? 0);
+      const bv = Number((b as Record<string, unknown>)[sortBy] ?? 0);
       return order === "asc" ? av - bv : bv - av;
     });
 

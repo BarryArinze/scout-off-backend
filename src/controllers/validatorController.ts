@@ -53,7 +53,7 @@ export async function downloadAndPinEvidence(url: string): Promise<string> {
     contentType = (head.headers['content-type'] as string | undefined) ?? '';
     const clHeader = head.headers['content-length'];
     if (clHeader) {
-      contentLength = parseInt(clHeader, 10);
+      contentLength = parseInt(String(clHeader), 10);
     }
   } catch {
     // Some servers reject HEAD — fall through to GET with streaming

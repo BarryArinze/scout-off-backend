@@ -207,7 +207,9 @@ export type ContractEventType =
   | 'trial_offer_logged'
   | 'trial_offer_accepted'
   | 'trial_offer_rejected'
-  | 'fees_withdrawn';
+  | 'fees_withdrawn'
+  | 'player_deactivated'
+  | 'player_reactivated';
 
 export interface ContractEvent {
   type: ContractEventType;

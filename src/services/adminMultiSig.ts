@@ -22,7 +22,8 @@ export type AdminActionType =
   | 'withdraw_fees'
   | 'update_platform_fee'
   | 'register_validator'
-  | 'revoke_validator';
+  | 'revoke_validator'
+  | 'bulk_validator_import';
 
 export interface ProposalResult {
   actionId: string;

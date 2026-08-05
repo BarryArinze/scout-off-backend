@@ -27,7 +27,7 @@ export interface GraphQLContext {
  * Builds the GraphQL context for every request.
  * Called by graphql-yoga's `context` option.
  */
-export function createContext({ req }: { req: Request }): GraphQLContext {
+export async function createContext({ req }: { req: Request }): Promise<GraphQLContext> {
   const loaders = createLoaders();
 
   const header = req.headers.authorization;
@@ -43,7 +43,7 @@ export function createContext({ req }: { req: Request }): GraphQLContext {
     return { account: undefined, role: undefined, loaders, req };
   }
 
-  if (payload.jti && isTokenRevoked(payload.jti)) {
+  if (payload.jti && (await isTokenRevoked(payload.jti))) {
     logger.debug({ path: req.path, msg: 'graphql: revoked token' });
     return { account: undefined, role: undefined, loaders, req };
   }

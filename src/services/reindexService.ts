@@ -139,14 +139,14 @@ async function _runReindex(
     while (currentBatchStart <= toLedger) {
       const batchEnd = Math.min(currentBatchStart + BATCH_SIZE - 1, toLedger);
 
-      let batchEvents: Awaited<ReturnType<typeof server.queryEvents>>['events'] = [];
+      let batchEvents: Awaited<ReturnType<typeof server.getEvents>>['events'] = [];
       try {
-        const response = await server.queryEvents({
+        const response = await server.getEvents({
           startLedger: currentBatchStart,
           filters: [{ type: 'contract', contractIds: [config.contractId] }],
         });
         batchEvents = response.events.filter(
-          (e) => e.ledger >= currentBatchStart && e.ledger <= batchEnd,
+          (e: (typeof response.events)[number]) => e.ledger >= currentBatchStart && e.ledger <= batchEnd,
         );
       } catch (rpcErr: unknown) {
         logger.warn(
