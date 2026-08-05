@@ -20,7 +20,22 @@
 mod subscription_invariants {
     use proptest::prelude::*;
     use subscription::{SubscriptionContract, SubscriptionContractClient};
-    use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::StellarAssetClient,
+        Address, Env,
+    };
+
+    /// Any scout balance used in these tests only needs to cover subscribe()/
+    /// pay_to_contact() fees — one mint per scout is enough per test case.
+    const SCOUT_FUNDING: i128 = 1_000_000_000_000_000i128;
+
+    /// Mirrors subscription::LEDGERS_PER_DAY (private to the contract crate).
+    /// subscribe()'s duration parameter is in *days*; it converts to ledgers
+    /// internally via duration_days * LEDGERS_PER_DAY before storing expiry,
+    /// so tests computing their own expected expiry must apply the same
+    /// conversion rather than treating the parameter as a raw ledger count.
+    const LEDGERS_PER_DAY: u32 = 17_280;
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
@@ -40,9 +55,19 @@ mod subscription_invariants {
         let id = env.register_contract(None, SubscriptionContract);
         let client = SubscriptionContractClient::new(env, &id);
         let admin = Address::generate(env);
-        let token = Address::generate(env);
+        // subscribe()/pay_to_contact() transfer real tokens via TokenClient, so
+        // the "token" address must be a live Stellar Asset Contract, not a bare
+        // generated Address — otherwise every transfer call traps with
+        // Error(Storage, MissingValue) (no contract instance to invoke).
+        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
         client.initialize(&admin, &token, &100u32);
         (client, admin, token)
+    }
+
+    /// Mint `SCOUT_FUNDING` tokens to `scout` so its subscribe()/pay_to_contact()
+    /// transfer calls have a sufficient balance.
+    fn fund_scout(env: &Env, token: &Address, scout: &Address) {
+        StellarAssetClient::new(env, token).mint(scout, &SCOUT_FUNDING);
     }
 
     // ── S1: fee arithmetic never overflows u128 ───────────────────────────────
@@ -121,19 +146,26 @@ mod subscription_invariants {
             ),
         ) {
             let env = Env::default();
-            let (client, ..) = setup(&env);
+            let (client, _, token) = setup(&env);
             let scout = Address::generate(&env);
+            fund_scout(&env, &token, &scout);
             let mut expected_expiry: Option<u32> = None;
 
             for (is_subscribe, value) in ops {
                 if is_subscribe {
                     let seq = env.ledger().sequence();
+                    // subscribe()'s duration param is in days; the contract
+                    // converts to ledgers via duration_days * LEDGERS_PER_DAY.
+                    let duration_ledgers = match value.checked_mul(LEDGERS_PER_DAY) {
+                        Some(d) => d,
+                        None => continue,
+                    };
                     // Guard: skip if duration would overflow u32.
-                    if seq.checked_add(value).is_none() {
+                    if seq.checked_add(duration_ledgers).is_none() {
                         continue;
                     }
                     client.subscribe(&scout, &1u32, &value);
-                    expected_expiry = Some(seq + value);
+                    expected_expiry = Some(seq + duration_ledgers);
                 } else {
                     let seq = env.ledger().sequence();
                     if seq.checked_add(value).is_none() {
@@ -163,14 +195,40 @@ mod subscription_invariants {
         /// At sequence == expiry:   is_subscribed must be false.
         #[test]
         fn prop_subscription_inactive_at_and_after_expiry(
-            duration in 1u32..=1_000u32,
+            // Capped at 365 days: soroban-env-host's test Env enforces a
+            // max_entry_ttl of 6 312 000 ledgers (~365.28 days at
+            // LEDGERS_PER_DAY), matching realistic mainnet behavior — no
+            // amount of extend_ttl can keep storage alive past that, on the
+            // real network or in this test environment.
+            duration in 1u32..=365u32,
         ) {
             let env = Env::default();
-            let (client, ..) = setup(&env);
+            let (client, _, token) = setup(&env);
             let scout = Address::generate(&env);
+            fund_scout(&env, &token, &scout);
             let start_seq = env.ledger().sequence();
             client.subscribe(&scout, &1u32, &duration);
-            let expiry = start_seq + duration;
+            // subscribe()'s duration param is in days; the contract converts
+            // to ledgers via duration_days * LEDGERS_PER_DAY.
+            let expiry = start_seq + duration * LEDGERS_PER_DAY;
+
+            // subscribe()'s own TTL bump only extends storage by
+            // LEDGER_BUMP_AMOUNT (~30 days of ledgers) — a duration at or
+            // beyond that would let both the subscription contract's and the
+            // token (SAC) contract's instance storage genuinely expire
+            // before we get to check the boundary below, which is an
+            // artifact of jumping the ledger sequence manually rather than
+            // something this test is meant to exercise. Re-extend both
+            // generously so only the subscription-expiry logic is under test.
+            // threshold must be >= extend_to here, or "remaining TTL <
+            // threshold" never trips and the call is a no-op.
+            let needed_ttl = expiry - start_seq + 10;
+            env.as_contract(&client.address, || {
+                env.storage().instance().extend_ttl(needed_ttl, needed_ttl);
+            });
+            env.as_contract(&token, || {
+                env.storage().instance().extend_ttl(needed_ttl, needed_ttl);
+            });
 
             // One ledger before expiry — must be active.
             if expiry > 0 {
@@ -215,8 +273,9 @@ mod subscription_invariants {
             player_id in 1u64..=1_000u64,
         ) {
             let env = Env::default();
-            let (client, ..) = setup(&env);
+            let (client, _, token) = setup(&env);
             let scout = Address::generate(&env);
+            fund_scout(&env, &token, &scout);
 
             for _ in 0..n {
                 let result = client.try_pay_to_contact(&scout, &player_id);
@@ -241,8 +300,9 @@ mod subscription_invariants {
             player_b in 501u64..=1000u64,
         ) {
             let env = Env::default();
-            let (client, ..) = setup(&env);
+            let (client, _, token) = setup(&env);
             let scout = Address::generate(&env);
+            fund_scout(&env, &token, &scout);
 
             prop_assert!(!client.has_paid_contact(&scout, &player_a));
             prop_assert!(!client.has_paid_contact(&scout, &player_b));
@@ -266,8 +326,9 @@ mod subscription_invariants {
             duration in 1u32..=100_000u32,
         ) {
             let env = Env::default();
-            let (client, ..) = setup(&env);
+            let (client, _, token) = setup(&env);
             let scout = Address::generate(&env);
+            fund_scout(&env, &token, &scout);
             let start = env.ledger().sequence();
 
             // Only test cases where addition won't overflow u32.
