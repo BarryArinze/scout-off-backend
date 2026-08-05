@@ -396,7 +396,11 @@ mod tests {
         let env = Env::default();
         let (client, admin, token) = setup(&env);
         client.initialize(&admin, &token, &500u32);
-        scout_off_shared::storage::set_paused(&env, true);
+        // Storage access is only permitted from within a contract's own
+        // execution context — wrap the direct storage write accordingly.
+        env.as_contract(&client.address, || {
+            scout_off_shared::storage::set_paused(&env, true);
+        });
         let scout = Address::generate(&env);
         fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
         let result = client.try_subscribe(&scout, &1u32, &10u32);

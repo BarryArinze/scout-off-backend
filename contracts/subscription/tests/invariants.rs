@@ -24,6 +24,17 @@ mod subscription_invariants {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    /// Number of cases to run per proptest! block. Defaults to 10 000 (the
+    /// project standard) but can be overridden via PROPTEST_CASES — e.g. CI
+    /// uses a smaller value for fast PR feedback within its time budget,
+    /// while nightly/local runs keep the full 10 000.
+    fn proptest_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000)
+    }
+
     fn setup(env: &Env) -> (SubscriptionContractClient<'_>, Address, Address) {
         env.mock_all_auths();
         let id = env.register_contract(None, SubscriptionContract);
@@ -37,7 +48,7 @@ mod subscription_invariants {
     // ── S1: fee arithmetic never overflows u128 ───────────────────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// Compute platform fee shares using u128::MAX-range amounts. The platform fee
         /// calculation `amount * fee_bps / 10_000` must not overflow u128.
@@ -64,7 +75,7 @@ mod subscription_invariants {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// Accumulated fees from multiple scouts must never exceed the total XLM deposited.
         /// For n scouts each paying `amount`, the sum of fees must be ≤ n * amount.
@@ -94,7 +105,7 @@ mod subscription_invariants {
     // ── S2: is_subscribed matches ledger-sequence arithmetic exactly ──────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// For any (subscribe, advance-ledger) interleaving, is_subscribed must equal
         /// `current_sequence < stored_expiry`.  We track expected_expiry in the test
@@ -146,7 +157,7 @@ mod subscription_invariants {
     // ── S3: precise boundary check at expiry ledger ───────────────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// At sequence == expiry-1: is_subscribed must be true.
         /// At sequence == expiry:   is_subscribed must be false.
@@ -194,7 +205,7 @@ mod subscription_invariants {
     // ── S4: contact fee payment is idempotent ─────────────────────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// Paying the contact fee for the same (scout, player_id) pair multiple times
         /// must not fail and must leave has_paid_contact true.
@@ -221,7 +232,7 @@ mod subscription_invariants {
     // ── S5: contact fee records are independent per (scout, player_id) ────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// Paying for player_a must not flip has_paid_contact for player_b.
         #[test]
@@ -246,7 +257,7 @@ mod subscription_invariants {
     // ── S6: subscription expiry never wraps around u32 ────────────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// For any `duration_ledgers` that would not overflow the current sequence,
         /// the stored expiry is always strictly greater than the starting sequence.

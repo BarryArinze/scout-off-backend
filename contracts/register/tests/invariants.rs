@@ -21,6 +21,17 @@ mod register_invariants {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    /// Number of cases to run per proptest! block. Defaults to 10 000 (the
+    /// project standard) but can be overridden via PROPTEST_CASES — e.g. CI
+    /// uses a smaller value for fast PR feedback within its time budget,
+    /// while nightly/local runs keep the full 10 000.
+    fn proptest_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000)
+    }
+
     fn setup(env: &Env) -> (RegisterContractClient<'_>, Address, Address, Address) {
         env.mock_all_auths();
         let id = env.register_contract(None, RegisterContract);
@@ -46,7 +57,7 @@ mod register_invariants {
     // ── R1 / R2: counter is monotonically increasing & IDs are unique ─────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// For any n registrations (1..=20), each successive player_id must equal
         /// the previous + 1, and the set of all ids must be strictly increasing.
@@ -76,7 +87,7 @@ mod register_invariants {
     // ── R3 / R5: progress level is always in [0, 3] and never decreases ──────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// Sequences of update_progress_level calls with random levels must keep
         /// the stored progress within [0, 3] and must never decrease it.
@@ -109,7 +120,7 @@ mod register_invariants {
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// Levels above 3 passed to update_progress_level must not exceed 3 once stored
         /// (the contract clamps via `max(current, level)` but the test verifies stored ≤ 3
@@ -141,7 +152,7 @@ mod register_invariants {
     // ── R3: initial progress is always 0 ──────────────────────────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// For any registration (regardless of position/region string content),
         /// the player's progress_level starts at exactly 0.
@@ -172,7 +183,7 @@ mod register_invariants {
     // ── R2: duplicate wallet registration is rejected ────────────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// Registering the same wallet twice must fail; the counter must not advance
         /// on the failed second call, so the next unique wallet gets counter + 1.

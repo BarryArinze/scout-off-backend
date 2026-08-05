@@ -4,5 +4,4 @@
 #
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
-cc ed66ce67778ae5f695ad46b28485dc4453914a2fa13cc9eb7483808dea301085 # shrinks to n = 1
-cc d7ca8ac923a8504a994ff7a6e81decf2e53df42ac6c4a8f51129aec1c5e7e883 # shrinks to n = 2, use_subscription = false
+cc 0b9e1e3ec428cab5745fe3ea913c0713362d181ec08567767c7af742259914de # shrinks to ops = [(false, 0)]

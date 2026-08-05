@@ -28,6 +28,17 @@ mod connection_invariants {
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    /// Number of cases to run per proptest! block. Defaults to 10 000 (the
+    /// project standard) but can be overridden via PROPTEST_CASES — e.g. CI
+    /// uses a smaller value for fast PR feedback within its time budget,
+    /// while nightly/local runs keep the full 10 000.
+    fn proptest_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000)
+    }
+
     /// Any scout balance used in these tests only needs to cover subscribe()/
     /// pay_to_contact() fees, which are small relative to this — one mint per
     /// scout is enough for the whole proptest case.
@@ -89,7 +100,7 @@ mod connection_invariants {
     // ── C1: no duplicate connections per (scout, player_id) ──────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// Calling log_trial_offer n times for the same (scout, player_id) must leave
         /// get_connections returning exactly 1 record for that scout.
@@ -138,7 +149,7 @@ mod connection_invariants {
     // ── C2: connection count equals number of distinct player_ids contacted ───
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// After contacting n distinct players, get_trial_offers must return exactly n records.
         #[test]
@@ -172,7 +183,7 @@ mod connection_invariants {
     // ── C3: successful log_trial_offer always sets player level to exactly 3 ──
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// For any starting level in [0, 3], a successful log_trial_offer must leave
         /// the player's progress_level at exactly 3.
@@ -205,7 +216,7 @@ mod connection_invariants {
     // ── C4: unauthorized scouts are always rejected ───────────────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// A scout with neither a subscription nor a paid contact fee must always
         /// receive an error, and the player's progress_level must remain unchanged.
@@ -235,7 +246,7 @@ mod connection_invariants {
     // ── C5: original URI is preserved on duplicate calls ─────────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// No matter how many times log_trial_offer is called with different URIs,
         /// get_connections always returns the URI from the very first successful call.
@@ -274,7 +285,7 @@ mod connection_invariants {
     // ── C6: player progress_level never decreases across valid operations ─────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(10_000))]
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
 
         /// A mixed sequence of subscription, contact-fee, and log_trial_offer operations
         /// for multiple scouts targeting the same player must never decrease the player's
@@ -294,7 +305,10 @@ mod connection_invariants {
             let player_ids: Vec<u64> = (0..3).map(|_| new_player(&env, &reg)).collect();
             let scout = Address::generate(&env);
             fund_scout(&env, &token, &scout);
-            sub.subscribe(&scout, &1u32, &1_000_000u32);
+            // duration_days * LEDGERS_PER_DAY must fit in a u32 — subscribe()
+            // correctly rejects anything larger with Error::Overflow, so this
+            // needs to stay well under u32::MAX / LEDGERS_PER_DAY (~248 000).
+            sub.subscribe(&scout, &1u32, &100_000u32);
 
             let mut min_levels = vec![0u32; 3];
 
