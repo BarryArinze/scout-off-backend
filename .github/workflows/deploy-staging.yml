@@ -79,7 +79,12 @@ jobs:
 
       - name: Package release
         run: |
-          tar czf release.tar.gz \
+          # --warning=no-file-changed: GNU tar exits 1 if a file's mtime/size
+          # changes between being stat'd and read (e.g. a log file some
+          # background process touches mid-archive) even though the archive
+          # itself is still valid — this only silences that specific warning,
+          # not other tar errors.
+          tar --warning=no-file-changed -czf release.tar.gz \
             --exclude=node_modules \
             --exclude=.git \
             --exclude=coverage \

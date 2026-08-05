@@ -29,6 +29,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The smoke test script starts the app via `npm start` (node dist/index.js),
+      # so dist/ must exist before it runs.
+      - name: Build
+        run: npm run build
+
       - name: Install sqlite3 CLI
         run: sudo apt-get update && sudo apt-get install -y sqlite3 curl
 
@@ -44,6 +49,10 @@ jobs:
           LOG_LEVEL: error
           STELLAR_HEALTH_CHECK_ENABLED: false
           IPFS_ENABLED: false
+          # The script starts the real app (npm start) to smoke-test it, and
+          # src/config.ts refuses to boot without these.
+          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+          JWT_SECRET: test-secret-min-32-chars-for-ci-only
 
       - name: Run backup verification tests
         run: npm run test -- tests/scripts/backup-verify.test.ts --forceExit

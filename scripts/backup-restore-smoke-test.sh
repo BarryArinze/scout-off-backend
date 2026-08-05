@@ -56,13 +56,32 @@ fail() {
   exit 1
 }
 
+# Recursively kills a process and all its descendants.
+# APP_START_CMD defaults to "npm start", which chains through TWO extra
+# processes before the actual server (npm -> `sh -c node dist/index.js` ->
+# node) rather than exec'ing straight to node — so $! (APP_PID) only
+# identifies the top of that chain. A single-level `pkill -P` misses the
+# grandchild; killing just APP_PID leaves the real node server running as
+# an orphan, which then holds this script's stdout open indefinitely.
+# Process-group based kill isn't reliable here either, since this script
+# runs non-interactively (no job control), so descendants aren't guaranteed
+# to share a distinct PGID from the script itself.
+kill_tree() {
+  local pid="$1"
+  local child
+  for child in $(pgrep -P "${pid}" 2>/dev/null || true); do
+    kill_tree "${child}"
+  done
+  kill "${pid}" 2>/dev/null || true
+}
+
 cleanup() {
   log "Cleaning up temporary files..."
-  
-  # Stop the app server if it's running
+
+  # Stop the app server if it's running.
   if [[ -n "${APP_PID:-}" ]] && kill -0 "${APP_PID}" 2>/dev/null; then
     log "Stopping app server (PID: ${APP_PID})..."
-    kill "${APP_PID}" 2>/dev/null || true
+    kill_tree "${APP_PID}"
     wait "${APP_PID}" 2>/dev/null || true
   fi
   
