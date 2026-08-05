@@ -79,15 +79,16 @@ jobs:
 
       - name: Package release
         run: |
-          # --warning=no-file-changed: GNU tar exits 1 if a file's mtime/size
-          # changes between being stat'd and read (e.g. a log file some
-          # background process touches mid-archive) even though the archive
-          # itself is still valid — this only silences that specific warning,
-          # not other tar errors.
-          tar --warning=no-file-changed -czf release.tar.gz \
+          # --exclude=release.tar.gz is required, not cosmetic: without it,
+          # tar reads its own output file mid-write (it's being created
+          # inside the very directory being archived) and unconditionally
+          # exits 1 for "file changed as we read it" — --warning=KEYWORD
+          # only silences the message, GNU tar exits 1 either way.
+          tar -czf release.tar.gz \
             --exclude=node_modules \
             --exclude=.git \
             --exclude=coverage \
+            --exclude=release.tar.gz \
             .
 
       - uses: actions/upload-artifact@v4
