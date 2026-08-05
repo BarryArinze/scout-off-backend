@@ -6,9 +6,12 @@ ARG GIT_COMMIT=unknown
 
 WORKDIR /app
 
-# Install dependencies first (better layer caching)
+# Install dependencies first (better layer caching).
+# --ignore-scripts: the `prepare` script installs git hooks via husky, which
+# is meaningless (and, once dev deps are pruned below, unavailable) inside a
+# container that never has a .git directory.
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 # Copy source and compile TypeScript → dist/
 COPY tsconfig.json ./
@@ -16,7 +19,7 @@ COPY src ./src
 RUN npm run build
 
 # Prune dev dependencies so only production deps are copied to runtime stage
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 
 # ─── Stage 2: Runtime ────────────────────────────────────────────────────────
 FROM node:20-alpine AS runtime

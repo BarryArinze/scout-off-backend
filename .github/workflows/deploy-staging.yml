@@ -98,8 +98,15 @@ jobs:
     timeout-minutes: 15
     environment:
       name: staging
-      url: ${{ secrets.STAGING_URL }}
+      # environment.url does not support the secrets context directly, so
+      # resolve it through a step output instead (steps.<id>.outputs.* is
+      # allowed here).
+      url: ${{ steps.set-url.outputs.url }}
     steps:
+      - name: Resolve staging URL
+        id: set-url
+        run: echo "url=${{ secrets.STAGING_URL }}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v4
         with:
           name: staging-release

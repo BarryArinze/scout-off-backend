@@ -64,7 +64,7 @@ mod player_token_invariants {
                 let buyer = Address::generate(&env);
                 let _ = client.try_buy_token(&player_id, &amount, &buyer);
 
-                let meta = client.get_token_meta(&player_id).unwrap();
+                let meta = client.get_token_meta(&player_id);
                 prop_assert!(
                     meta.sold <= meta.total_supply,
                     "sold {} exceeds total_supply {}",
@@ -104,7 +104,7 @@ mod player_token_invariants {
                 .map(|b| client.get_balance(&player_id, b))
                 .sum();
 
-            let meta = client.get_token_meta(&player_id).unwrap();
+            let meta = client.get_token_meta(&player_id);
             prop_assert_eq!(
                 balance_sum, meta.sold,
                 "sum of balances {} must equal meta.sold {}",

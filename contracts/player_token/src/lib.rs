@@ -441,7 +441,7 @@ mod tests {
         client.buy_token(&1u64, &30u64, &buyer);
 
         assert_eq!(client.get_balance(&1u64, &buyer), 30);
-        let meta = client.get_token_meta(&1u64).unwrap();
+        let meta = client.get_token_meta(&1u64);
         assert_eq!(meta.sold, 30);
     }
 

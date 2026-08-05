@@ -52,11 +52,18 @@ jobs:
     steps:
       - name: Evaluate trigger
         id: gate
+        env:
+          # Passed via env rather than interpolated directly into the script
+          # below — a commit message is attacker-influenceable content, and
+          # ${{ }} substitution into `run:` is a literal text splice that
+          # would let shell metacharacters in the message inject commands.
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          DISPATCH_REASON: ${{ inputs.reason }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "should_deploy=true" >> "$GITHUB_OUTPUT"
-            echo "Triggered manually: ${{ inputs.reason }}"
-          elif echo "${{ github.event.head_commit.message }}" | grep -q '^\[deploy-mainnet\]'; then
+            echo "Triggered manually: ${DISPATCH_REASON}"
+          elif echo "${COMMIT_MESSAGE}" | grep -q '^\[deploy-mainnet\]'; then
             echo "should_deploy=true" >> "$GITHUB_OUTPUT"
             echo "Commit message has [deploy-mainnet] prefix — proceeding."
           else
@@ -105,7 +112,8 @@ jobs:
         run: npm run build
 
       - name: Verify dist/index.js produced
-        run: test -f dist/index.js || (echo "ERROR: dist/index.js not found after build" && exit 1)
+        run: |
+          test -f dist/index.js || (echo "ERROR: dist/index.js not found after build" && exit 1)
 
       - name: Write build commit
         run: echo "${{ github.sha }}" > BUILD_COMMIT
@@ -132,8 +140,15 @@ jobs:
     timeout-minutes: 20
     environment:
       name: mainnet
-      url: ${{ secrets.MAINNET_URL }}
+      # environment.url does not support the secrets context directly, so
+      # resolve it through a step output instead (steps.<id>.outputs.* is
+      # allowed here).
+      url: ${{ steps.set-url.outputs.url }}
     steps:
+      - name: Resolve mainnet URL
+        id: set-url
+        run: echo "url=${{ secrets.MAINNET_URL }}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v4
         with:
           name: mainnet-release
@@ -245,17 +260,23 @@ jobs:
       - name: Send success notification
         env:
           WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+          # Passed via env and JSON-encoded with jq below rather than spliced
+          # directly into the payload string — a commit message is
+          # attacker-influenceable content, and both raw ${{ }} substitution
+          # into `run:` and unescaped interpolation into a JSON string are
+          # injection risks.
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          REPO_AT_SHA: ${{ github.repository }}@${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "${WEBHOOK_URL}" ]; then
             echo "NOTIFY_WEBHOOK_URL not configured; skipping notification"
             exit 0
           fi
-          payload=$(cat <<EOF
-          {
-            "text": "✅ Mainnet deployment *succeeded* for ${{ github.repository }}@${{ github.sha }}\nCommit: ${{ github.event.head_commit.message }}\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          }
-          EOF
-          )
+          text="✅ Mainnet deployment *succeeded* for ${REPO_AT_SHA}
+          Commit: ${COMMIT_MESSAGE}
+          Run: ${RUN_URL}"
+          payload=$(jq -n --arg text "$text" '{text: $text}')
           curl -fsSL -X POST "${WEBHOOK_URL}" \
             -H "Content-Type: application/json" \
             -d "${payload}"
@@ -277,6 +298,14 @@ jobs:
       - name: Send failure notification
         env:
           WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+          # Passed via env and JSON-encoded with jq below rather than spliced
+          # directly into the payload string — a commit message is
+          # attacker-influenceable content, and both raw ${{ }} substitution
+          # into `run:` and unescaped interpolation into a JSON string are
+          # injection risks.
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          REPO_AT_SHA: ${{ github.repository }}@${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "${WEBHOOK_URL}" ]; then
             echo "NOTIFY_WEBHOOK_URL not configured; skipping notification"
@@ -293,12 +322,11 @@ jobs:
           elif [ "${{ needs.rotate-secrets.result }}" = "failure" ]; then
             FAILED_STAGE="secrets rotation"
           fi
-          payload=$(cat <<EOF
-          {
-            "text": "🔴 Mainnet deployment *FAILED* at stage: ${FAILED_STAGE}\nRepository: ${{ github.repository }}@${{ github.sha }}\nCommit: ${{ github.event.head_commit.message }}\nRun: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          }
-          EOF
-          )
+          text="🔴 Mainnet deployment *FAILED* at stage: ${FAILED_STAGE}
+          Repository: ${REPO_AT_SHA}
+          Commit: ${COMMIT_MESSAGE}
+          Run: ${RUN_URL}"
+          payload=$(jq -n --arg text "$text" '{text: $text}')
           curl -fsSL -X POST "${WEBHOOK_URL}" \
             -H "Content-Type: application/json" \
             -d "${payload}"
