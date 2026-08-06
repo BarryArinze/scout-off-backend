@@ -120,17 +120,19 @@ jobs:
 
       - name: Package release
         run: |
-          # --exclude=release.tar.gz is required, not cosmetic: without it,
-          # tar reads its own output file mid-write (it's being created
-          # inside the very directory being archived) and unconditionally
-          # exits 1 for "file changed as we read it" — --warning=KEYWORD
-          # only silences the message, GNU tar exits 1 either way.
-          tar -czf release.tar.gz \
+          # Write the archive outside the directory being archived. Even with
+          # --exclude=release.tar.gz, tar still stats the containing directory
+          # (`.`) as it walks it — creating the output file inside that same
+          # directory changes its mtime mid-walk and tar unconditionally exits
+          # 1 for "file changed as we read it" (--warning=KEYWORD only
+          # silences the message, it doesn't stop the exit). Writing to
+          # RUNNER_TEMP sidesteps the self-reference entirely.
+          tar -czf "$RUNNER_TEMP/release.tar.gz" \
             --exclude=node_modules \
             --exclude=.git \
             --exclude=coverage \
-            --exclude=release.tar.gz \
             .
+          mv "$RUNNER_TEMP/release.tar.gz" release.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:

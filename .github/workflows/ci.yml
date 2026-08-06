@@ -171,6 +171,23 @@ jobs:
         working-directory: contracts
         run: cargo build --target wasm32-unknown-unknown --release
 
-      - name: Test contracts (host target)
+      # contracts/.cargo/config.toml sets wasm32-unknown-unknown as the
+      # default build target for this workspace, so host-target commands
+      # must pass --target explicitly or they'll silently try to build (and
+      # fail to link/run) against wasm instead.
+      - name: Run unit tests
         working-directory: contracts
-        run: cargo test --target x86_64-unknown-linux-gnu
+        run: cargo test --workspace --lib --target x86_64-unknown-linux-gnu
+
+      # Property-based invariant fuzz tests live in each contract's tests/ directory.
+      # PROPTEST_CASES controls the number of random inputs per test via each
+      # file's own proptest_cases() helper. The default is 10 000, which alone
+      # takes ~27 minutes for the connection contract and blows this job's
+      # timeout; CI overrides this to a lower number for fast feedback within
+      # its time budget, keeping the full 10 000 run available locally and on
+      # nightly. Mirrors contract-ci.yml's invariant fuzz test step.
+      - name: Run invariant fuzz tests
+        working-directory: contracts
+        env:
+          PROPTEST_CASES: ${{ vars.PROPTEST_CASES || '256' }}
+        run: cargo test --workspace --tests --target x86_64-unknown-linux-gnu -- invariants
