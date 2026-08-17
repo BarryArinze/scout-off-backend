@@ -2397,7 +2397,7 @@ export function ensureLegacyWebhookSubscription(): void {
 // postWebhookWithRetry() exhausts all retry attempts for a given subscriber,
 // instead of the delivery being logged and dropped.
 
-export type WebhookDeadLetterStatus = 'pending' | 'replayed';
+export type WebhookDeadLetterStatus = 'pending' | 'in_progress' | 'replayed';
 
 export interface WebhookDeadLetter {
   id: number;
@@ -2405,9 +2405,12 @@ export interface WebhookDeadLetter {
   url: string;
   event_type: string;
   payload: string;
+  delivery_id: string;
   failure_reason: string;
   attempts: number;
   status: WebhookDeadLetterStatus;
+  locked_by: string | null;
+  locked_at: string | null;
   created_at: string;
   replayed_at: string | null;
 }
@@ -2417,14 +2420,15 @@ export interface InsertDeadLetterInput {
   url: string;
   eventType: string;
   payload: string;
+  deliveryId: string;
   failureReason: string;
   attempts: number;
 }
 
 export function insertWebhookDeadLetter(input: InsertDeadLetterInput): WebhookDeadLetter {
   const sql = `INSERT INTO webhook_dead_letters
-    (subscription_id, url, event_type, payload, failure_reason, attempts, status)
-   VALUES (?, ?, ?, ?, ?, ?, 'pending')`;
+    (subscription_id, url, event_type, payload, delivery_id, failure_reason, attempts, status)
+   VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`;
   return timedQuery(sql, () => {
     const info = getDb()
       .prepare(sql)
@@ -2433,6 +2437,7 @@ export function insertWebhookDeadLetter(input: InsertDeadLetterInput): WebhookDe
         input.url,
         input.eventType,
         input.payload,
+        input.deliveryId,
         input.failureReason,
         input.attempts
       );
@@ -2442,9 +2447,12 @@ export function insertWebhookDeadLetter(input: InsertDeadLetterInput): WebhookDe
       url: input.url,
       event_type: input.eventType,
       payload: input.payload,
+      delivery_id: input.deliveryId,
       failure_reason: input.failureReason,
       attempts: input.attempts,
       status: 'pending',
+      locked_by: null,
+      locked_at: null,
       created_at: new Date().toISOString(),
       replayed_at: null,
     };
@@ -2474,8 +2482,42 @@ export function getWebhookDeadLetterById(id: number): WebhookDeadLetter | undefi
 }
 
 export function markWebhookDeadLetterReplayed(id: number): void {
-  const sql = "UPDATE webhook_dead_letters SET status = 'replayed', replayed_at = ? WHERE id = ?";
+  const sql = "UPDATE webhook_dead_letters SET status = 'replayed', replayed_at = ?, locked_by = NULL, locked_at = NULL WHERE id = ?";
   timedQuery(sql, () => getDb().prepare(sql).run(new Date().toISOString(), id));
+}
+
+/**
+ * Atomically claim a pending dead-letter row for processing by setting
+ * status to 'in_progress' and recording the worker identifier.
+ *
+ * Returns the claimed row on success, or null if another worker already
+ * claimed it (or the row was already replayed / exhausted).
+ *
+ * The UPDATE ... WHERE status = 'pending' is atomic in both SQLite and
+ * PostgreSQL, so exactly one concurrent caller wins the race.
+ */
+export function claimWebhookDeadLetter(id: number, workerId: string): WebhookDeadLetter | null {
+  const now = new Date().toISOString();
+  const sql = `UPDATE webhook_dead_letters
+    SET status = 'in_progress', locked_by = ?, locked_at = ?
+    WHERE id = ? AND status = 'pending'`;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(workerId, now, id);
+    if (info.changes === 0) return null;
+    return getWebhookDeadLetterById(id) ?? null;
+  });
+}
+
+/**
+ * Release a claim on a dead-letter row, returning it to 'pending' status.
+ * Used when a sweep fails partway through and the row needs to be retried
+ * by a future sweep.
+ */
+export function releaseWebhookDeadLetterClaim(id: number): void {
+  const sql = `UPDATE webhook_dead_letters
+    SET status = 'pending', locked_by = NULL, locked_at = NULL
+    WHERE id = ? AND status = 'in_progress'`;
+  timedQuery(sql, () => getDb().prepare(sql).run(id));
 }
 
 export function updateWebhookDeadLetterAttempt(
