@@ -170,6 +170,14 @@ declare global {
       account?: string;
       /** Role of the authenticated user, e.g. 'admin', 'validator', 'scout'. */
       role?: string;
+      /** JWT ID of the bearer token used for this request (set by auth middleware). */
+      jti?: string;
+      /**
+       * Parsed API-key scopes when the request was authenticated via
+       * X-API-Key. `null` = legacy/unrestricted key; `undefined` = the
+       * request was not authenticated with an API key (e.g. JWT).
+       */
+      apiKeyScopes?: string[] | null;
     }
   }
 }

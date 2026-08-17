@@ -1663,25 +1663,40 @@ export interface ApiKeyRow {
   created_at: number;
   last_used_at: number | null;
   revoked_at: number | null;
+  /** JSON-encoded scope list (db/014_api_key_scopes.sql). NULL/empty = legacy key. */
+  scopes: string | null;
+  rate_limit_per_minute: number | null;
 }
 
 /**
  * Persist a new API key.  Only the salted hash is stored; the caller must
  * have already generated the hash before calling this function.
  * Returns the new row id.
+ *
+ * `scopes` is optional: when omitted the key is stored with NULL scopes,
+ * which the authorization layer treats as a legacy key with unrestricted
+ * scout-level access (backward compatible with keys issued before scope
+ * enforcement existed).
  */
 export function insertApiKey(p: {
   key_hash: string;
   scout_wallet: string;
   label: string;
   created_at: number;
+  scopes?: string[];
 }): number {
   const sql = `
-    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at, scopes)
+    VALUES (?, ?, ?, ?, ?)
   `;
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.key_hash, p.scout_wallet, p.label, p.created_at);
+    const info = getDb().prepare(sql).run(
+      p.key_hash,
+      p.scout_wallet,
+      p.label,
+      p.created_at,
+      p.scopes ? JSON.stringify(p.scopes) : null,
+    );
     return info.lastInsertRowid as number;
   });
 }
@@ -1744,6 +1759,49 @@ export function touchApiKeyLastUsed(id: number): void {
   const now = Math.floor(Date.now() / 1000);
   const sql = `UPDATE api_keys SET last_used_at = ? WHERE id = ?`;
   timedQuery(sql, () => getDb().prepare(sql).run(now, id));
+}
+
+// ─── Wallet blocklist helpers (#1019) ────────────────────────────────────────
+
+/**
+ * Add a wallet to the blocklist. Idempotent — re-blocking an already
+ * blocked wallet is a no-op.
+ */
+export function blockWalletDb(wallet: string, reason: string | null): void {
+  const now = Math.floor(Date.now() / 1000);
+  const sql = `
+    INSERT INTO wallet_blocklist (wallet, reason, blocked_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(wallet) DO NOTHING
+  `;
+  timedQuery(sql, () =>
+    getDriver().run(sql, [wallet, reason, now]),
+  );
+}
+
+/** Remove a wallet from the blocklist. Returns true if a row was removed. */
+export function unblockWalletDb(wallet: string): boolean {
+  const sql = `DELETE FROM wallet_blocklist WHERE wallet = ?`;
+  return timedQuery(sql, () => {
+    const info = getDriver().run(sql, [wallet]);
+    return info.changes > 0;
+  });
+}
+
+/** Fresh DB check — is this wallet currently blocklisted? */
+export function isWalletBlocklistedDb(wallet: string): boolean {
+  const sql = `SELECT wallet FROM wallet_blocklist WHERE wallet = ? LIMIT 1`;
+  return timedQuery(sql, () =>
+    getDriver().get<{ wallet: string }>(sql, [wallet]) !== undefined,
+  );
+}
+
+/** Return every currently blocklisted wallet (one query, used by sweeps). */
+export function listBlockedWalletsDb(): string[] {
+  const sql = `SELECT wallet FROM wallet_blocklist`;
+  return timedQuery(sql, () =>
+    getDriver().all<{ wallet: string }>(sql).map((r) => r.wallet),
+  );
 }
 
 // ─── Scout bookmarks helpers (#487) ──────────────────────────────────────────
