@@ -18,6 +18,10 @@ import {
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { sendForbidden } from '../utils/authError';
 import { logger } from '../utils/logger';
+import {
+  parseApiKeyScopes,
+  normalizeRequestedScopes,
+} from '../utils/apiKeyScopes';
 
 // ─── Hashing helpers (mirrors tokenBlocklist.ts conventions) ──────────────────
 
@@ -62,17 +66,25 @@ export function verifyApiKey(rawKey: string, keyHash: string): boolean {
 /**
  * Resolve a raw API key string to the associated scout wallet.
  * Scans all active (non-revoked) keys and verifies the hash.
- * Returns `{ scout_wallet, id }` on success or null on failure.
+ * Returns `{ scout_wallet, id, scopes }` on success or null on failure.
+ *
+ * `scopes` is the parsed scope list (`null` = legacy/unrestricted key) so
+ * REST middleware and GraphQL context can enforce the shared scope contract
+ * through one code path (see src/utils/apiKeyScopes.ts).
  *
  * This is intentionally exported so auth.ts can call it without creating a
  * circular dependency — auth.ts calls this function only at runtime via a
  * lazy require so the module graph stays acyclic at load time.
  */
-export function resolveApiKey(rawKey: string): { scout_wallet: string; id: number } | null {
+export function resolveApiKey(rawKey: string): { scout_wallet: string; id: number; scopes: string[] | null } | null {
   const rows: ApiKeyRow[] = getAllActiveApiKeys();
   for (const row of rows) {
     if (verifyApiKey(rawKey, row.key_hash)) {
-      return { scout_wallet: row.scout_wallet, id: row.id };
+      return {
+        scout_wallet: row.scout_wallet,
+        id: row.id,
+        scopes: parseApiKeyScopes(row.scopes, (message) => logger.warn(message)),
+      };
     }
   }
   return null;
@@ -82,6 +94,12 @@ export function resolveApiKey(rawKey: string): { scout_wallet: string; id: numbe
 
 const issueKeySchema = z.object({
   label: z.string().max(100).default(''),
+  /**
+   * Optional explicit scope list. Omitted → legacy key with unrestricted
+   * scout-level access (backward compatible). Restricted keys may only
+   * perform operations covered by their granted scopes (#1019).
+   */
+  scopes: z.array(z.string()).optional(),
 });
 
 // ─── Ownership guard ──────────────────────────────────────────────────────────
@@ -122,17 +140,25 @@ export async function issueApiKey(
       return;
     }
 
+    const scopesResult = normalizeRequestedScopes(parsed.data.scopes);
+    if (!scopesResult.ok) {
+      res.status(400).json({ success: false, error: scopesResult.error });
+      return;
+    }
+
     const { key, keyHash } = generateApiKey();
     const now = Math.floor(Date.now() / 1000);
 
+    const grantedScopes = scopesResult.scopes;
     const id = insertApiKey({
       key_hash: keyHash,
       scout_wallet: req.params.wallet,
       label: parsed.data.label,
       created_at: now,
+      scopes: grantedScopes.length > 0 ? grantedScopes : undefined,
     });
 
-    logger.info({ scout: req.params.wallet, action: 'api_key_issued', keyId: id });
+    logger.info({ scout: req.params.wallet, action: 'api_key_issued', keyId: id, scopes: grantedScopes.length > 0 ? grantedScopes : null });
 
     res.status(201).json({
       success: true,
@@ -141,6 +167,8 @@ export async function issueApiKey(
         key,          // plaintext — returned once only
         label: parsed.data.label,
         created_at: now,
+        // Empty array == legacy/unrestricted key (omitted scopes).
+        scopes: grantedScopes,
       },
     });
   } catch (err) {
@@ -174,6 +202,8 @@ export async function listApiKeys(
         last_used_at: r.last_used_at ?? null,
         revoked: r.revoked_at !== null,
         revoked_at: r.revoked_at ?? null,
+        // Empty array = legacy/unrestricted key; otherwise the granted scope list.
+        scopes: r.scopes ? (JSON.parse(r.scopes) as string[]) : [],
       })),
     });
   } catch (err) {

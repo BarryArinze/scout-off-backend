@@ -16,9 +16,22 @@
  */
 
 import Redis from 'ioredis';
+import { EventEmitter } from 'events';
 import config from '../config';
 import { logger } from '../utils/logger';
 import { getDriver } from '../db';
+
+// ─── In-process revocation events ────────────────────────────────────────────
+//
+// SSE connections subscribe here (via onTokenRevoked) so a token revoked in
+// this process terminates the matching established streams immediately.
+// Revocations persisted by another instance are picked up by the SSE route's
+// bounded DB sweep (getActiveRevokedJtis) — see docs/auth.md.
+
+const revokedEmitter = new EventEmitter();
+revokedEmitter.setMaxListeners(0); // one listener per SSE connection
+
+const REVOKED_EVENT = 'token_revoked';
 
 // ─── Redis client (optional) ──────────────────────────────────────────────────
 
@@ -202,6 +215,43 @@ export async function revokeToken(jti: string, expiresAt: number): Promise<void>
   const redisOk = await writeToRedis(jti, expiresAt);
   if (!redisOk && redisClient) {
     logger.warn(`[tokenBlocklist] Redis write failed for jti=${jti}; token is blocked via DB only`);
+  }
+
+  // Notify in-process subscribers (SSE connections) synchronously.
+  revokedEmitter.emit(REVOKED_EVENT, jti);
+}
+
+/**
+ * Subscribe to in-process token revocations. The callback fires with the
+ * revoked jti whenever revokeToken() runs in this process. Returns an
+ * unsubscribe function.
+ */
+export function onTokenRevoked(cb: (jti: string) => void): () => void {
+  revokedEmitter.on(REVOKED_EVENT, cb);
+  return () => {
+    revokedEmitter.off(REVOKED_EVENT, cb);
+  };
+}
+
+/**
+ * Return every currently non-expired revoked jti (single DB query).
+ * Used by the SSE route's bounded sweep so revocations that happened in
+ * another process are detected within the documented sweep interval.
+ * Returns an empty list when the store is unavailable.
+ */
+export function getActiveRevokedJtis(): string[] {
+  const now = Math.floor(Date.now() / 1000);
+  try {
+    const driver = getDriver();
+    return driver
+      .all<{ jti: string }>(
+        'SELECT jti FROM revoked_tokens WHERE expires_at > ?',
+        [now],
+      )
+      .map((r) => r.jti);
+  } catch (err) {
+    logger.warn('[tokenBlocklist] active-jti sweep query failed:', err);
+    return [];
   }
 }
 

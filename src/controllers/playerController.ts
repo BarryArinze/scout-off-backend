@@ -35,6 +35,7 @@ import { dispatchEventWebhook } from "../services/webhooks";
 import { enrichPlayerResult } from "../utils/searchEnrichment";
 import { playerIdSchema } from "../utils/playerIdValidator";
 import { recordAudit } from "../utils/audit";
+import { canAccessPlayer } from "../utils/playerAccess";
 
 const baseRegistrationSchema = z.object({
   wallet: z.string().min(56).max(56),
@@ -182,13 +183,11 @@ export async function getPlayer(
       await cacheSet(cacheKey, data);
     }
 
-    if (data.is_active === 0) {
-      const isOwner = req.account && (req.account === data.player_id || req.account === data.wallet);
-      const isAdmin = req.role === 'admin';
-      if (!isOwner && !isAdmin) {
-        res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
-        return;
-      }
+    // Deactivated profiles are only visible to the owner or an admin — same
+    // shared decision as GraphQL and the milestones endpoints (#1019).
+    if (!canAccessPlayer(data as { player_id: string; wallet: string; is_active?: number }, { account: req.account, role: req.role })) {
+      res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
     }
 
     const etag = `"${createHash("sha1").update(JSON.stringify(data)).digest("hex")}"`;
@@ -441,13 +440,11 @@ export async function getPlayerMilestones(
       res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
       return;
     }
-    if (player.is_active === 0) {
-      const isOwner = req.account && (req.account === player.player_id || req.account === player.wallet);
-      const isAdmin = req.role === 'admin';
-      if (!isOwner && !isAdmin) {
-        res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
-        return;
-      }
+    // Deactivated players are only accessible to the owner or an admin — the
+    // same shared decision used by GraphQL root/nested milestone queries (#1019).
+    if (!canAccessPlayer(player, { account: req.account, role: req.role })) {
+      res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
     }
 
     // Validate limit separately first so we can return 400 before parsing the rest

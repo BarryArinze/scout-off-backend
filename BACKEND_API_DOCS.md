@@ -86,6 +86,42 @@ Authorization: Bearer <token>
 
 Tokens are issued after a successful SEP-10 Stellar wallet challenge/response flow.
 
+### API keys & scopes (#1019)
+
+Server-to-server integrations can authenticate with a long-lived API key
+instead of a JWT:
+
+```
+X-API-Key: <raw-key>
+```
+
+API keys are issued via `POST /api/scouts/:wallet/api-keys` and revoked via
+`DELETE /api/scouts/:wallet/api-keys/:id`. Only a salted hash is stored.
+
+#### Scope enforcement
+
+Keys without an explicit `scopes` list (legacy keys) keep **unrestricted**
+scout-level access — backward compatible with keys issued before scope
+enforcement. Keys issued with an explicit `scopes` list are **restricted**:
+mutating endpoints require the matching scope and return `403` with
+`reason.requiredScope` otherwise.
+
+| Scope | Enforced on |
+|-------|-------------|
+| `write:contacts` | `POST /scouts/:wallet/contacts/:playerId/unlock` |
+| `write:subscriptions` | `POST/PUT/DELETE /scouts/:wallet/subscribe` |
+| `write:trial_offers` | `POST /scouts/:wallet/trial-offer` and `/trial-offers` |
+| `write:webhooks` | `POST /scouts/:wallet/webhooks`, `DELETE .../:id`, `POST .../:id/test` |
+| `write:api_keys` | `POST /scouts/:wallet/api-keys`, `DELETE .../:id` |
+| `write:bookmarks` | bookmark & bookmark-folder mutations |
+| `write:notes` | scout-note mutations |
+| `write:saved_searches` | saved-search mutations |
+| `write:player_tokens` | `POST /players/:playerId/tokens/buy` |
+| `read:subscription` | `GET /scouts/:wallet/subscription` |
+
+REST and GraphQL share the same scope contract (`src/utils/apiKeyScopes.ts`).
+See `docs/auth.md` for the full vocabulary and legacy-compatibility rules.
+
 ---
 
 ## Endpoints
@@ -313,7 +349,12 @@ curl -X GET "http://localhost:4000/api/players?region=West%20Africa&position=Mid
 
 #### `GET /api/players/:playerId`
 
-Retrieve a single player profile. No auth required.
+Retrieve a single player profile. No auth required for **active** players.
+
+**Deactivated players** are hidden from everyone except the profile owner
+(auth wallet matching the player's `player_id` or `wallet`) and admins — the
+same shared decision (`src/utils/playerAccess.ts`) used by the milestones
+endpoints and GraphQL. Unauthorized callers receive `404`.
 
 **Response `200`**
 
@@ -349,7 +390,12 @@ curl -X GET "http://localhost:4000/api/players/abc123"
 
 #### `GET /api/players/:playerId/milestones`
 
-Tamper-proof milestone history for a player. No auth required.
+Tamper-proof milestone history for a player. No auth required for **active**
+players.
+
+**Deactivated players** follow the same shared authorization as `GET
+/api/players/:playerId` (`src/utils/playerAccess.ts`): owner/admin only,
+otherwise `404` — identical behavior in REST and GraphQL.
 
 **Response `200`**
 
@@ -929,6 +975,42 @@ curl -X GET "http://localhost:4000/api/admin/audit?startDate=2024-01-01&endDate=
 ```
 
 ---
+
+## Server-Sent Events (`GET /api/events/stream`) (#1019)
+
+Long-lived SSE stream of contract events relevant to the authenticated wallet.
+Authentication: Bearer JWT (any role) or `X-API-Key`. Optional query params:
+`eventType` (one type) and `playerId` (narrowing). Wallet isolation is always
+enforced; a `: ping` keep-alive comment is sent every
+`SSE_KEEPALIVE_INTERVAL_MS` (default 15 s).
+
+**Live authorization enforcement:**
+
+- Revoking the connection's JWT (logout / admin revocation) emits a terminal
+  `event: session_ended` (reason `token_revoked`) and closes the stream.
+- Blocklisting the wallet (see `docs/auth.md`) emits `session_ended` (reason
+  `wallet_blocklisted`) and closes it; blocklisted wallets also get `403` on
+  new connections.
+- No protected events are delivered after termination.
+
+**Detection bound:** immediate for revocations/blocklists in the same process;
+≤ `SSE_AUTH_SWEEP_INTERVAL_MS` (default 30 s) for changes persisted by
+another instance (one sweep query per process — never per keep-alive tick).
+
+## GraphQL (`POST /graphql`) (#1019)
+
+Read-only GraphQL endpoint sharing the REST authorization model:
+
+- **API keys:** `X-API-Key` is accepted; restricted keys enforce
+  `read:milestones` (milestones queries) and `read:subscription`
+  (`scoutSubscription`).
+- **Milestones:** deactivated players follow the same owner/admin-only
+  decision as REST (`src/utils/playerAccess.ts`); unauthorized callers get a
+  `NOT_FOUND` error (root) or no data (nested `Player.milestones`).
+- **Abuse control:** depth limit (`MAX_DEPTH = 5`) plus a query-cost limit
+  (`MAX_QUERY_COST = 135`) that counts every field node — aliases included —
+  so a single request with ~20+ aliased expensive operations is rejected
+  with a `QUERY_COST_EXCEEDED` error instead of bypassing the depth limit.
 
 ## Stubbed Routes
 
