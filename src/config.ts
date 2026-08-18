@@ -9,6 +9,58 @@ function required(name: string): string {
   return value;
 }
 
+interface NumericEnvOptions {
+  min?: number;
+  max?: number;
+  integer?: boolean;
+}
+
+/**
+ * Parse a numeric environment variable, throwing a clear startup error if
+ * the value is not a valid number or falls outside the declared range.
+ *
+ * When the variable is unset (undefined), `defaultValue` is returned
+ * without validation — defaults are always assumed to be in-range.
+ *
+ * @param name         Environment variable name (for error messages)
+ * @param raw          The raw string value from process.env[name]
+ * @param defaultValue Fallback when raw is undefined
+ * @param options      Optional min/max range and integer flag
+ */
+function parseNumericEnv(
+  name: string,
+  raw: string | undefined,
+  defaultValue: number,
+  options: NumericEnvOptions = {},
+): number {
+  if (raw === undefined) return defaultValue;
+
+  const { min, max, integer = true } = options;
+  const value = integer ? parseInt(raw, 10) : parseFloat(raw);
+
+  if (Number.isNaN(value)) {
+    const typeLabel = integer ? 'integer' : 'number';
+    throw new Error(
+      `Invalid ${name}: "${raw}" is not a valid ${typeLabel}. ` +
+      `Set ${name} to a valid numeric value or remove it to use the default (${defaultValue}).`,
+    );
+  }
+
+  if (min !== undefined && value < min) {
+    throw new Error(
+      `Invalid ${name}: ${value} is below the minimum allowed value of ${min}.`,
+    );
+  }
+
+  if (max !== undefined && value > max) {
+    throw new Error(
+      `Invalid ${name}: ${value} exceeds the maximum allowed value of ${max}.`,
+    );
+  }
+
+  return value;
+}
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 type NodeEnv = 'development' | 'test' | 'staging' | 'production';
 
@@ -98,7 +150,7 @@ const corsAllowedOrigins =
 
 const config = {
   nodeEnv,
-  port: parseInt(process.env.PORT ?? '4000', 10),
+  port: parseNumericEnv('PORT', process.env.PORT, 4000, { min: 0, max: 65535, integer: true }),
   network: (process.env.NETWORK ?? 'testnet') as 'testnet' | 'mainnet',
   networkPassphrase:
     process.env.NETWORK_PASSPHRASE ?? 'Test SDF Network ; September 2015',
@@ -151,7 +203,7 @@ const config = {
       'https://ipfs.io',
     ],
   },
-  platformFeeBps: parseInt(process.env.PLATFORM_FEE_BPS ?? '500', 10),
+  platformFeeBps: parseNumericEnv('PLATFORM_FEE_BPS', process.env.PLATFORM_FEE_BPS, 500, { min: 0, max: 10000, integer: true }),
   jwtSecretPrevious: process.env.JWT_SECRET_PREVIOUS ?? '',
   /**
    * Absolute end of the previous-secret grace window (epoch milliseconds).
@@ -218,7 +270,7 @@ const config = {
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),
-  adminThreshold: parseInt(process.env.ADMIN_THRESHOLD ?? '1', 10),
+  adminThreshold: parseNumericEnv('ADMIN_THRESHOLD', process.env.ADMIN_THRESHOLD, 1, { min: 1, integer: true }),
   securityHeaders: {
     hsts: process.env.SECURITY_HSTS ?? 'max-age=31536000; includeSubDomains',
     xContentTypeOptions: process.env.SECURITY_X_CONTENT_TYPE_OPTIONS ?? 'nosniff',
@@ -243,8 +295,8 @@ const config = {
   webhookSecretEncryptionKey: process.env.WEBHOOK_SECRET_ENCRYPTION_KEY ?? '',
   rateLimit: {
     enabled: process.env.RATE_LIMIT_ENABLED !== 'false',
-    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '60000', 10),
-    max: parseInt(process.env.RATE_LIMIT_MAX ?? (process.env.NODE_ENV === 'test' ? '1000' : '60'), 10),
+    windowMs: parseNumericEnv('RATE_LIMIT_WINDOW_MS', process.env.RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
+    max: parseNumericEnv('RATE_LIMIT_MAX', process.env.RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 60, { min: 1, integer: true }),
   },
   ipReputation: {
     // Disabled by default in tests: supertest sends every request from the
@@ -257,12 +309,12 @@ const config = {
       : process.env.NODE_ENV !== 'test',
   },
   authRateLimit: {
-    windowMs: parseInt(process.env.AUTH_RATE_LIMIT_WINDOW_MS ?? '60000', 10),
-    max: parseInt(process.env.AUTH_RATE_LIMIT_MAX ?? (process.env.NODE_ENV === 'test' ? '1000' : '5'), 10),
+    windowMs: parseNumericEnv('AUTH_RATE_LIMIT_WINDOW_MS', process.env.AUTH_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
+    max: parseNumericEnv('AUTH_RATE_LIMIT_MAX', process.env.AUTH_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
   },
   playerImportRateLimit: {
-    windowMs: parseInt(process.env.PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS ?? '60000', 10),
-    max: parseInt(process.env.PLAYER_IMPORT_RATE_LIMIT_MAX ?? (process.env.NODE_ENV === 'test' ? '1000' : '5'), 10),
+    windowMs: parseNumericEnv('PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS', process.env.PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
+    max: parseNumericEnv('PLAYER_IMPORT_RATE_LIMIT_MAX', process.env.PLAYER_IMPORT_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
   },
   bodyLimit: {
     // Maximum JSON payload size (default: 1MB)
@@ -278,19 +330,16 @@ const config = {
   showErrorDetails: nodeEnv === 'development' || nodeEnv === 'test',
   useMockServices: nodeEnv === 'development' || nodeEnv === 'test',
   backfillFromLedger: process.env.INDEXER_BACKFILL_FROM_LEDGER
-    ? parseInt(process.env.INDEXER_BACKFILL_FROM_LEDGER, 10)
+    ? parseNumericEnv('INDEXER_BACKFILL_FROM_LEDGER', process.env.INDEXER_BACKFILL_FROM_LEDGER, 0, { min: 0, integer: true })
     : null,
   /** Subscription grace period in hours after expiry during which access is still granted. */
-  subscriptionGracePeriodHours: parseInt(
-    process.env.SUBSCRIPTION_GRACE_PERIOD_HOURS ?? '24',
-    10,
-  ),
+  subscriptionGracePeriodHours: parseNumericEnv('SUBSCRIPTION_GRACE_PERIOD_HOURS', process.env.SUBSCRIPTION_GRACE_PERIOD_HOURS, 24, { min: 0, integer: true }),
   /** Global request timeout in milliseconds before the server responds with 503. */
-  requestTimeoutMs: parseInt(process.env.REQUEST_TIMEOUT_MS ?? '30000', 10),
+  requestTimeoutMs: parseNumericEnv('REQUEST_TIMEOUT_MS', process.env.REQUEST_TIMEOUT_MS, 30000, { min: 1, integer: true }),
   requestLog: {
     skipPaths: (process.env.LOG_SKIP_PATHS ?? '/health,/health/liveness,/health/readiness,/ready,/metrics')
       .split(',').map(p => p.trim()).filter(Boolean),
-    sampleRate: parseFloat(process.env.LOG_SAMPLE_RATE ?? '1'),
+    sampleRate: parseNumericEnv('LOG_SAMPLE_RATE', process.env.LOG_SAMPLE_RATE, 1, { min: 0, max: 1, integer: false }),
   },
   /** TTL for player list cache entries in milliseconds. */
   playerCacheTtlMs: parseInt(process.env.PLAYER_CACHE_TTL_MS ?? '60000', 10),
