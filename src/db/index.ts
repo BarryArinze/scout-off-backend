@@ -2233,34 +2233,34 @@ export function insertPendingAdminAction(p: {
   created_at: number;
 }): void {
   const sql = `INSERT INTO pending_admin_actions (id, action_type, proposer, payload, required_signatures, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`;
-  timedQuery(sql, () => getDb().prepare(sql).run(p.id, p.action_type, p.proposer, p.payload, p.required_signatures, p.expires_at, p.created_at));
+  timedQuery(sql, () => getDriver().run(sql, [p.id, p.action_type, p.proposer, p.payload, p.required_signatures, p.expires_at, p.created_at]));
 }
 
 export function getPendingAdminActionById(id: string): PendingAdminActionRow | null {
   const sql = `SELECT * FROM pending_admin_actions WHERE id = ?`;
   return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(id) as PendingAdminActionRow | undefined) ?? null
+    (getDriver().get<PendingAdminActionRow>(sql, [id])) ?? null
   );
 }
 
 export function getPendingAdminActionsByStatus(status: string): PendingAdminActionRow[] {
   const sql = `SELECT * FROM pending_admin_actions WHERE status = ? ORDER BY created_at DESC`;
-  return timedQuery(sql, () => getDb().prepare(sql).all(status) as PendingAdminActionRow[]);
+  return timedQuery(sql, () => getDriver().all<PendingAdminActionRow>(sql, [status]));
 }
 
 export function updatePendingAdminActionStatus(id: string, status: string): void {
   const sql = `UPDATE pending_admin_actions SET status = ? WHERE id = ?`;
-  timedQuery(sql, () => getDb().prepare(sql).run(status, id));
+  timedQuery(sql, () => getDriver().run(sql, [status, id]));
 }
 
 export function incrementActionSignatures(id: string): void {
   const sql = `UPDATE pending_admin_actions SET collected_signatures = collected_signatures + 1 WHERE id = ?`;
-  timedQuery(sql, () => getDb().prepare(sql).run(id));
+  timedQuery(sql, () => getDriver().run(sql, [id]));
 }
 
 export function expireStalePendingAdminActions(): number {
   const sql = `UPDATE pending_admin_actions SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`;
-  const info = timedQuery(sql, () => getDb().prepare(sql).run(Date.now()));
+  const info = timedQuery(sql, () => getDriver().run(sql, [Date.now()]));
   return info.changes;
 }
 
@@ -2281,13 +2281,13 @@ export function insertAdminActionSignature(p: {
 export function getAdminActionSignature(action_id: string, signer: string): { signed_at: number } | null {
   const sql = `SELECT signed_at FROM admin_action_signatures WHERE action_id = ? AND signer = ?`;
   return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(action_id, signer) as { signed_at: number } | undefined) ?? null
+    getDriver().get<{ signed_at: number }>(sql, [action_id, signer]) ?? null
   );
 }
 
 export function getAdminActionSignatures(action_id: string): { signer: string; signed_at: number }[] {
   const sql = `SELECT signer, signed_at FROM admin_action_signatures WHERE action_id = ? ORDER BY signed_at ASC`;
-  return timedQuery(sql, () => getDb().prepare(sql).all(action_id) as { signer: string; signed_at: number }[]);
+  return timedQuery(sql, () => getDriver().all<{ signer: string; signed_at: number }>(sql, [action_id]));
 }
 
 // ─── Webhook subscriptions (#470) ────────────────────────────────────────────

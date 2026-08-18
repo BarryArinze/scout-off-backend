@@ -6,10 +6,18 @@
 
 import { jest } from '@jest/globals';
 import request from 'supertest';
-import { app } from '../../src/app';
-import { initDb, closeDb, getDriver } from '../../src/db';
+import jwt from 'jsonwebtoken';
+import { Keypair } from '@stellar/stellar-sdk';
+import app from '../../src/app';
+import { initDb, closeDb } from '../../src/db';
 import config from '../../src/config';
 import * as stellar from '../../src/services/stellar';
+
+const JWT_SECRET = process.env.JWT_SECRET ?? 'test-secret';
+
+function adminToken(wallet: string): string {
+  return jwt.sign({ sub: wallet, role: 'admin' }, JWT_SECRET, { expiresIn: '1h' });
+}
 
 // Mock stellar service operations
 jest.mock('../../src/services/stellar', () => ({
@@ -23,10 +31,10 @@ jest.mock('../../src/services/stellar', () => ({
 const mockStellar = stellar as jest.Mocked<typeof stellar>;
 
 describe('Admin Multi-Signature Controller Integration', () => {
-  const adminWallet1 = 'GADMIN1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
-  const adminWallet2 = 'GADMIN2XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
-  const validatorWallet = 'GVALIDATORXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
-  const treasuryAddress = 'GTREASURYXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+  const adminWallet1 = Keypair.random().publicKey();
+  const adminWallet2 = Keypair.random().publicKey();
+  const validatorWallet = Keypair.random().publicKey();
+  const treasuryAddress = Keypair.random().publicKey();
 
   beforeAll(async () => {
     config.adminThreshold = 2;
@@ -59,7 +67,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Step 1: Propose action
       const proposeResponse = await request(app)
         .post('/api/admin/validators/register')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .send({ validatorWallet })
         .expect(202);
 
@@ -70,7 +78,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Step 2: Second admin approves (reaches quorum and executes)
       const approveResponse = await request(app)
         .post(`/api/admin/actions/${actionId}/approve`)
-        .set('Authorization', `Bearer ${adminWallet2}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet2)}`)
         .expect(200);
 
       expect(approveResponse.body.success).toBe(true);
@@ -84,7 +92,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Step 1: Propose action
       const proposeResponse = await request(app)
         .post('/api/admin/validators/revoke')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .send({ validatorWallet })
         .expect(202);
 
@@ -93,7 +101,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Step 2: Second admin approves
       const approveResponse = await request(app)
         .post(`/api/admin/actions/${actionId}/approve`)
-        .set('Authorization', `Bearer ${adminWallet2}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet2)}`)
         .expect(200);
 
       expect(approveResponse.body.success).toBe(true);
@@ -104,7 +112,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Step 1: Propose action
       const proposeResponse = await request(app)
         .post('/api/admin/contract/pause')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .expect(202);
 
       const actionId = proposeResponse.body.data.actionId;
@@ -112,7 +120,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Step 2: Second admin approves
       const approveResponse = await request(app)
         .post(`/api/admin/actions/${actionId}/approve`)
-        .set('Authorization', `Bearer ${adminWallet2}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet2)}`)
         .expect(200);
 
       expect(approveResponse.body.success).toBe(true);
@@ -123,8 +131,8 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Step 1: Propose action
       const proposeResponse = await request(app)
         .post('/api/admin/fees/withdraw')
-        .set('Authorization', `Bearer ${adminWallet1}`)
-        .send({ recipient: treasuryAddress, amount: '1000000' })
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
+        .send({ treasuryAddress, amountStroops: '1000000' })
         .expect(202);
 
       const actionId = proposeResponse.body.data.actionId;
@@ -132,38 +140,70 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Step 2: Second admin approves
       const approveResponse = await request(app)
         .post(`/api/admin/actions/${actionId}/approve`)
-        .set('Authorization', `Bearer ${adminWallet2}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet2)}`)
         .expect(200);
 
       expect(approveResponse.body.success).toBe(true);
-      expect(mockStellar.withdrawFees).toHaveBeenCalledWith(treasuryAddress);
+      expect(mockStellar.withdrawFees).toHaveBeenCalledWith(treasuryAddress, '1000000');
     });
   });
 
   describe('Error handling in HTTP layer', () => {
-    test('duplicate approval returns 409 conflict', async () => {
+    test('re-approving an already-executed action returns 409 conflict', async () => {
       // Propose action
       const proposeResponse = await request(app)
         .post('/api/admin/contract/pause')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .expect(202);
 
       const actionId = proposeResponse.body.data.actionId;
 
-      // First approval succeeds
+      // Second (final) approval reaches quorum (threshold=2) and executes
       await request(app)
         .post(`/api/admin/actions/${actionId}/approve`)
-        .set('Authorization', `Bearer ${adminWallet2}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet2)}`)
         .expect(200);
 
-      // Second approval from same admin should fail
+      // Any further approval attempt on an already-executed action is rejected
       const duplicateResponse = await request(app)
         .post(`/api/admin/actions/${actionId}/approve`)
-        .set('Authorization', `Bearer ${adminWallet2}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet2)}`)
         .expect(409);
 
       expect(duplicateResponse.body.success).toBe(false);
-      expect(duplicateResponse.body.error).toMatch(/already signed/i);
+      expect(duplicateResponse.body.error).toMatch(/already been executed/i);
+    });
+
+    test('duplicate signature from the same admin before quorum returns 409 conflict', async () => {
+      // Use a threshold of 3 so a duplicate signature can occur while the
+      // action is still pending (i.e. before it reaches quorum and executes).
+      const originalThreshold = config.adminThreshold;
+      const originalAdmins = [...config.adminWallets];
+      const adminWallet3 = Keypair.random().publicKey();
+      config.adminThreshold = 3;
+      config.adminWallets = [adminWallet1, adminWallet2, adminWallet3];
+
+      try {
+        const proposeResponse = await request(app)
+          .post('/api/admin/contract/pause')
+          .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
+          .expect(202);
+
+        const actionId = proposeResponse.body.data.actionId;
+
+        // Same admin signs again before the third distinct signer approves
+        const duplicateResponse = await request(app)
+          .post(`/api/admin/actions/${actionId}/approve`)
+          .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
+          .expect(409);
+
+        expect(duplicateResponse.body.success).toBe(false);
+        expect(duplicateResponse.body.error).toMatch(/already signed/i);
+        expect(mockStellar.pauseContractOnChain).not.toHaveBeenCalled();
+      } finally {
+        config.adminThreshold = originalThreshold;
+        config.adminWallets = originalAdmins;
+      }
     });
 
     test('execution failure returns 500 error', async () => {
@@ -173,7 +213,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Propose action
       const proposeResponse = await request(app)
         .post('/api/admin/contract/pause')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .expect(202);
 
       const actionId = proposeResponse.body.data.actionId;
@@ -181,14 +221,14 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Approval should fail due to execution error
       await request(app)
         .post(`/api/admin/actions/${actionId}/approve`)
-        .set('Authorization', `Bearer ${adminWallet2}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet2)}`)
         .expect(500);
     });
 
     test('invalid action ID returns 404', async () => {
       await request(app)
         .post('/api/admin/actions/invalid-action-id/approve')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .expect(404);
     });
 
@@ -197,7 +237,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
       
       await request(app)
         .post('/api/admin/validators/register')
-        .set('Authorization', `Bearer ${unauthorizedWallet}`)
+        .set('Authorization', `Bearer ${adminToken(unauthorizedWallet)}`)
         .send({ validatorWallet })
         .expect(403);
     });
@@ -206,28 +246,32 @@ describe('Admin Multi-Signature Controller Integration', () => {
   describe('Action listing and details', () => {
     test('can list pending actions', async () => {
       // Create a pending action
-      await request(app)
+      const proposeResponse = await request(app)
         .post('/api/admin/validators/register')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .send({ validatorWallet })
         .expect(202);
+      const actionId = proposeResponse.body.data.actionId;
 
-      // List pending actions
+      // List pending actions — other tests in this suite may leave their own
+      // pending rows behind (e.g. a reverted-to-pending execution failure),
+      // so assert our action is present rather than asserting exact length.
       const response = await request(app)
-        .get('/api/admin/actions')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .get('/api/admin/actions/pending')
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .expect(200);
 
       expect(response.body.success).toBe(true);
-      expect(response.body.data).toHaveLength(1);
-      expect(response.body.data[0].action_type).toBe('register_validator');
+      const ours = response.body.data.find((a: { id: string }) => a.id === actionId);
+      expect(ours).toBeDefined();
+      expect(ours.actionType).toBe('register_validator');
     });
 
     test('can get action details', async () => {
       // Create a pending action
       const proposeResponse = await request(app)
         .post('/api/admin/validators/register')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .send({ validatorWallet })
         .expect(202);
 
@@ -236,12 +280,12 @@ describe('Admin Multi-Signature Controller Integration', () => {
       // Get action details
       const response = await request(app)
         .get(`/api/admin/actions/${actionId}`)
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
         .expect(200);
 
       expect(response.body.success).toBe(true);
-      expect(response.body.data.action.id).toBe(actionId);
-      expect(response.body.data.signatures).toHaveLength(1); // Just the proposer
+      expect(response.body.data.id).toBe(actionId);
+      expect(response.body.data.signers).toHaveLength(1); // Just the proposer
     });
   });
 
@@ -252,10 +296,10 @@ describe('Admin Multi-Signature Controller Integration', () => {
 
       try {
         // Should execute immediately, not create pending action
-        const response = await request(app)
+        await request(app)
           .post('/api/admin/contract/pause')
-          .set('Authorization', `Bearer ${adminWallet1}`)
-          .expect(200); // Different status code for immediate execution
+          .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
+          .expect(202);
 
         // Should have called stellar function directly
         expect(mockStellar.pauseContractOnChain).toHaveBeenCalledWith(adminWallet1);
@@ -275,7 +319,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
         // Propose action
         const proposeResponse = await request(app)
           .post('/api/admin/contract/pause')
-          .set('Authorization', `Bearer ${adminWallet1}`)
+          .set('Authorization', `Bearer ${adminToken(adminWallet1)}`)
           .expect(202);
 
         const actionId = proposeResponse.body.data.actionId;
@@ -283,7 +327,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
         // First approval - should remain pending
         const approve1 = await request(app)
           .post(`/api/admin/actions/${actionId}/approve`)
-          .set('Authorization', `Bearer ${adminWallet2}`)
+          .set('Authorization', `Bearer ${adminToken(adminWallet2)}`)
           .expect(202);
 
         expect(approve1.body.message).toMatch(/more signature/);
@@ -292,7 +336,7 @@ describe('Admin Multi-Signature Controller Integration', () => {
         // Second approval - should execute  
         const approve2 = await request(app)
           .post(`/api/admin/actions/${actionId}/approve`)
-          .set('Authorization', 'Bearer GADMIN3XXXXXXXXX')
+          .set('Authorization', `Bearer ${adminToken('GADMIN3XXXXXXXXX')}`)
           .expect(200);
 
         expect(approve2.body.message).toMatch(/action executed/);

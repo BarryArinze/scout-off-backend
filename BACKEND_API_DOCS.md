@@ -1045,6 +1045,8 @@ High-value admin operations require M-of-N approval when `ADMIN_THRESHOLD > 1`. 
 | `ADMIN_THRESHOLD` | Minimum signatures required | `1` |
 | `ADMIN_WALLETS` | Comma-separated list of authorized admin wallets | Required |
 
+`pending_admin_actions` and `admin_action_signatures` (the tables backing this subsystem) work under both `DB_DRIVER=sqlite` and `DB_DRIVER=postgres` — the two migrations (`db/011_pending_admin_actions.sql` / `db/011_pending_admin_actions_postgres.sql`) declare equivalent columns, including `proposer` and the signer-uniqueness table. Duplicate-signature detection uses `INSERT OR IGNORE` on SQLite and `INSERT ... ON CONFLICT(action_id, signer) DO NOTHING` on Postgres, both driven by a single atomic statement rather than a racy check-then-insert.
+
 #### Action Types
 
 The following admin operations support multi-signature approval:
@@ -1061,12 +1063,14 @@ The following admin operations support multi-signature approval:
 
 1. **Propose Action**: First admin calls the operation endpoint (e.g., `POST /api/admin/validators/register`)
 2. **Collect Signatures**: Additional admins approve via `POST /api/admin/actions/{id}/approve`
-3. **Automatic Execution**: When threshold is reached, the real operation executes automatically
+3. **Automatic Execution**: When threshold is reached, the real operation executes automatically — the same on-chain call the single-admin (`ADMIN_THRESHOLD = 1`) immediate path uses, so behavior is identical between threshold=1 and threshold>1 deployments
 4. **Audit Trail**: All steps are logged with tamper-proof audit records
 
-#### `GET /api/admin/actions`
+Every `action_type` maps to exactly one execution handler (`pause_contract` → `pauseContractOnChain`, `unpause_contract` → `unpauseContractOnChain`, `withdraw_fees` → `withdrawFees`, `register_validator` / `bulk_validator_import` → `registerValidatorOnChain`, `revoke_validator` → `revokeValidatorOnChain`); the dispatcher routes purely on `action_type`, never on payload contents. `withdraw_fees` is proposed from two call sites with different payload shapes — the legacy `POST /api/admin/fees` endpoint sends `{ recipient }`, the fully-specified `POST /api/admin/fees/withdraw` (v2) endpoint sends `{ treasuryAddress, amountStroops }` — the dispatcher accepts either.
 
-List all pending multi-signature actions. **Requires Bearer auth (admin role).**
+#### `GET /api/admin/actions/pending`
+
+List all pending multi-signature actions (expired ones are purged on read). **Requires Bearer auth (admin role).**
 
 **Response `200`**
 
@@ -1076,14 +1080,13 @@ List all pending multi-signature actions. **Requires Bearer auth (admin role).**
   "data": [
     {
       "id": "cm123456789",
-      "action_type": "register_validator",
+      "actionType": "register_validator",
       "proposer": "GADMIN1...",
-      "payload": "{\"validatorWallet\":\"GVALIDATOR...\"}",
-      "required_signatures": 2,
-      "collected_signatures": 1,
-      "status": "pending",
-      "expires_at": 1735689600000,
-      "created_at": 1735603200000
+      "payload": { "validatorWallet": "GVALIDATOR..." },
+      "collectedSignatures": 1,
+      "requiredSignatures": 2,
+      "expiresAt": 1735689600000,
+      "createdAt": 1735603200000
     }
   ]
 }
@@ -1092,7 +1095,7 @@ List all pending multi-signature actions. **Requires Bearer auth (admin role).**
 **Example request**
 
 ```bash
-curl -X GET "http://localhost:4000/api/admin/actions" \
+curl -X GET "http://localhost:4000/api/admin/actions/pending" \
   -H "Authorization: Bearer <admin-jwt>"
 ```
 
@@ -1100,7 +1103,7 @@ curl -X GET "http://localhost:4000/api/admin/actions" \
 
 #### `GET /api/admin/actions/{id}`
 
-Get detailed information about a specific pending action, including all signatures collected. **Requires Bearer auth (admin role).**
+Get detailed information about a specific action, including all signers collected so far. **Requires Bearer auth (admin role).**
 
 **Response `200`**
 
@@ -1108,26 +1111,23 @@ Get detailed information about a specific pending action, including all signatur
 {
   "success": true,
   "data": {
-    "action": {
-      "id": "cm123456789",
-      "action_type": "register_validator",
-      "proposer": "GADMIN1...",
-      "payload": "{\"validatorWallet\":\"GVALIDATOR...\"}",
-      "required_signatures": 2,
-      "collected_signatures": 1,
-      "status": "pending",
-      "expires_at": 1735689600000,
-      "created_at": 1735603200000
-    },
-    "signatures": [
-      {
-        "signer": "GADMIN1...",
-        "signed_at": 1735603200000
-      }
+    "id": "cm123456789",
+    "actionType": "register_validator",
+    "proposer": "GADMIN1...",
+    "payload": { "validatorWallet": "GVALIDATOR..." },
+    "status": "pending",
+    "collectedSignatures": 1,
+    "requiredSignatures": 2,
+    "expiresAt": 1735689600000,
+    "createdAt": 1735603200000,
+    "signers": [
+      { "wallet": "GADMIN1...", "signedAt": 1735603200000 }
     ]
   }
 }
 ```
+
+**Response `404`** — action not found
 
 **Example request**
 
@@ -1172,7 +1172,7 @@ Approve a pending multi-signature action. When the signature threshold is reache
 }
 ```
 
-**Response `409`** — duplicate signature
+**Response `409`** — duplicate signature (same admin signing the same still-pending action twice)
 
 ```json
 {
@@ -1182,11 +1182,21 @@ Approve a pending multi-signature action. When the signature threshold is reache
 }
 ```
 
+**Response `409`** — action already executed (approving an action a second time after it already reached quorum)
+
+```json
+{
+  "success": false,
+  "error": "Action has already been executed",
+  "code": "ACTION_EXECUTED"
+}
+```
+
 **Response `404`** — action not found
 
 **Response `410`** — action expired
 
-**Response `500`** — execution failed (action remains retryable)
+**Response `500`** — execution failed (action reverts to `pending` and remains retryable — see below)
 
 **Example request**
 

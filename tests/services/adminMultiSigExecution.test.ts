@@ -11,11 +11,28 @@
 
 import { jest } from '@jest/globals';
 import request from 'supertest';
-import { app } from '../../src/app';
-import { initDb, closeDb, getDb, getDriver } from '../../src/db';
+import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
+import app from '../../src/app';
+import { initDb, closeDb, getDriver } from '../../src/db';
 import config from '../../src/config';
 import { proposeAction, approveAction } from '../../src/services/adminMultiSig';
 import * as stellar from '../../src/services/stellar';
+
+// Mirrors tests/routes/adminAudit.test.ts's helper: requireRole('admin') on
+// the HTTP layer verifies a real challenge/response signature and only
+// grants the 'admin' role to a wallet already present in
+// config.adminWallets — a literal `Bearer <wallet-address>` string (as used
+// by the direct proposeAction/approveAction service-level tests elsewhere
+// in this file) does not satisfy it.
+async function getAdminToken(wallet: Keypair): Promise<string> {
+  const challengeRes = await request(app).get(`/auth/challenge?account=${wallet.publicKey()}`);
+  const tx = new Transaction(challengeRes.body.challenge, Networks.TESTNET);
+  tx.sign(wallet);
+  const tokenRes = await request(app)
+    .post('/auth/token')
+    .send({ transaction: tx.toXDR(), role: 'admin' });
+  return tokenRes.body.token;
+}
 
 // Mock stellar service operations
 jest.mock('../../src/services/stellar', () => ({
@@ -32,14 +49,20 @@ describe('Admin Multi-Signature Execution and Atomicity', () => {
   const adminWallet1 = 'GADMIN1XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
   const adminWallet2 = 'GADMIN2XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
   const adminWallet3 = 'GADMIN3XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
-  const validatorWallet = 'GVALIDATORXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+  // A real, checksum-valid Stellar address — the HTTP-layer controller
+  // (isValidStellarAddress) rejects a placeholder-format string.
+  const validatorWallet = Keypair.random().publicKey();
   const treasuryAddress = 'GTREASURYXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+  // A real keypair for the HTTP-layer (Acceptance Criteria 2) tests, which
+  // exercise requireRole('admin') and therefore need a genuine
+  // challenge/response signature — see getAdminToken() above.
+  const httpAdminKeypair = Keypair.random();
 
   beforeAll(async () => {
     // Set multi-sig threshold for testing
     config.adminThreshold = 2;
-    config.adminWallets = [adminWallet1, adminWallet2, adminWallet3];
-    
+    config.adminWallets = [adminWallet1, adminWallet2, adminWallet3, httpAdminKeypair.publicKey()];
+
     await initDb();
   });
 
@@ -121,66 +144,108 @@ describe('Admin Multi-Signature Execution and Atomicity', () => {
 
   describe('Acceptance Criteria 2: Correct action type tagging via adminController', () => {
     test('validator registration uses register_validator action type', async () => {
+      const token = await getAdminToken(httpAdminKeypair);
       const response = await request(app)
         .post('/api/admin/validators/register')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${token}`)
         .send({ validatorWallet })
         .expect(202);
 
       expect(response.body.success).toBe(true);
       expect(response.body.message).toMatch(/proposed/);
-      
-      // Verify the action was created with correct type
-      const actions = await getDriver().all('SELECT * FROM pending_admin_actions WHERE action_type = ?', ['register_validator']);
+
+      // Verify the action this specific request created has the correct
+      // type (queried by actionId, not just action_type, since other tests
+      // in this suite create their own register_validator proposals against
+      // the same shared test database).
+      const actions = await getDriver().all(
+        'SELECT * FROM pending_admin_actions WHERE id = ?',
+        [response.body.data.actionId],
+      );
       expect(actions).toHaveLength(1);
+      expect((actions[0] as any).action_type).toBe('register_validator');
     });
 
     test('validator revocation uses revoke_validator action type', async () => {
+      const token = await getAdminToken(httpAdminKeypair);
       const response = await request(app)
         .post('/api/admin/validators/revoke')
-        .set('Authorization', `Bearer ${adminWallet1}`)
+        .set('Authorization', `Bearer ${token}`)
         .send({ validatorWallet })
         .expect(202);
 
       expect(response.body.success).toBe(true);
-      
-      // Verify the action was created with correct type  
-      const actions = await getDriver().all('SELECT * FROM pending_admin_actions WHERE action_type = ?', ['revoke_validator']);
+
+      // See the register_validator test above for why this queries by
+      // actionId rather than action_type.
+      const actions = await getDriver().all(
+        'SELECT * FROM pending_admin_actions WHERE id = ?',
+        [response.body.data.actionId],
+      );
       expect(actions).toHaveLength(1);
+      expect((actions[0] as any).action_type).toBe('revoke_validator');
     });
   });
 
   describe('Acceptance Criteria 3: Concurrent approval atomicity', () => {
+    // These tests use threshold=3 (rather than the file-wide 2) so that the
+    // second signer's signature does not itself reach quorum. That keeps the
+    // action in 'pending' state throughout, isolating the duplicate-signer
+    // guard from the separate (and separately tested — see
+    // tests/routes/adminMultiSig.test.ts "throws when trying to approve an
+    // already executed action") already-executed idempotency guard: once an
+    // action *has* executed, every approveAction call — including a repeat
+    // from the signer whose approval triggered execution — throws
+    // ACTION_EXECUTED (409) by design, not 'duplicate'. Duplicate-signer
+    // detection is only meaningful while the action is still pending.
+    const originalThreshold = 2;
+
+    beforeEach(() => {
+      config.adminThreshold = 3;
+    });
+
+    afterEach(() => {
+      config.adminThreshold = originalThreshold;
+    });
+
     test('prevents duplicate signatures from same signer', async () => {
       const proposal = proposeAction('pause_contract', {}, adminWallet1);
-      
-      // First approval should succeed
+
+      // First approval from adminWallet2 brings collected to 2 of 3 —
+      // still short of quorum, so the action stays pending.
       const result1 = await approveAction(proposal.actionId, adminWallet2);
-      expect(result1.status).toBe('approved');
-      
-      // Second approval from same signer should return duplicate
+      expect(result1.status).toBe('pending');
+      expect(result1.collected).toBe(2);
+
+      // Second approval from the same signer must not count again.
       const result2 = await approveAction(proposal.actionId, adminWallet2);
       expect(result2.status).toBe('duplicate');
+      expect(result2.collected).toBe(2);
     });
 
     test('concurrent approvals from same signer are atomic', async () => {
       const proposal = proposeAction('pause_contract', {}, adminWallet1);
-      
-      // Simulate concurrent approvals
+
+      // Simulate concurrent approvals racing for the same signature slot.
       const promises = [
         approveAction(proposal.actionId, adminWallet2),
         approveAction(proposal.actionId, adminWallet2),
-        approveAction(proposal.actionId, adminWallet2)
+        approveAction(proposal.actionId, adminWallet2),
       ];
-      
+
       const results = await Promise.allSettled(promises);
-      
-      // Only one should succeed, others should be duplicate or fail
-      const successful = results.filter(r => r.status === 'fulfilled' && (r.value as any).status === 'approved');
+
+      // Exactly one call counts as a new signature (collected 1 -> 2,
+      // still below the threshold=3 quorum); the rest must be reported as
+      // graceful duplicates, and none may reject.
+      const rejected = results.filter(r => r.status === 'rejected');
+      expect(rejected).toHaveLength(0);
+
+      const counted = results.filter(r => r.status === 'fulfilled' && (r.value as any).status === 'pending');
       const duplicates = results.filter(r => r.status === 'fulfilled' && (r.value as any).status === 'duplicate');
-      
-      expect(successful).toHaveLength(1);
-      expect(duplicates.length + successful.length).toBe(3);
+
+      expect(counted).toHaveLength(1);
+      expect(duplicates).toHaveLength(2);
     });
   });
 

@@ -9,6 +9,68 @@
 import { Client, type ClientConfig } from 'pg';
 import { DbDriver } from './driver';
 
+/**
+ * Converts SQLite-style `?` positional placeholders to Postgres-style
+ * `$1, $2, ...` placeholders. node-postgres does not accept `?` — every
+ * SQL string in this codebase is written once, against the SQLite dialect,
+ * and shared with the Postgres driver, so this conversion must happen here
+ * rather than duplicating each query per-dialect.
+ *
+ * `?` characters inside single-quoted string literals (with '' as the
+ * escaped-quote form) or double-quoted identifiers are left untouched.
+ */
+export function convertPlaceholders(sql: string): string {
+  let out = '';
+  let paramIndex = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+
+    if (inSingleQuote) {
+      out += ch;
+      if (ch === "'") {
+        // '' inside a single-quoted string is an escaped quote, not a close.
+        if (sql[i + 1] === "'") {
+          out += sql[++i];
+        } else {
+          inSingleQuote = false;
+        }
+      }
+      continue;
+    }
+
+    if (inDoubleQuote) {
+      out += ch;
+      if (ch === '"') inDoubleQuote = false;
+      continue;
+    }
+
+    if (ch === "'") {
+      inSingleQuote = true;
+      out += ch;
+      continue;
+    }
+
+    if (ch === '"') {
+      inDoubleQuote = true;
+      out += ch;
+      continue;
+    }
+
+    if (ch === '?') {
+      paramIndex += 1;
+      out += `$${paramIndex}`;
+      continue;
+    }
+
+    out += ch;
+  }
+
+  return out;
+}
+
 /** SSL option accepted by the PostgresDriver constructor. */
 export type PostgresSslOption =
   /** Enable SSL with full certificate verification (recommended for managed providers). */
@@ -174,7 +236,7 @@ export class PostgresDriver implements DbDriver {
     let done = false;
 
     // Fire off the async query
-    this.client.query(sql, params).then(
+    this.client.query(convertPlaceholders(sql), params).then(
       (res) => {
         result = res;
         done = true;
