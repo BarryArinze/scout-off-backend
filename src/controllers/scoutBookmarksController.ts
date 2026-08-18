@@ -21,25 +21,8 @@ import {
   ScoutBookmarkFolderRow,
   PlayerRow,
 } from '../db';
-import { isValidStellarAddress } from '../utils/stellarAddress';
-import { sendForbidden } from '../utils/authError';
 import { getTierMeta } from '../utils/tier';
 import { logger } from '../utils/logger';
-
-// ─── Ownership guard ──────────────────────────────────────────────────────────
-
-function assertWalletOwnership(req: Request, res: Response): boolean {
-  const { wallet } = req.params;
-  if (!isValidStellarAddress(wallet)) {
-    res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-    return false;
-  }
-  if (req.account !== wallet) {
-    sendForbidden(res, 'Forbidden: wallet mismatch');
-    return false;
-  }
-  return true;
-}
 
 // ─── Serialization (mirrors filterPlayers in playerController.ts) ─────────────
 
@@ -74,8 +57,6 @@ export async function addBookmark(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const { playerId, folderId, note } = req.body;
 
     if (!playerId) {
@@ -138,8 +119,6 @@ export async function removeBookmark(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const { playerId } = req.params;
     const removed = deleteBookmark(req.params.wallet, playerId);
 
@@ -169,8 +148,6 @@ export async function listBookmarks(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const folderId = req.query.folderId ? parseInt(req.query.folderId as string, 10) : undefined;
     const bookmarks: ScoutBookmarkRow[] = getBookmarksByScout(req.params.wallet, folderId);
 
@@ -208,8 +185,6 @@ export async function createBookmarkFolder(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const { name } = req.body;
 
     if (!name || typeof name !== 'string') {
@@ -251,8 +226,6 @@ export async function listBookmarkFolders(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const folders: ScoutBookmarkFolderRow[] = getBookmarkFoldersByScout(req.params.wallet);
 
     // Enrich with bookmark counts
@@ -279,8 +252,6 @@ export async function deleteBookmarkFolderHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const { folderId } = req.params;
     const folderIdNum = parseInt(folderId, 10);
 
