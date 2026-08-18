@@ -38,7 +38,7 @@ jest.mock('../../src/db', () => ({
   revokeApiKeyById: jest.fn(),
   getApiKeyByHash: jest.fn().mockReturnValue(null),
   getAllActiveApiKeys: jest.fn().mockReturnValue([]),
-  touchApiKeyLastUsed: jest.fn(),
+  touchApiKeyLastUsed: jest.fn().mockResolvedValue(undefined),
   // bookmarks
   insertBookmark: jest.fn(),
   deleteBookmark: jest.fn(),
@@ -134,23 +134,23 @@ describe('generateApiKey / verifyApiKey (unit)', () => {
 describe('resolveApiKey (unit)', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('returns null when getAllActiveApiKeys returns empty array', () => {
+  it('returns null when getAllActiveApiKeys returns empty array', async () => {
     mockGetAllActive.mockReturnValueOnce([]);
-    expect(resolveApiKey('somekey')).toBeNull();
+    expect(await resolveApiKey('somekey')).toBeNull();
   });
 
-  it('returns scout_wallet, id, and parsed scopes when key matches', () => {
+  it('returns scout_wallet, id, and parsed scopes when key matches', async () => {
     const { key, keyHash } = generateApiKey();
     mockGetAllActive.mockReturnValueOnce([
       { id: 42, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'test', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null },
     ]);
-    const result = resolveApiKey(key);
+    const result = await resolveApiKey(key);
     // Legacy key: null scopes → parsed as null (unrestricted) for the shared
     // scope contract (#1019).
     expect(result).toEqual({ scout_wallet: SCOUT_A, id: 42, scopes: null });
   });
 
-  it('resolves the parsed scope list for a restricted key', () => {
+  it('resolves the parsed scope list for a restricted key', async () => {
     const { key, keyHash } = generateApiKey();
     mockGetAllActive.mockReturnValueOnce([
       {
@@ -165,7 +165,7 @@ describe('resolveApiKey (unit)', () => {
         rate_limit_per_minute: null,
       },
     ]);
-    const result = resolveApiKey(key);
+    const result = await resolveApiKey(key);
     expect(result).toEqual({
       scout_wallet: SCOUT_A,
       id: 43,
@@ -173,12 +173,12 @@ describe('resolveApiKey (unit)', () => {
     });
   });
 
-  it('returns null when no key matches', () => {
+  it('returns null when no key matches', async () => {
     const { keyHash } = generateApiKey();
     mockGetAllActive.mockReturnValueOnce([
       { id: 1, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null },
     ]);
-    expect(resolveApiKey('completely-different-key')).toBeNull();
+    expect(await resolveApiKey('completely-different-key')).toBeNull();
   });
 });
 

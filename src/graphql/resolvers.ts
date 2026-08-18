@@ -103,8 +103,8 @@ const Query = {
    * Owner/admin callers can still fetch deactivated players, exactly like REST.
    * Public — no auth required for active players.
    */
-  player(_parent: unknown, args: { id: string }, ctx: GraphQLContext) {
-    const row = getPlayerById(args.id);
+  async player(_parent: unknown, args: { id: string }, ctx: GraphQLContext) {
+    const row = await getPlayerById(args.id);
     if (!row) return null;
     if (!canAccessPlayer(row, { account: ctx.account, role: ctx.role })) return null;
     return serializePlayer(row);
@@ -115,7 +115,7 @@ const Query = {
    *
    * Mirrors GET /api/players filter endpoint.  Public — no auth required.
    */
-  players(
+  async players(
     _parent: unknown,
     args: {
       region?: string | null;
@@ -136,8 +136,8 @@ const Query = {
       minTier: args.minTier ?? undefined,
     };
 
-    const rows = queryPlayers({ ...opts, limit: pageSize, offset });
-    const total = countPlayers(opts);
+    const rows = await queryPlayers({ ...opts, limit: pageSize, offset });
+    const total = await countPlayers(opts);
     const pages = Math.ceil(total / pageSize);
 
     return {
@@ -161,7 +161,7 @@ const Query = {
     ctx: GraphQLContext,
   ) {
     assertApiKeyScope(ctx, 'read:milestones');
-    const player = getPlayerById(args.playerId);
+    const player = await getPlayerById(args.playerId);
     if (!player) {
       throw new GraphQLError('Player not found', {
         extensions: { code: 'NOT_FOUND' },
@@ -178,7 +178,7 @@ const Query = {
    * Requires authentication; scout can only query their own wallet,
    * admins can query any wallet.
    */
-  scoutSubscription(
+  async scoutSubscription(
     _parent: unknown,
     args: { wallet: string },
     ctx: GraphQLContext,
@@ -193,7 +193,7 @@ const Query = {
       });
     }
 
-    const sub = getLatestSubscription(args.wallet);
+    const sub = await getLatestSubscription(args.wallet);
     const now = Math.floor(Date.now() / 1000);
 
     if (!sub) {

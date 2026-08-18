@@ -53,7 +53,7 @@ export async function verifyAuditChainFull(deadlineMs?: number): Promise<AuditCh
   const deadline = deadlineMs ?? Date.now() + config.requestTimeoutMs - 500;
 
   // Fetch all rows at once (getAllAuditLogRows does not support limit/offset).
-  const allRows: AuditLogRow[] = getAllAuditLogRows();
+  const allRows: AuditLogRow[] = await getAllAuditLogRows();
   const totalRows = allRows.length;
 
   const violations: AuditViolation[] = [];
@@ -128,8 +128,8 @@ export async function verifyAuditChainFull(deadlineMs?: number): Promise<AuditCh
  *
  * @deprecated Use verifyAuditChainFull() for richer reporting (#764).
  */
-export function verifyAuditChain(): AuditChainVerification {
-  const rows: AuditLogRow[] = getAllAuditLogRows();
+export async function verifyAuditChain(): Promise<AuditChainVerification> {
+  const rows: AuditLogRow[] = await getAllAuditLogRows();
   let expectedPrevHash = GENESIS_HASH;
 
   for (const row of rows) {

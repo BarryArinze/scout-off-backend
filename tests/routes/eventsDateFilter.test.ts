@@ -100,7 +100,7 @@ jest.mock('../../src/services/stellar', () => ({
 }));
 
 jest.mock('../../src/services/audit', () => ({
-  logAuditEvent: jest.fn(),
+  logAuditEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
 import { getEventsPage, countEventsFiltered } from '../../src/db';

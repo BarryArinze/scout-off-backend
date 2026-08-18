@@ -140,21 +140,20 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
     expect(hashes).not.toContain('hash-R2');
   });
 
-  it('rolls back the entire batch if an error occurs mid-batch', async () => {
+  it('does not advance the indexed ledger past a mid-batch failure, so the batch is retried', async () => {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getDb, fetchLastIndexedLedger } = require('../../src/db');
     const db = getDb();
-    
+
     const beforeCount = db.prepare("SELECT count(*) as c FROM events").get().c;
     const beforeLedger = fetchLastIndexedLedger();
 
-    // Mock insertOrUpdatePlayer (called from within the batch transaction) to
-    // throw midway through the batch. normalizePayload can't be spied on here
-    // because indexer.ts calls it as a same-module local reference, so a spy
-    // on the required module's property never intercepts that internal call —
-    // insertOrUpdatePlayer is imported from ../../src/db, a separate module,
-    // so calls to it always go through the module's exports object and a spy
-    // does intercept them.
+    // Mock insertOrUpdatePlayer to throw midway through the batch.
+    // normalizePayload can't be spied on here because indexer.ts calls it as
+    // a same-module local reference, so a spy on the required module's
+    // property never intercepts that internal call — insertOrUpdatePlayer is
+    // imported from ../../src/db, a separate module, so calls to it always
+    // go through the module's exports object and a spy does intercept them.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const dbModule = require('../../src/db');
     const originalInsertOrUpdatePlayer = dbModule.insertOrUpdatePlayer;
@@ -175,9 +174,22 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
 
     dbModule.insertOrUpdatePlayer.mockRestore();
 
+    // The batch is no longer wrapped in a single synchronous transaction —
+    // player/milestone upserts run through the async DbDriver (required to
+    // support DB_DRIVER=postgres), which can't be driven from inside a
+    // synchronous better-sqlite3 transaction callback. Whole-batch atomicity
+    // is intentionally traded for retry-safety instead: every insert is
+    // idempotent (events dedup on tx_hash via INSERT OR IGNORE, player
+    // upserts are keyed), so the raw event rows already applied before the
+    // crash (both OK's and CRASH's) are left in place rather than rolled
+    // back.
     const afterCount = db.prepare("SELECT count(*) as c FROM events").get().c;
-    expect(afterCount).toBe(beforeCount);
+    expect(afterCount).toBe(beforeCount + 2);
 
+    // What must still hold: the last-indexed ledger is only persisted after
+    // the whole batch succeeds, so a mid-batch failure leaves it unchanged
+    // and the next poll re-fetches and reprocesses this same batch from the
+    // chain (safe, since every write above is idempotent).
     expect(fetchLastIndexedLedger()).toBe(beforeLedger);
   });
 });

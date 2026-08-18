@@ -18,8 +18,8 @@ import { runMigrations } from '../../src/db/migrate';
 import { SqliteDriver } from '../../src/db/sqlite-driver';
 
 /** Wrap a raw better-sqlite3 Database in the SqliteDriver adapter that runMigrations expects. */
-function migrate(db: Database.Database): void {
-  runMigrations(new SqliteDriver(db));
+async function migrate(db: Database.Database): Promise<void> {
+  await runMigrations(new SqliteDriver(db));
 }
 
 // ---------------------------------------------------------------------------
@@ -29,11 +29,16 @@ function migrate(db: Database.Database): void {
 const DB_DIR = path.resolve(__dirname, '../../db');
 
 /** Return every *.sql filename under db/ in the same lexicographic order that
- *  runMigrations() uses so the test faithfully exercises production ordering. */
+ *  runMigrations() uses so the test faithfully exercises production ordering.
+ *  Includes _postgres.sql counterparts — runMigrations() applies every such
+ *  file too (converting it cross-driver rather than skipping it), tracking
+ *  each as its own row in `migrations`; see the "#885" describe block below
+ *  for the test that documents this explicitly. Excludes only .down.sql
+ *  files, which are applied by the separate down-migration path. */
 function discoverMigrationFiles(): string[] {
   return fs
     .readdirSync(DB_DIR)
-    .filter((f) => f.endsWith('.sql'))
+    .filter((f) => f.endsWith('.sql') && !f.endsWith('.down.sql'))
     .sort();
 }
 
@@ -72,9 +77,9 @@ describe('runMigrations — integration suite (#508)', () => {
   // all migrations for every schema assertion.
   let sharedDb: Database.Database;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     sharedDb = new Database(':memory:');
-    migrate(sharedDb);
+    await migrate(sharedDb);
   });
 
   afterAll(() => {
@@ -97,9 +102,9 @@ describe('runMigrations — integration suite (#508)', () => {
       expect(files).toEqual(sorted);
     });
 
-    it('all discovered migration files are recorded in the migrations table after a fresh run', () => {
+    it('all discovered migration files are recorded in the migrations table after a fresh run', async () => {
       const db = new Database(':memory:');
-      migrate(db);
+      await migrate(db);
 
       const appliedRows = db
         .prepare('SELECT id FROM migrations ORDER BY id')
@@ -124,15 +129,15 @@ describe('runMigrations — integration suite (#508)', () => {
   // -------------------------------------------------------------------------
 
   describe('clean application against a fresh empty database', () => {
-    it('runMigrations() completes without throwing on a brand-new in-memory DB', () => {
+    it('runMigrations() completes without throwing on a brand-new in-memory DB', async () => {
       const db = new Database(':memory:');
-      expect(() => migrate(db)).not.toThrow();
+      await expect(migrate(db)).resolves.not.toThrow();
       db.close();
     });
 
-    it('applies migrations in lexicographic filename order', () => {
+    it('applies migrations in lexicographic filename order', async () => {
       const db = new Database(':memory:');
-      migrate(db);
+      await migrate(db);
 
       const appliedRows = db
         .prepare('SELECT id, applied_at FROM migrations ORDER BY applied_at, id')
@@ -328,9 +333,9 @@ describe('runMigrations — integration suite (#508)', () => {
         expect(getColumns(sharedDb, 'idempotency_keys')).toContain('request_fingerprint');
       });
 
-      it('records a fingerprint on claim and returns it from getIdempotencyRecord', () => {
+      it('records a fingerprint on claim and returns it from getIdempotencyRecord', async () => {
         const db = new Database(':memory:');
-        migrate(db);
+        await migrate(db);
         db.prepare(
           `INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status, request_fingerprint)
            VALUES ('fp-key', 0, '', 1, 9999999999999, 'pending', 'wallet:player')`
@@ -510,9 +515,9 @@ describe('runMigrations — integration suite (#508)', () => {
   // -------------------------------------------------------------------------
 
   describe('same-numeric-prefix migrations do not conflict', () => {
-    it('all four 002_* migrations apply cleanly together in a single fresh DB', () => {
+    it('all four 002_* migrations apply cleanly together in a single fresh DB', async () => {
       const db = new Database(':memory:');
-      expect(() => migrate(db)).not.toThrow();
+      await expect(migrate(db)).resolves.not.toThrow();
 
       const tables = getTables(db);
       expect(tables).toContain('validators');              // 002_validators
@@ -534,9 +539,9 @@ describe('runMigrations — integration suite (#508)', () => {
       db.close();
     });
 
-    it('all four 003_* migrations apply cleanly together without duplicate-table errors', () => {
+    it('all four 003_* migrations apply cleanly together without duplicate-table errors', async () => {
       const db = new Database(':memory:');
-      expect(() => migrate(db)).not.toThrow();
+      await expect(migrate(db)).resolves.not.toThrow();
 
       const tables = getTables(db);
       expect(tables).toContain('idempotency_keys');   // 003_idempotency_keys
@@ -558,9 +563,9 @@ describe('runMigrations — integration suite (#508)', () => {
       db.close();
     });
 
-    it('both 004_* migrations apply cleanly — 004_validators is a safe no-op', () => {
+    it('both 004_* migrations apply cleanly — 004_validators is a safe no-op', async () => {
       const db = new Database(':memory:');
-      expect(() => migrate(db)).not.toThrow();
+      await expect(migrate(db)).resolves.not.toThrow();
 
       const tables = getTables(db);
       expect(tables).toContain('revoked_tokens');  // 004_token_revocation
@@ -580,9 +585,9 @@ describe('runMigrations — integration suite (#508)', () => {
       db.close();
     });
 
-    it('subscriptions table is created exactly once despite two 003_* files defining it', () => {
+    it('subscriptions table is created exactly once despite two 003_* files defining it', async () => {
       const db = new Database(':memory:');
-      migrate(db);
+      await migrate(db);
 
       // If a duplicate CREATE TABLE (without IF NOT EXISTS) had been executed,
       // the migration would have thrown and the table would be missing or the
@@ -598,9 +603,9 @@ describe('runMigrations — integration suite (#508)', () => {
       db.close();
     });
 
-    it('validators table is created exactly once despite 002_validators.sql and 004_validators.sql both defining it', () => {
+    it('validators table is created exactly once despite 002_validators.sql and 004_validators.sql both defining it', async () => {
       const db = new Database(':memory:');
-      migrate(db);
+      await migrate(db);
 
       const rows = db
         .prepare(
@@ -618,11 +623,11 @@ describe('runMigrations — integration suite (#508)', () => {
   // -------------------------------------------------------------------------
 
   describe('idempotency', () => {
-    it('running migrations twice applies each file exactly once', () => {
+    it('running migrations twice applies each file exactly once', async () => {
       const db = new Database(':memory:');
 
-      migrate(db);
-      migrate(db);
+      await migrate(db);
+      await migrate(db);
 
       const rows = db
         .prepare('SELECT id FROM migrations')
@@ -641,14 +646,14 @@ describe('runMigrations — integration suite (#508)', () => {
       db.close();
     });
 
-    it('running migrations three times produces no duplicate rows and no errors', () => {
+    it('running migrations three times produces no duplicate rows and no errors', async () => {
       const db = new Database(':memory:');
 
-      expect(() => {
-        migrate(db);
-        migrate(db);
-        migrate(db);
-      }).not.toThrow();
+      await expect((async () => {
+        await migrate(db);
+        await migrate(db);
+        await migrate(db);
+      })()).resolves.not.toThrow();
 
       const rows = db
         .prepare('SELECT id FROM migrations')
@@ -703,9 +708,9 @@ describe('runMigrations — integration suite (#508)', () => {
 describe('full migration sequence from scratch (#885)', () => {
   let db: Database.Database;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     db = new Database(':memory:');
-    migrate(db);
+    await migrate(db);
   });
 
   afterAll(() => {
@@ -730,9 +735,9 @@ describe('full migration sequence from scratch (#885)', () => {
 
   // ── 1. No errors on a fresh in-memory DB ───────────────────────────────────
 
-  it('runMigrations() completes without throwing on a fresh in-memory DB', () => {
+  it('runMigrations() completes without throwing on a fresh in-memory DB', async () => {
     const freshDb = new Database(':memory:');
-    expect(() => migrate(freshDb)).not.toThrow();
+    await expect(migrate(freshDb)).resolves.not.toThrow();
     freshDb.close();
   });
 

@@ -63,23 +63,23 @@ export function idempotency(
 ): void | ((req: Request, res: Response, next: NextFunction) => void) {
   // Plain middleware usage: idempotency(req, res, next).
   if (typeof (reqOrOptions as Request).params === 'object') {
-    handleIdempotency(reqOrOptions as Request, res as Response, next as NextFunction, undefined);
+    handleIdempotency(reqOrOptions as Request, res as Response, next as NextFunction, undefined).catch(next as NextFunction);
     return;
   }
 
   // Factory usage: idempotency({ requestFingerprint }).
   const options = reqOrOptions as IdempotencyOptions;
   return (req: Request, res: Response, next: NextFunction): void => {
-    handleIdempotency(req, res, next, options);
+    handleIdempotency(req, res, next, options).catch(next);
   };
 }
 
-function handleIdempotency(
+async function handleIdempotency(
   req: Request,
   res: Response,
   next: NextFunction,
   options: IdempotencyOptions | undefined,
-): void {
+): Promise<void> {
   const key = req.headers['idempotency-key'];
 
   // No key supplied — pass through without any idempotency behaviour.
@@ -96,7 +96,7 @@ function handleIdempotency(
   // ── Step 1: check for an existing record ─────────────────────────────────
   let existingRecord;
   try {
-    existingRecord = getIdempotencyRecord(trimmedKey);
+    existingRecord = await getIdempotencyRecord(trimmedKey);
   } catch (err) {
     // DB read failure is non-fatal; fall through and process normally.
     logger.warn(
@@ -128,7 +128,7 @@ function handleIdempotency(
   // ── Step 2: attempt to claim the key (atomic INSERT OR IGNORE) ───────────
   let claimed: boolean;
   try {
-    claimed = claimIdempotencyKey(trimmedKey, requestFingerprint);
+    claimed = await claimIdempotencyKey(trimmedKey, requestFingerprint);
   } catch (err) {
     // DB claim failure is non-fatal; process normally without idempotency.
     logger.warn(
@@ -173,16 +173,17 @@ function handleIdempotency(
   const originalJson = res.json.bind(res);
 
   res.json = function (body: unknown): Response {
-    try {
-      updateIdempotencyRecord(trimmedKey, res.statusCode, body);
-      logger.info(
-        `[idempotency] cache_stored key=${trimmedKey} status=${res.statusCode}`,
+    // Persist the response before sending; ignore errors (best-effort). This
+    // stays fire-and-forget rather than awaited: res.json must return
+    // synchronously to preserve Express's response contract. Wrapped in
+    // Promise.resolve() so this can never throw synchronously or reject
+    // unhandled even if updateIdempotencyRecord doesn't return a genuine
+    // Promise (e.g. an incomplete test mock).
+    Promise.resolve(updateIdempotencyRecord(trimmedKey, res.statusCode, body))
+      .then(() => logger.info(`[idempotency] cache_stored key=${trimmedKey} status=${res.statusCode}`))
+      .catch((err: unknown) =>
+        logger.warn(`[idempotency] cache_store_error key=${trimmedKey} err=${(err as Error).message}`),
       );
-    } catch (err) {
-      logger.warn(
-        `[idempotency] cache_store_error key=${trimmedKey} err=${(err as Error).message}`,
-      );
-    }
     // Resolve the in-flight promise so concurrent waiters unblock.
     resolveInFlight({ statusCode: res.statusCode, body });
     return originalJson(body);
@@ -244,9 +245,9 @@ function waitForCompletion(
     ),
     timeout,
   ])
-    .then(() => {
+    .then(async () => {
       // Owner finished — read the completed record from the DB.
-      const record = getIdempotencyRecord(key);
+      const record = await getIdempotencyRecord(key);
       if (record && record.status === 'complete') {
         if (fingerprintConflicts(requestFingerprint, record.request_fingerprint)) {
           logger.warn(`[idempotency] fingerprint_conflict_after_wait key=${key}`);

@@ -37,4 +37,10 @@ process.env.WEBHOOK_SECRET_ENCRYPTION_KEY =
 
 import { initDb } from "../src/db";
 
-initDb();
+// initDb() is async (required to support DB_DRIVER=postgres's async
+// connection setup) — this file runs as setupFilesAfterEnv rather than
+// setupFiles specifically so that `beforeAll` (installed by the test
+// framework) is available here to await it before any test in the file runs.
+beforeAll(async () => {
+  await initDb();
+});

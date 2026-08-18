@@ -11,11 +11,17 @@ jest.mock('../../src/services/ipfs', () => ({
 jest.mock('../../src/db', () => ({
   queryEvents: jest.fn(),
   getPendingMilestones: jest.fn(),
-  getDb: jest.fn(),
+  // approveBulkMilestones (validatorController.ts) reads pending_milestones
+  // rows via getDriver() directly rather than a dedicated db/index.ts
+  // helper — default to "not found" so bulk-approve tests must opt in via
+  // mockResolvedValueOnce when they need a matching row.
+  getDriver: jest.fn().mockReturnValue({ get: jest.fn().mockResolvedValue(undefined) }),
   removePendingMilestone: jest.fn(),
   incrementValidatorApproved: jest.fn(),
   updatePlayerProgress: jest.fn(),
-  insertAuditLog: jest.fn().mockReturnValue({
+  // src/utils/audit.ts's recordAudit (called from validatorController's
+  // submitMilestoneEvidence and getPendingMilestones) calls this directly.
+  insertAuditLog: jest.fn().mockResolvedValue({
     id: 1,
     action: 'milestone_submitted',
     admin_wallet: '',
@@ -36,10 +42,10 @@ jest.mock('../../src/services/cache', () => ({
   invalidateMilestoneCache: jest.fn(),
 }));
 
-import { queryEvents, getPendingMilestones, getDb, removePendingMilestone, incrementValidatorApproved, updatePlayerProgress } from '../../src/db';
+import { queryEvents, getPendingMilestones, getDriver, removePendingMilestone, incrementValidatorApproved, updatePlayerProgress } from '../../src/db';
 const mockGetEvents = queryEvents as jest.Mock;
 const mockGetPendingMilestones = getPendingMilestones as jest.Mock;
-const mockGetDb = getDb as jest.Mock;
+const mockGetDriver = getDriver as jest.Mock;
 const mockRemovePendingMilestone = removePendingMilestone as jest.Mock;
 const mockIncrementValidatorApproved = incrementValidatorApproved as jest.Mock;
 const mockUpdatePlayerProgress = updatePlayerProgress as jest.Mock;
@@ -57,7 +63,8 @@ beforeEach(() => {
   mockGetEvents.mockReset();
   mockGetPendingMilestones.mockReset();
   mockGetPendingMilestones.mockReturnValue({ data: [], total: 0 });
-  mockGetDb.mockReset();
+  mockGetDriver.mockReset();
+  mockGetDriver.mockReturnValue({ get: jest.fn().mockResolvedValue(undefined) });
   mockRemovePendingMilestone.mockReset();
   mockIncrementValidatorApproved.mockReset();
   mockUpdatePlayerProgress.mockReset();
@@ -287,21 +294,18 @@ describe('POST /api/validators/milestones/approve-bulk', () => {
 
   it('returns 200 and processes valid, invalid, and unauthorized IDs', async () => {
     const validatorToken = makeToken(VALIDATOR_WALLET, 'validator');
-    
-    const mockPrepare = jest.fn().mockImplementation((query) => {
-      return {
-        get: jest.fn().mockImplementation((id) => {
-          if (id === 'm1') {
-            return { milestone_id: 'm1', player_id: 'player-1', validator_wallet: VALIDATOR_WALLET };
-          }
-          if (id === 'm2') {
-            return { milestone_id: 'm2', player_id: 'player-2', validator_wallet: 'OTHER_VALIDATOR' };
-          }
-          return undefined; // m3 is not found
-        })
-      };
+
+    const mockGet = jest.fn().mockImplementation((_sql: string, params?: unknown[]) => {
+      const id = params?.[0];
+      if (id === 'm1') {
+        return Promise.resolve({ milestone_id: 'm1', player_id: 'player-1', validator_wallet: VALIDATOR_WALLET });
+      }
+      if (id === 'm2') {
+        return Promise.resolve({ milestone_id: 'm2', player_id: 'player-2', validator_wallet: 'OTHER_VALIDATOR' });
+      }
+      return Promise.resolve(undefined); // m3 is not found
     });
-    mockGetDb.mockReturnValue({ prepare: mockPrepare });
+    mockGetDriver.mockReturnValue({ get: mockGet });
     mockGetEvents.mockReturnValue([]);
 
     const res = await request(app)

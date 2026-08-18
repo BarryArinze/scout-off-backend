@@ -4,7 +4,7 @@ import { z } from 'zod';
 import axios from 'axios';
 import { logger } from '../utils/logger';
 import { pinJson, pinFile } from '../services/ipfs';
-import { getPendingMilestones as getPendingMilestonesFromDb, getDb, removePendingMilestone, incrementValidatorApproved, queryEvents, updatePlayerProgress } from '../db';
+import { getPendingMilestones as getPendingMilestonesFromDb, getDriver, removePendingMilestone, incrementValidatorApproved, queryEvents, updatePlayerProgress } from '../db';
 import { invalidateMilestoneCache } from '../services/cache';
 import { recordAudit } from '../utils/audit';
 import { isValidMetadataUri, URI_VALIDATION_ERROR } from '../utils/uriValidator';
@@ -162,7 +162,7 @@ export async function submitMilestoneEvidence(req: Request, res: Response, next:
       `[validator] action=submit_milestone validator=${validatorWallet} playerId=${playerId} milestoneType=${milestoneType} evidenceCid=${evidenceCid} correlationId=${correlationId}`
     );
 
-    recordAudit(validatorWallet, 'milestone_submitted', { playerId, milestoneType, evidenceCid }, `correlationId=${correlationId}`);
+    await recordAudit(validatorWallet, 'milestone_submitted', { playerId, milestoneType, evidenceCid }, `correlationId=${correlationId}`);
 
     res.status(201).json({ success: true, data: { evidenceCid } });
   } catch (err) {
@@ -175,7 +175,7 @@ export async function getPendingMilestones(req: Request, res: Response, next: Ne
   try {
     const { region, position, playerId, page, pageSize } = pendingQuerySchema.parse(req.query);
     const validatorWallet = req.params.wallet || req.account;
-    const { data, total } = getPendingMilestonesFromDb({
+    const { data, total } = await getPendingMilestonesFromDb({
       validatorWallet: validatorWallet,
       region,
       position,
@@ -194,8 +194,8 @@ export async function getPendingMilestones(req: Request, res: Response, next: Ne
     }));
 
     const currentValidatorWallet = req.account ?? 'unknown';
-    recordAudit(
-      currentValidatorWallet, 
+    await recordAudit(
+      currentValidatorWallet,
       'pending_milestones_viewed', 
       { 
         region: region ?? null, 
@@ -229,38 +229,38 @@ export async function approveBulkMilestones(req: Request, res: Response, next: N
     const correlationId = getCorrelationId(req);
     
     const results = [];
-    const db = getDb();
-    
+    const driver = getDriver();
+
     const uniqueIds = Array.from(new Set(milestoneIds));
 
     for (const milestoneId of uniqueIds) {
       try {
-        const row = db.prepare('SELECT * FROM pending_milestones WHERE milestone_id = ?').get(milestoneId) as any;
+        const row = await driver.get<any>('SELECT * FROM pending_milestones WHERE milestone_id = ?', [milestoneId]);
         if (!row) {
           results.push({ milestoneId, status: 'invalid', error: 'Not found or already processed' });
           continue;
         }
-        
+
         if (row.validator_wallet !== validatorWallet) {
           results.push({ milestoneId, status: 'unauthorized', error: 'Not assigned to this validator' });
           continue;
         }
 
         const playerId = row.player_id;
-        
-        removePendingMilestone(milestoneId);
-        incrementValidatorApproved(validatorWallet);
-        
+
+        await removePendingMilestone(milestoneId);
+        await incrementValidatorApproved(validatorWallet);
+
         const onChainApprovedCount = queryEvents('milestone_approved').filter(
           (e) => e.payload.player_id === playerId
         ).length;
-        
+
         // Count this new off-chain approval + existing ones
-        updatePlayerProgress(playerId, tierForApprovedMilestones(onChainApprovedCount + 1));
-        
+        await updatePlayerProgress(playerId, tierForApprovedMilestones(onChainApprovedCount + 1));
+
         await invalidateMilestoneCache(playerId);
-        
-        recordAudit(
+
+        await recordAudit(
           validatorWallet,
           'milestone_approved',
           { milestoneId, playerId, bulk: true },

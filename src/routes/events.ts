@@ -98,21 +98,21 @@ interface ActiveSession {
 /** Sessions currently open in this process. */
 const activeSessions = new Set<ActiveSession>();
 
-/** Sweep body shared by the interval and tests (synchronous check). */
-export function runAuthorizationSweep(): void {
+/** Sweep body shared by the interval and tests. */
+export async function runAuthorizationSweep(): Promise<void> {
   if (activeSessions.size === 0) return;
 
   // Single query regardless of connection count — never per keep-alive tick.
   let revokedJtis: ReadonlySet<string>;
   try {
-    revokedJtis = new Set(tokenBlocklistModule.getActiveRevokedJtis());
+    revokedJtis = new Set(await tokenBlocklistModule.getActiveRevokedJtis());
   } catch {
     revokedJtis = new Set();
   }
 
   let blockedWallets: ReadonlySet<string>;
   try {
-    blockedWallets = new Set(refreshBlockedWallets());
+    blockedWallets = new Set(await refreshBlockedWallets());
   } catch {
     blockedWallets = new Set();
   }
@@ -186,7 +186,7 @@ router.get('/stream', requireAuth, async (req: Request, res: Response) => {
   const wallet = req.account!;
 
   // ── Blocklist gate: blocklisted wallets may not open a stream ────────────
-  if (isWalletBlocklisted(wallet)) {
+  if (await isWalletBlocklisted(wallet)) {
     logger.warn(`[sse] connection rejected, wallet blocklisted=${wallet}`);
     res.status(403).json({
       success: false,

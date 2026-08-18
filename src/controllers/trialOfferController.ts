@@ -42,13 +42,13 @@ function getPlayerWallet(playerId: string): string | null {
  *
  * `action` only labels the denial log line ('accept' | 'reject').
  */
-function resolveOwnedPendingOffer(
+async function resolveOwnedPendingOffer(
   playerId: string,
   offerId: string,
   req: Request,
   res: Response,
   action: 'accept' | 'reject',
-): TrialOfferRow | null {
+): Promise<TrialOfferRow | null> {
   // Verify ownership: the authenticated account must own this playerId
   const playerWallet = getPlayerWallet(playerId);
   if (!playerWallet) {
@@ -64,7 +64,7 @@ function resolveOwnedPendingOffer(
   }
 
   // Ensure the offer exists and belongs to this player
-  let offer = getTrialOfferById(offerId);
+  let offer = await getTrialOfferById(offerId);
 
   if (!offer) {
     // Try to seed from on-chain indexed events (backward compatibility)
@@ -76,14 +76,14 @@ function resolveOwnedPendingOffer(
       return null;
     }
     // Insert the offer from on-chain data so we can record the response
-    insertTrialOffer({
+    await insertTrialOffer({
       offer_id: offerId,
       scout_wallet: event.payload.scout as string,
       player_id: playerId,
       details_uri: (event.payload.details_uri ?? '') as string,
       created_at: Math.floor(Date.now() / 1000),
     });
-    offer = getTrialOfferById(offerId);
+    offer = await getTrialOfferById(offerId);
   }
 
   if (!offer) {
@@ -121,11 +121,11 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
   try {
     const { playerId, offerId } = req.params;
 
-    const offer = resolveOwnedPendingOffer(playerId, offerId, req, res, 'accept');
+    const offer = await resolveOwnedPendingOffer(playerId, offerId, req, res, 'accept');
     if (!offer) return;
 
     const now = Math.floor(Date.now() / 1000);
-    respondToTrialOffer({ offer_id: offerId, status: 'accepted', responded_at: now });
+    await respondToTrialOffer({ offer_id: offerId, status: 'accepted', responded_at: now });
 
     logger.info(`[trialOffer] accepted offerId=${offerId} playerId=${playerId}`);
 
@@ -181,11 +181,11 @@ export async function rejectTrialOffer(req: Request, res: Response, next: NextFu
     }
     const reason = bodyParsed.data.reason;
 
-    const offer = resolveOwnedPendingOffer(playerId, offerId, req, res, 'reject');
+    const offer = await resolveOwnedPendingOffer(playerId, offerId, req, res, 'reject');
     if (!offer) return;
 
     const now = Math.floor(Date.now() / 1000);
-    respondToTrialOffer({ offer_id: offerId, status: 'rejected', reject_reason: reason, responded_at: now });
+    await respondToTrialOffer({ offer_id: offerId, status: 'rejected', reject_reason: reason, responded_at: now });
 
     logger.info(`[trialOffer] rejected offerId=${offerId} playerId=${playerId} reason=${reason ?? 'none'}`);
 

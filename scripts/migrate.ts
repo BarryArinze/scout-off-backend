@@ -100,7 +100,7 @@ async function main(): Promise<void> {
 
     console.log(`Running migrations: direction=${direction}${steps ? `, steps=${steps}` : ''}${dryRun ? ', dry-run=true' : ''}`);
 
-    const results = runMigrations(driver, { direction, steps, dryRun });
+    const results = await runMigrations(driver, { direction, steps, dryRun });
 
     if (results.length === 0) {
       console.log('No migrations to apply.');

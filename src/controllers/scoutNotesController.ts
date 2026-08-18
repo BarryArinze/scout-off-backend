@@ -47,7 +47,7 @@ export async function putScoutNote(
     const sanitizedNote = sanitizeInput(parsed.data.note);
     const now = Math.floor(Date.now() / 1000);
 
-    upsertScoutNote({
+    await upsertScoutNote({
       scout_wallet: req.params.wallet,
       player_id: playerId,
       note_text: sanitizedNote,
@@ -85,7 +85,7 @@ export async function getScoutNoteHandler(
 ): Promise<void> {
   try {
     const { playerId } = req.params;
-    const row = getScoutNote(req.params.wallet, playerId);
+    const row = await getScoutNote(req.params.wallet, playerId);
 
     if (!row) {
       res.status(404).json({ success: false, error: 'Note not found' });
@@ -119,7 +119,7 @@ export async function listScoutNotesHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const rows = getScoutNotes(req.params.wallet);
+    const rows = await getScoutNotes(req.params.wallet);
 
     res.json({
       success: true,
@@ -180,7 +180,7 @@ export async function createPlayerNote(
     const sanitized = sanitizeInput(parsed.data.content);
     const now = Math.floor(Date.now() / 1000);
 
-    const id = insertScoutPlayerNote({
+    const id = await insertScoutPlayerNote({
       scout_wallet: req.params.wallet,
       player_id: playerId,
       content: sanitized,
@@ -223,7 +223,7 @@ export async function listPlayerNotes(
 ): Promise<void> {
   try {
     const { playerId } = req.params;
-    const rows = getScoutPlayerNotes(req.params.wallet, playerId);
+    const rows = await getScoutPlayerNotes(req.params.wallet, playerId);
 
     res.json({
       success: true,
@@ -279,7 +279,7 @@ export async function updatePlayerNote(
     const sanitized = sanitizeInput(parsed.data.content);
     const now = Math.floor(Date.now() / 1000);
 
-    const updated = updateScoutPlayerNote({
+    const updated = await updateScoutPlayerNote({
       id,
       scout_wallet: req.params.wallet,
       content: sanitized,
@@ -332,7 +332,7 @@ export async function deletePlayerNote(
       return;
     }
 
-    const removed = deleteScoutPlayerNote(id, req.params.wallet);
+    const removed = await deleteScoutPlayerNote(id, req.params.wallet);
 
     if (!removed) {
       res.status(404).json({ success: false, error: 'Note not found' });

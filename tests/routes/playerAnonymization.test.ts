@@ -26,11 +26,11 @@ describe('POST /api/players/:playerId/anonymize', () => {
   const WALLET = 'GTEST1234567890';
   const METADATA_URI = 'QmTestCid123';
 
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
     // Seed a player so the endpoint can find it
     try {
-      db.insertOrUpdatePlayer({
+      await db.insertOrUpdatePlayer({
         player_id: PLAYER_ID,
         wallet: WALLET,
         position: 'forward',
@@ -70,7 +70,7 @@ describe('POST /api/players/:playerId/anonymize', () => {
 
   it('anonymizes player data successfully', async () => {
     // Add some history rows
-    db.insertPlayerProfileHistory({
+    await db.insertPlayerProfileHistory({
       player_id: PLAYER_ID,
       metadata_uri: 'QmHistory1',
       changed_at: Date.now() - 1000,
@@ -88,7 +88,7 @@ describe('POST /api/players/:playerId/anonymize', () => {
     expect(res.body.anonymized.dbFieldsScrubbed).toBe(true);
 
     // Verify player is scrubbed in DB
-    const player = db.getPlayerById(PLAYER_ID);
+    const player = await db.getPlayerById(PLAYER_ID);
     expect(player).not.toBeNull();
     expect(player!.wallet).toBe('[anonymized]');
     expect(player!.position).toBeNull();
@@ -97,7 +97,7 @@ describe('POST /api/players/:playerId/anonymize', () => {
     expect(player!.is_active).toBe(0);
 
     // Verify profile history is deleted
-    const history = db.getPlayerProfileHistory(PLAYER_ID);
+    const history = await db.getPlayerProfileHistory(PLAYER_ID);
     expect(history).toHaveLength(0);
 
     // Verify IPFS unpin was called
@@ -116,14 +116,14 @@ describe('POST /api/players/:playerId/anonymize', () => {
       .send();
 
     // Check the player is not returned with identifying data
-    const player = db.getPlayerById(PLAYER_ID);
+    const player = await db.getPlayerById(PLAYER_ID);
     expect(player!.wallet).toBe('[anonymized]');
     expect(player!.metadata_uri).toBeNull();
   });
 
   it('anonymized player history is empty', async () => {
     // Add history before anonymization
-    db.insertPlayerProfileHistory({
+    await db.insertPlayerProfileHistory({
       player_id: PLAYER_ID,
       metadata_uri: 'QmHistoryToDelete',
       changed_at: Date.now(),
@@ -136,7 +136,7 @@ describe('POST /api/players/:playerId/anonymize', () => {
       .set('Authorization', `Bearer ${token}`)
       .send();
 
-    const history = db.getPlayerProfileHistory(PLAYER_ID);
+    const history = await db.getPlayerProfileHistory(PLAYER_ID);
     expect(history).toHaveLength(0);
   });
 });

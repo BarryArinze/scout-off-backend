@@ -38,7 +38,7 @@ jest.mock('../../src/db', () => ({
   revokeApiKeyById: jest.fn(),
   getApiKeyByHash: jest.fn().mockReturnValue(null),
   getAllActiveApiKeys: jest.fn().mockReturnValue([]),
-  touchApiKeyLastUsed: jest.fn(),
+  touchApiKeyLastUsed: jest.fn().mockResolvedValue(undefined),
   // bookmarks
   insertBookmark: jest.fn(),
   deleteBookmark: jest.fn(),

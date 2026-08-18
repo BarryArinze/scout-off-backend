@@ -13,7 +13,7 @@
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import app from '../../src/app';
-import { getDb } from '../../src/db';
+import { getDriver } from '../../src/db';
 import {
   clearFeatureFlagCache,
   isFeatureEnabled,
@@ -36,28 +36,28 @@ function getScoutToken(): string {
 }
 
 /** Seed a flag directly into the DB for test isolation. */
-function seedFlag(name: string, enabled: 0 | 1): void {
-  getDb()
-    .prepare(
-      `INSERT INTO feature_flags (name, enabled, updated_at, updated_by)
-       VALUES (?, ?, ?, 'system')
-       ON CONFLICT(name) DO UPDATE SET enabled = excluded.enabled, updated_by = 'system'`,
-    )
-    .run(name, enabled, Date.now());
+async function seedFlag(name: string, enabled: 0 | 1): Promise<void> {
+  await getDriver().run(
+    `INSERT INTO feature_flags (name, enabled, updated_at, updated_by)
+     VALUES (?, ?, ?, 'system')
+     ON CONFLICT(name) DO UPDATE SET enabled = excluded.enabled, updated_by = 'system'`,
+    [name, enabled, Date.now()],
+  );
 }
 
 /** Read the latest audit_log row matching an action. */
-function latestAuditRow(action: string): Record<string, unknown> | undefined {
-  return getDb()
-    .prepare(`SELECT * FROM audit_log WHERE action = ? ORDER BY id DESC LIMIT 1`)
-    .get(action) as Record<string, unknown> | undefined;
+async function latestAuditRow(action: string): Promise<Record<string, unknown> | undefined> {
+  return getDriver().get<Record<string, unknown>>(
+    `SELECT * FROM audit_log WHERE action = ? ORDER BY id DESC LIMIT 1`,
+    [action],
+  );
 }
 
 describe('Admin feature flags (#494/#805)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     clearFeatureFlagCache();
     // Ensure saved_searches exists and is enabled for tests that depend on it
-    seedFlag(FeatureFlags.SAVED_SEARCHES, 1);
+    await seedFlag(FeatureFlags.SAVED_SEARCHES, 1);
     clearFeatureFlagCache();
   });
 
@@ -96,9 +96,9 @@ describe('Admin feature flags (#494/#805)', () => {
 
     it('returns seeded flags: player_tokens_enabled, saved_search_alerts_enabled, graphql_enabled', async () => {
       // Ensure the seeded flags exist (migration 020 may not run in-memory — seed them directly)
-      seedFlag('player_tokens_enabled', 0);
-      seedFlag('saved_search_alerts_enabled', 0);
-      seedFlag('graphql_enabled', 1);
+      await seedFlag('player_tokens_enabled', 0);
+      await seedFlag('saved_search_alerts_enabled', 0);
+      await seedFlag('graphql_enabled', 1);
 
       const res = await request(app)
         .get('/api/admin/feature-flags')
@@ -113,9 +113,10 @@ describe('Admin feature flags (#494/#805)', () => {
 
     it('always reflects DB state (cache is cleared before responding)', async () => {
       // Write directly to DB bypassing the cache
-      getDb()
-        .prepare(`UPDATE feature_flags SET enabled = 0 WHERE name = ?`)
-        .run(FeatureFlags.SAVED_SEARCHES);
+      await getDriver().run(
+        `UPDATE feature_flags SET enabled = 0 WHERE name = ?`,
+        [FeatureFlags.SAVED_SEARCHES],
+      );
 
       const res = await request(app)
         .get('/api/admin/feature-flags')
@@ -165,7 +166,7 @@ describe('Admin feature flags (#494/#805)', () => {
     });
 
     it('updates a flag and takes effect immediately without restart', async () => {
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
 
       const disableRes = await request(app)
         .put('/api/admin/feature-flags')
@@ -174,7 +175,7 @@ describe('Admin feature flags (#494/#805)', () => {
 
       expect(disableRes.status).toBe(200);
       expect(disableRes.body.data.enabled).toBe(false);
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
 
       const enableRes = await request(app)
         .put('/api/admin/feature-flags')
@@ -182,7 +183,7 @@ describe('Admin feature flags (#494/#805)', () => {
         .send({ name: FeatureFlags.SAVED_SEARCHES, enabled: true });
 
       expect(enableRes.status).toBe(200);
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
     });
 
     it('persists flag state to the database', async () => {
@@ -193,12 +194,13 @@ describe('Admin feature flags (#494/#805)', () => {
 
       clearFeatureFlagCache();
 
-      const row = getDb()
-        .prepare('SELECT enabled FROM feature_flags WHERE name = ?')
-        .get(FeatureFlags.SAVED_SEARCHES) as { enabled: number };
+      const row = (await getDriver().get(
+        'SELECT enabled FROM feature_flags WHERE name = ?',
+        [FeatureFlags.SAVED_SEARCHES],
+      )) as { enabled: number };
 
       expect(row.enabled).toBe(0);
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
     });
 
     it('writes a feature_flag_toggled audit entry', async () => {
@@ -207,7 +209,7 @@ describe('Admin feature flags (#494/#805)', () => {
         .set('Authorization', `Bearer ${getAdminToken()}`)
         .send({ name: FeatureFlags.SAVED_SEARCHES, enabled: false });
 
-      const auditRow = latestAuditRow('feature_flag_toggled');
+      const auditRow = await latestAuditRow('feature_flag_toggled');
       expect(auditRow).toBeDefined();
 
       const params = JSON.parse(auditRow!.query_params as string) as Record<string, unknown>;
@@ -262,7 +264,7 @@ describe('Admin feature flags (#494/#805)', () => {
     });
 
     it('toggles a flag by name in URL and returns 200', async () => {
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
 
       const res = await request(app)
         .put(`/api/admin/feature-flags/${FeatureFlags.SAVED_SEARCHES}`)
@@ -276,7 +278,7 @@ describe('Admin feature flags (#494/#805)', () => {
       expect(res.body.data.updated_by).toBe(ADMIN_WALLET);
 
       // Takes effect immediately in process
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
     });
 
     it('persists toggled state to the DB', async () => {
@@ -287,9 +289,10 @@ describe('Admin feature flags (#494/#805)', () => {
 
       clearFeatureFlagCache();
 
-      const row = getDb()
-        .prepare('SELECT enabled FROM feature_flags WHERE name = ?')
-        .get(FeatureFlags.SAVED_SEARCHES) as { enabled: number };
+      const row = (await getDriver().get(
+        'SELECT enabled FROM feature_flags WHERE name = ?',
+        [FeatureFlags.SAVED_SEARCHES],
+      )) as { enabled: number };
 
       expect(row.enabled).toBe(0);
     });
@@ -300,7 +303,7 @@ describe('Admin feature flags (#494/#805)', () => {
         .set('Authorization', `Bearer ${getAdminToken()}`)
         .send({ enabled: false });
 
-      const auditRow = latestAuditRow('feature_flag_toggled');
+      const auditRow = await latestAuditRow('feature_flag_toggled');
       expect(auditRow).toBeDefined();
 
       const params = JSON.parse(auditRow!.query_params as string) as Record<string, unknown>;

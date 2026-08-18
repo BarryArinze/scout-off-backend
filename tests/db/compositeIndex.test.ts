@@ -14,8 +14,8 @@ import { SqliteDriver } from '../../src/db/sqlite-driver';
 // Helpers
 // ---------------------------------------------------------------------------
 
-function migrate(db: Database.Database): void {
-  runMigrations(new SqliteDriver(db));
+async function migrate(db: Database.Database): Promise<void> {
+  await runMigrations(new SqliteDriver(db));
 }
 
 /** Return the set of index names present in the DB. */
@@ -105,9 +105,9 @@ function seedData(db: Database.Database): void {
 describe('Migration 013 — composite indexes (#821)', () => {
   let db: Database.Database;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     db = new Database(':memory:');
-    migrate(db);
+    await migrate(db);
     seedData(db);
     // Run ANALYZE so the query planner has up-to-date statistics.
     db.exec('ANALYZE');
@@ -236,8 +236,8 @@ describe('Migration 013 — composite indexes (#821)', () => {
   // ── 3. Idempotency — migration applies exactly once ───────────────────────
 
   describe('migration 013 is idempotent', () => {
-    it('running migrations again does not throw and does not duplicate indexes', () => {
-      expect(() => migrate(db)).not.toThrow();
+    it('running migrations again does not throw and does not duplicate indexes', async () => {
+      await expect(migrate(db)).resolves.not.toThrow();
 
       const rows = db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'")
