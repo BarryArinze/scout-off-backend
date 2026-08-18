@@ -267,6 +267,13 @@ impl PlayerTokenContract {
             return Err(Error::NotInitialized);
         }
 
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
         if transfer_fee_xlm == 0 {
             return Err(Error::InvalidInput);
         }
@@ -564,5 +571,17 @@ mod tests {
         let env = Env::default();
         let (client, admin) = setup(&env);
         assert!(client.try_initialize(&admin).is_err());
+    }
+    #[test]
+    fn distribute_fee_without_admin_auth_fails() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let buyer = Address::generate(&env);
+        client.issue_tokens(&7u64, &100u64);
+        client.buy_token(&7u64, &1u64, &buyer);
+        
+        // Pass empty auth list to override `env.mock_all_auths()`
+        let result = client.mock_auths(&[]).try_distribute_fee(&7u64, &1_000u128, &0u32);
+        assert!(result.is_err());
     }
 }
