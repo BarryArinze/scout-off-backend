@@ -1053,6 +1053,12 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
         case 'NO_FEES':
           res.status(409).json({ success: false, error: 'No fees available to withdraw', code: ErrorCode.NO_FEES });
           return;
+        case 'INSUFFICIENT_FEES':
+          // Legacy path withdraws the full balance, so this only happens when
+          // the live balance dropped after the amount was resolved — the
+          // requested (full) amount is no longer available.
+          res.status(409).json({ success: false, error: 'No fees available to withdraw', code: ErrorCode.NO_FEES });
+          return;
         case 'CONTRACT_PAUSED':
           res.status(409).json({ success: false, error: 'Contract is paused; withdrawal not available', code: ErrorCode.CONTRACT_PAUSED });
           return;
@@ -1614,9 +1620,16 @@ export async function importValidators(req: Request, res: Response, next: NextFu
 //                amountStroops > 0 AND ≤ on-chain get_fee_balance()
 //  3. Multi-sig: if ADMIN_THRESHOLD > 1 → propose and return 202
 //  4. Execute:   withdraw_fees(admin, treasury_address, amount_stroops)
+//                — the validated amount is threaded into the contract call
+//                (not silently discarded) and enforced on-chain
 //  5. DB record: fee_withdrawals row (idempotency_key, treasury_address,
-//                amount_stroops, tx_hash, admin_wallet, created_at)
-//  6. Audit log: fee_withdrawal event
+//                amount_stroops, tx_hash, admin_wallet, created_at) where
+//                amount_stroops stores the ACTUAL on-chain-confirmed amount
+//                parsed from the transaction result — the requested amount
+//                remains in the audit log for reconciliation (see below)
+//  6. Audit log: fee_withdrawal event carrying both the requested
+//                (amountStroops) and actual (amount) withdrawal amounts, so
+//                the audit trail records what was requested AND what moved
 //  7. Idempotency: Idempotency-Key header handled by the idempotency
 //                  middleware applied in the route; the controller also
 //                  writes to the fee_withdrawals idempotency_key column
@@ -1798,14 +1811,21 @@ export async function withdrawFeesV2Controller(
       `[admin] action=withdraw_fees admin=${adminWallet} treasury=${treasuryAddress} amount=${amountStroops}`,
     );
 
-    const result: FeeWithdrawalResult = await stellarWithdrawFees(treasuryAddress);
+    const result: FeeWithdrawalResult = await stellarWithdrawFees(treasuryAddress, amountStroops);
 
     // ── 7. DB record ──────────────────────────────────────────────────────────
+    // amount_stroops stores the ACTUAL on-chain-confirmed amount (parsed from
+    // the transaction result by the stellar service), NOT the requested value:
+    // the DB is the record of what actually left the contract. The requested
+    // amountStroops is preserved in the audit log below, so the two can be
+    // reconciled — they normally match, but if the live balance dropped
+    // between validation and execution the contract enforces the lower amount
+    // and the DB reflects reality while the audit log keeps the request.
     try {
       insertFeeWithdrawal({
         idempotencyKey,
         treasuryAddress,
-        amountStroops,
+        amountStroops: result.amount,
         txHash: result.transactionId,
         adminWallet,
         createdAt: new Date().toISOString(),
@@ -1821,6 +1841,11 @@ export async function withdrawFeesV2Controller(
     }
 
     // ── 8. Audit log ──────────────────────────────────────────────────────────
+    // Carries BOTH the requested amount (amountStroops) and the actual
+    // on-chain-confirmed amount (amount, parsed from the tx result) so the
+    // audit trail reflects what was actually withdrawn, and so the requested
+    // vs actual discrepancy is preserved for reconciliation against the
+    // fee_withdrawals row.
     logAuditEvent({
       action: 'fee_withdrawal_attempt',
       adminWallet,
@@ -1888,6 +1913,13 @@ export async function withdrawFeesV2Controller(
             success: false,
             error: 'Invalid treasury address',
             code: ErrorCode.INVALID_RECIPIENT,
+          });
+          return;
+        case 'INSUFFICIENT_FEES':
+          res.status(422).json({
+            success: false,
+            error: 'Requested withdrawal amount exceeds the available fee balance',
+            code: ErrorCode.VALIDATION_ERROR,
           });
           return;
         case 'NETWORK_ERROR':

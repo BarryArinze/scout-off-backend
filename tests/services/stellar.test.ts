@@ -22,6 +22,9 @@ const mockSendTransaction = jest.fn();
 const mockGetTransaction  = jest.fn();
 const mockAssembleBuild   = jest.fn().mockReturnValue({ sign: jest.fn() });
 const mockAssemble        = jest.fn().mockReturnValue({ build: mockAssembleBuild });
+// Shared across every Contract instance so tests can assert on the Soroban
+// function name + arguments the service passes to the contract.
+const mockContractCall    = jest.fn().mockReturnValue({ type: 'invokeHostFunction' });
 
 jest.mock('@stellar/stellar-sdk', () => ({
   SorobanRpc: {
@@ -47,7 +50,7 @@ jest.mock('@stellar/stellar-sdk', () => ({
     PUBLIC:  'Public Global Stellar Network ; September 2015',
   },
   Contract: jest.fn().mockImplementation(() => ({
-    call: jest.fn().mockReturnValue({ type: 'invokeHostFunction' }),
+    call: mockContractCall,
   })),
   TransactionBuilder: jest.fn().mockImplementation(() => ({
     addOperation: jest.fn().mockReturnThis(),
@@ -85,6 +88,7 @@ import {
   registerValidatorOnChain,
   renewSubscription,
   submitContactPayment,
+  withdrawFees,
   PaymentError,
   FeeWithdrawalError,
   ValidatorActionError,
@@ -1278,6 +1282,191 @@ describe('submitContactPayment', () => {
       () => submitContactPayment(WALLET, PLAYER_ID),
       (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
     );
+  });
+});
+
+// ─── withdrawFees ─────────────────────────────────────────────────────────────
+// The contract's withdraw_fees(admin, amount) now takes an explicit amount and
+// enforces it on-chain; these tests verify the service encodes the requested
+// amount (i128) into the Soroban call and parses the actually-withdrawn amount
+// from the confirmed transaction result.
+
+describe('withdrawFees', () => {
+  it('submits a real Soroban transaction and returns the confirmed withdrawal amount', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-tx-001' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: {} });
+    sdk.scValToNative.mockReturnValue(250n);
+
+    const result = await withdrawFees(WALLET, '250');
+
+    expect(result.transactionId).toBe('fee-tx-001');
+    expect(result.recipient).toBe(WALLET);
+    expect(result.amount).toBe('250');
+    expect(result.token).toBe('XLM');
+    expect(mockGetAccount).toHaveBeenCalled();
+    expect(mockSimulate).toHaveBeenCalled();
+    expect(mockAssemble).toHaveBeenCalled();
+    expect(mockSendTransaction).toHaveBeenCalled();
+    expect(mockGetTransaction).toHaveBeenCalledWith('fee-tx-001');
+  });
+
+  it('encodes the requested amount as an i128 argument in the withdraw_fees call', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-tx-amount' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: {} });
+    sdk.scValToNative.mockReturnValue(250n);
+
+    await withdrawFees(WALLET, '250');
+
+    // The amount must reach the contract call — never silently discarded.
+    expect(sdk.nativeToScVal).toHaveBeenCalledWith(250n, { type: 'i128' });
+    expect(sdk.Address.fromString).toHaveBeenCalledWith(WALLET);
+    expect(mockContractCall).toHaveBeenCalledWith(
+      'withdraw_fees',
+      expect.anything(),
+      expect.anything(),
+    );
+    // The third argument is the nativeToScVal-produced i128 scval.
+    expect(mockContractCall.mock.calls[0][2]).toBe(sdk.nativeToScVal.mock.results.at(-1).value);
+  });
+
+  it('omitting the amount fetches the full balance and withdraws it (legacy behaviour)', async () => {
+    // getFeeBalance() performs its own simulateTransaction first, then the
+    // withdrawal simulates again — two simulation calls in total.
+    mockSimulate
+      .mockResolvedValueOnce({ result: { retval: {} } })
+      .mockResolvedValueOnce({ result: { retval: {} } });
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-tx-full' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: {} });
+    // First scValToNative → the live balance (500n); second → tx return value (250n).
+    sdk.scValToNative.mockReturnValueOnce(500n).mockReturnValue(250n);
+
+    const result = await withdrawFees(WALLET);
+
+    expect(result.amount).toBe('250');
+    // The full balance was encoded as the withdrawal amount.
+    expect(sdk.nativeToScVal).toHaveBeenCalledWith(500n, { type: 'i128' });
+  });
+
+  it('throws NO_FEES without touching the RPC when the resolved balance is zero', async () => {
+    mockSimulate.mockResolvedValue({ result: { retval: {} } });
+    sdk.scValToNative.mockReturnValue(0n);
+
+    await expect(withdrawFees(WALLET)).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'NO_FEES',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws NO_FEES for an explicit non-positive amount without touching the RPC', async () => {
+    await expect(withdrawFees(WALLET, '0')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'NO_FEES',
+    });
+    expect(mockGetAccount).not.toHaveBeenCalled();
+  });
+
+  it('throws INVALID_RECIPIENT for an empty recipient without touching the RPC', async () => {
+    await expect(withdrawFees('', '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'INVALID_RECIPIENT',
+    });
+    expect(mockGetAccount).not.toHaveBeenCalled();
+  });
+
+  it('throws NO_FEES when the confirmed transaction return value is zero', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-tx-zero' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: {} });
+    sdk.scValToNative.mockReturnValue(0n);
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'NO_FEES',
+    });
+  });
+
+  it('throws INSUFFICIENT_FEES when the simulation reports contract error #7 (amount > balance)', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Contract error: #7' });
+
+    await expect(withdrawFees(WALLET, '999999')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'INSUFFICIENT_FEES',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws CONTRACT_PAUSED when the simulation reports contract error #10', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Contract error: #10' });
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'CONTRACT_PAUSED',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws INSUFFICIENT_FEES when sendTransaction reports contract error #7', async () => {
+    mockSendTransaction.mockResolvedValue({
+      status: 'ERROR',
+      errorResult: 'Contract error: #7',
+      hash: 'fee-err-hash',
+    });
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'INSUFFICIENT_FEES',
+    });
+    expect(mockGetTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws INSUFFICIENT_FEES when the confirmed tx XDR reports contract error #7', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-fail-fee' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'error-payload-#7-encoded' });
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'INSUFFICIENT_FEES',
+    });
+  });
+
+  it('throws NETWORK_ERROR when the confirmed transaction FAILED for an unrecognized reason', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-fail-generic' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'some other error' });
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'NETWORK_ERROR',
+    });
+  });
+
+  it('throws NETWORK_ERROR when getAccount rejects (RPC unreachable)', async () => {
+    mockGetAccount.mockRejectedValue(new Error('network unreachable'));
+
+    await expectRejectionAfterRetries(
+      () => withdrawFees(WALLET, '100'),
+      (p) => expect(p).rejects.toMatchObject({ name: 'FeeWithdrawalError', code: 'NETWORK_ERROR' }),
+    );
+  });
+
+  it('polls getTransaction until status is no longer NOT_FOUND', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-poll-hash' });
+    mockGetTransaction
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'SUCCESS', returnValue: {} });
+    sdk.scValToNative.mockReturnValue(100n);
+
+    jest.useFakeTimers();
+    const promise = withdrawFees(WALLET, '100');
+    await jest.runAllTimersAsync();
+    const result = await promise;
+    jest.useRealTimers();
+
+    expect(result.transactionId).toBe('fee-poll-hash');
+    expect(result.amount).toBe('100');
+    expect(mockGetTransaction).toHaveBeenCalledTimes(3);
   });
 });
 
