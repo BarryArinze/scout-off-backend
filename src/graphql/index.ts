@@ -16,85 +16,12 @@
 import { createYoga, createSchema } from 'graphql-yoga';
 import { useValidationRule } from '@envelop/core';
 import { Application } from 'express';
-import { GraphQLError, ValidationContext, ASTNode, Kind } from 'graphql';
+import { GraphQLError, Kind } from 'graphql';
 import { typeDefs } from './schema';
 import { resolvers } from './resolvers';
 import { createContext } from './context';
+import { createDepthLimitRule, createQueryCostRule, MAX_DEPTH, MAX_QUERY_COST } from './validation';
 import { logger } from '../utils/logger';
-
-const MAX_DEPTH = 5;
-
-// ─── Custom depth-limit validation rule ──────────────────────────────────────
-
-/**
- * Returns a GraphQL validation rule that rejects queries deeper than maxDepth.
- *
- * Depth is measured as the maximum nesting of selection sets in a single
- * operation. Fragment spreads are followed so inlined and named fragments
- * are both counted. Introspection fields (__schema, __type) are excluded
- * because graphql-yoga handles introspection before validation runs when
- * it is enabled, and we want depth-limit to apply only to data queries.
- */
-function createDepthLimitRule(maxDepth: number) {
-  return function depthLimitRule(context: ValidationContext) {
-    return {
-      OperationDefinition(operation: ASTNode) {
-        if (operation.kind !== Kind.OPERATION_DEFINITION) return;
-
-        const fragments = context.getDocument().definitions
-          .filter((d): d is import('graphql').FragmentDefinitionNode =>
-            d.kind === Kind.FRAGMENT_DEFINITION,
-          )
-          .reduce<Record<string, import('graphql').FragmentDefinitionNode>>((acc, frag) => {
-            acc[frag.name.value] = frag;
-            return acc;
-          }, {});
-
-        function measureDepth(
-          node: import('graphql').SelectionSetNode | undefined,
-          depth: number,
-          visited: Set<string>,
-        ): number {
-          if (!node) return depth;
-          let max = depth;
-          for (const selection of node.selections) {
-            if (selection.kind === Kind.FIELD) {
-              // skip meta-fields
-              if (selection.name.value.startsWith('__')) continue;
-              const childDepth = measureDepth(selection.selectionSet, depth + 1, visited);
-              if (childDepth > max) max = childDepth;
-            } else if (selection.kind === Kind.INLINE_FRAGMENT) {
-              const childDepth = measureDepth(selection.selectionSet, depth, visited);
-              if (childDepth > max) max = childDepth;
-            } else if (selection.kind === Kind.FRAGMENT_SPREAD) {
-              const fragName = selection.name.value;
-              if (!visited.has(fragName) && fragments[fragName]) {
-                visited.add(fragName);
-                const childDepth = measureDepth(
-                  fragments[fragName].selectionSet,
-                  depth,
-                  visited,
-                );
-                if (childDepth > max) max = childDepth;
-              }
-            }
-          }
-          return max;
-        }
-
-        const depth = measureDepth(operation.selectionSet, 0, new Set());
-        if (depth > maxDepth) {
-          context.reportError(
-            new GraphQLError(
-              `Query depth ${depth} exceeds maximum allowed depth of ${maxDepth}.`,
-              { nodes: [operation] },
-            ),
-          );
-        }
-      },
-    };
-  };
-}
 
 // ─── Production introspection-blocking plugin ────────────────────────────────
 
@@ -149,9 +76,12 @@ export function mountGraphQL(app: Application): void {
       resolvers,
     }),
     context: createContext,
-    // Depth limiting via @envelop/core useValidationRule; introspection blocking via onExecute plugin
+    // Depth limiting + query-cost limiting via @envelop/core useValidationRule
+    // (shared rule implementations in src/graphql/validation.ts); introspection
+    // blocking via onExecute plugin.
     plugins: [
       useValidationRule(createDepthLimitRule(MAX_DEPTH)),
+      useValidationRule(createQueryCostRule(MAX_QUERY_COST)),
       ...(isProduction ? [createBlockIntrospectionPlugin()] : []),
     ],
     // graphql-yoga manages its own /graphql path
@@ -171,6 +101,6 @@ export function mountGraphQL(app: Application): void {
   app.use('/graphql', yoga as any);
 
   logger.info(
-    `[graphql] endpoint mounted at /graphql (introspection=${!isProduction}, maxDepth=${MAX_DEPTH})`,
+    `[graphql] endpoint mounted at /graphql (introspection=${!isProduction}, maxDepth=${MAX_DEPTH}, maxQueryCost=${MAX_QUERY_COST})`,
   );
 }

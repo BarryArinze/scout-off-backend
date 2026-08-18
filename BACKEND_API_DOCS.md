@@ -86,6 +86,42 @@ Authorization: Bearer <token>
 
 Tokens are issued after a successful SEP-10 Stellar wallet challenge/response flow.
 
+### API keys & scopes (#1019)
+
+Server-to-server integrations can authenticate with a long-lived API key
+instead of a JWT:
+
+```
+X-API-Key: <raw-key>
+```
+
+API keys are issued via `POST /api/scouts/:wallet/api-keys` and revoked via
+`DELETE /api/scouts/:wallet/api-keys/:id`. Only a salted hash is stored.
+
+#### Scope enforcement
+
+Keys without an explicit `scopes` list (legacy keys) keep **unrestricted**
+scout-level access — backward compatible with keys issued before scope
+enforcement. Keys issued with an explicit `scopes` list are **restricted**:
+mutating endpoints require the matching scope and return `403` with
+`reason.requiredScope` otherwise.
+
+| Scope | Enforced on |
+|-------|-------------|
+| `write:contacts` | `POST /scouts/:wallet/contacts/:playerId/unlock` |
+| `write:subscriptions` | `POST/PUT/DELETE /scouts/:wallet/subscribe` |
+| `write:trial_offers` | `POST /scouts/:wallet/trial-offer` and `/trial-offers` |
+| `write:webhooks` | `POST /scouts/:wallet/webhooks`, `DELETE .../:id`, `POST .../:id/test` |
+| `write:api_keys` | `POST /scouts/:wallet/api-keys`, `DELETE .../:id` |
+| `write:bookmarks` | bookmark & bookmark-folder mutations |
+| `write:notes` | scout-note mutations |
+| `write:saved_searches` | saved-search mutations |
+| `write:player_tokens` | `POST /players/:playerId/tokens/buy` |
+| `read:subscription` | `GET /scouts/:wallet/subscription` |
+
+REST and GraphQL share the same scope contract (`src/utils/apiKeyScopes.ts`).
+See `docs/auth.md` for the full vocabulary and legacy-compatibility rules.
+
 ---
 
 ## Endpoints
@@ -313,7 +349,12 @@ curl -X GET "http://localhost:4000/api/players?region=West%20Africa&position=Mid
 
 #### `GET /api/players/:playerId`
 
-Retrieve a single player profile. No auth required.
+Retrieve a single player profile. No auth required for **active** players.
+
+**Deactivated players** are hidden from everyone except the profile owner
+(auth wallet matching the player's `player_id` or `wallet`) and admins — the
+same shared decision (`src/utils/playerAccess.ts`) used by the milestones
+endpoints and GraphQL. Unauthorized callers receive `404`.
 
 **Response `200`**
 
@@ -349,7 +390,12 @@ curl -X GET "http://localhost:4000/api/players/abc123"
 
 #### `GET /api/players/:playerId/milestones`
 
-Tamper-proof milestone history for a player. No auth required.
+Tamper-proof milestone history for a player. No auth required for **active**
+players.
+
+**Deactivated players** follow the same shared authorization as `GET
+/api/players/:playerId` (`src/utils/playerAccess.ts`): owner/admin only,
+otherwise `404` — identical behavior in REST and GraphQL.
 
 **Response `200`**
 
@@ -930,6 +976,42 @@ curl -X GET "http://localhost:4000/api/admin/audit?startDate=2024-01-01&endDate=
 
 ---
 
+## Server-Sent Events (`GET /api/events/stream`) (#1019)
+
+Long-lived SSE stream of contract events relevant to the authenticated wallet.
+Authentication: Bearer JWT (any role) or `X-API-Key`. Optional query params:
+`eventType` (one type) and `playerId` (narrowing). Wallet isolation is always
+enforced; a `: ping` keep-alive comment is sent every
+`SSE_KEEPALIVE_INTERVAL_MS` (default 15 s).
+
+**Live authorization enforcement:**
+
+- Revoking the connection's JWT (logout / admin revocation) emits a terminal
+  `event: session_ended` (reason `token_revoked`) and closes the stream.
+- Blocklisting the wallet (see `docs/auth.md`) emits `session_ended` (reason
+  `wallet_blocklisted`) and closes it; blocklisted wallets also get `403` on
+  new connections.
+- No protected events are delivered after termination.
+
+**Detection bound:** immediate for revocations/blocklists in the same process;
+≤ `SSE_AUTH_SWEEP_INTERVAL_MS` (default 30 s) for changes persisted by
+another instance (one sweep query per process — never per keep-alive tick).
+
+## GraphQL (`POST /graphql`) (#1019)
+
+Read-only GraphQL endpoint sharing the REST authorization model:
+
+- **API keys:** `X-API-Key` is accepted; restricted keys enforce
+  `read:milestones` (milestones queries) and `read:subscription`
+  (`scoutSubscription`).
+- **Milestones:** deactivated players follow the same owner/admin-only
+  decision as REST (`src/utils/playerAccess.ts`); unauthorized callers get a
+  `NOT_FOUND` error (root) or no data (nested `Player.milestones`).
+- **Abuse control:** depth limit (`MAX_DEPTH = 5`) plus a query-cost limit
+  (`MAX_QUERY_COST = 135`) that counts every field node — aliases included —
+  so a single request with ~20+ aliased expensive operations is rejected
+  with a `QUERY_COST_EXCEEDED` error instead of bypassing the depth limit.
+
 ## Stubbed Routes
 
 The following routes currently return data sourced entirely from indexed on-chain events and have no corresponding write/mutation endpoint in the backend:
@@ -1015,7 +1097,7 @@ When a request triggers a Soroban contract error, the API translates the on-chai
 | 5    | MilestoneNotFound  | 404 Not Found            | Milestone ID does not exist                    | Refresh the milestone list and verify the ID                    |
 | 6    | AlreadyVerified    | 409 Conflict             | Milestone already approved                     | No duplicate approvals needed; check milestone status           |
 | 7    | InsufficientFee    | 402 Payment Required     | Payment is below the required contact fee      | Fetch the current fee via `get_contact_fee()` and retry         |
-| 8    | NotSubscribed      | 402 Payment Required     | Scout has no active subscription               | Call `subscribe` before browsing premium data                   |
+| 8    | NotSubscribed      | 402 Payment Required     | Scout has no active subscription               | Call `subscribe` before browsing premium data; or attempting to cancel an already-cancelled or expired subscription |
 | 9    | Unauthorized       | 401 Unauthorized         | Caller is not authorized for this action       | Confirm you are signing with the correct Stellar account        |
 | 10   | ContractPaused     | 503 Service Unavailable  | Contract is paused by the admin                | Wait for admin to call `unpause_contract()`                     |
 | 11   | Overflow           | 500 Internal Server Error| Arithmetic overflow in fee calculation         | Use amounts within the safe u128 range                          |
@@ -1030,5 +1112,53 @@ When a request triggers a Soroban contract error, the API translates the on-chai
 | `POST /api/validators/milestone` | 2 (NotInitialized), 4 (InvalidValidator), 10 (ContractPaused) |
 | `POST /api/scouts/:wallet/contacts/:playerId/unlock` | 7 (InsufficientFee), 8 (NotSubscribed), 9 (Unauthorized), 10 (ContractPaused) |
 | `GET /api/scouts/:wallet/subscription` | 8 (NotSubscribed) |
-| `POST /api/admin/contract/pause` | 9 (Unauthorized), 1 (AlreadyInitialized) |
-| `POST /api/admin/contract/unpause` | 9 (Unauthorized), 10 (ContractPaused) |
+| `DELETE /api/scouts/:wallet/subscription` | 8 (NotSubscribed — no active subscription or already cancelled), 9 (Unauthorized), 10 (ContractPaused) |
+| `GET /api/admin/fees` | 10 (ContractPaused) |
+| `POST /api/admin/contract/pause` | 9 (Unauthorized), 2 (NotInitialized) |
+| `POST /api/admin/contract/unpause` | 9 (Unauthorized), 2 (NotInitialized) |
+
+### Cancel Subscription
+
+`DELETE /api/scouts/:wallet/subscription` — Cancels a scout's active on-chain subscription.
+
+**On-chain semantics:**
+- The `cancel_subscription(scout)` entrypoint on the `subscription` contract marks the subscription as expired at the current ledger (no refund).
+- Returns HTTP `402` with error code `NOT_SUBSCRIBED` (contract code 8) when:
+  - the scout has never subscribed, or
+  - the subscription has already expired naturally, or
+  - the subscription was previously cancelled.
+- The cancel is idempotent in the sense that a successfully cancelled subscription cannot be cancelled again (subsequent attempts return `NOT_SUBSCRIBED`).
+- After cancellation `is_subscribed(scout)` returns `false` immediately.
+
+**Response (success):**
+```json
+{ "success": true, "transactionId": "abc123..." }
+```
+
+**Response (no subscription):**
+```json
+{ "success": false, "error": "Scout has no active on-chain subscription", "code": "NOT_SUBSCRIBED" }
+```
+
+### Pause / Unpause Contract
+
+`POST /api/admin/contract/pause` / `POST /api/admin/contract/unpause`
+
+These endpoints invoke `pause(admin)` / `unpause(admin)` on the **subscription** contract via the platform keypair. The subscription contract's pause flag gates `subscribe`, `pay_to_contact`, and `withdraw_fees`. The `register` and `connection` contracts each have their own `pause`/`unpause` entrypoints that must be called separately if a full platform pause is needed.
+
+**Behavior:**
+- Calling `pause` when already paused is a no-op (returns success).
+- Calling `unpause` when already active is a no-op (returns success).
+- Only the admin address configured at contract initialization may call these.
+- The platform backend routes these calls to the **subscription contract** (`SUBSCRIPTION_CONTRACT_ID`).
+
+### Fee Balance Query
+
+`GET /api/admin/fees` — Returns the accumulated platform fee balance from the subscription contract.
+
+The underlying call is `get_fee_balance() → i128` on the `subscription` contract, which is a read-only simulation (no transaction submitted, no keypair required). The balance represents total fees accumulated from `subscribe` and `pay_to_contact` calls since the last `withdraw_fees`.
+
+**Response:**
+```json
+{ "balanceStroops": "5000000", "balanceXLM": "0.5" }
+```

@@ -24,7 +24,7 @@ import { acceptTrialOffer, rejectTrialOffer, rejectOfferSchema } from "../contro
 import { getPlayerTokenHolders, buyPlayerToken } from "../controllers/playerTokenController";
 
 import { validateBody, validateQuery } from "../middleware/validate";
-import { requireRole, optionalAuth } from "../middleware/auth";
+import { requireRole, optionalAuth, requireApiKeyScope } from "../middleware/auth";
 import { requireOwner } from "../middleware/requireOwner";
 import { methodNotAllowed } from "../middleware/methodNotAllowed";
 
@@ -211,7 +211,7 @@ router.route("/:playerId/tokens")
  * @auth Bearer (scout or player role required)
  */
 router.route("/:playerId/tokens/buy")
-  .post(requireRole("scout"), buyPlayerToken)
+  .post(requireRole("scout"), requireApiKeyScope("write:player_tokens"), buyPlayerToken)
   .all(methodNotAllowed(['POST']));
 
 export default router;
