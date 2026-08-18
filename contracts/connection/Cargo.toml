@@ -14,4 +14,5 @@ scout-off-shared = { path = "../shared" }
 soroban-sdk = { workspace = true, features = ["testutils"] }
 register = { path = "../register" }
 subscription = { path = "../subscription" }
+progress = { path = "../progress" }
 proptest = { workspace = true }

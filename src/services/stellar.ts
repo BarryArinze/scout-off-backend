@@ -99,7 +99,7 @@ export async function isSubscribed(
       }
 
       try {
-        const contract = new Contract(config.contractId);
+        const contract = new Contract(config.subscriptionContractId);
         // Use a random ephemeral keypair as the simulation source — no on-chain
         // auth is required for this view-only call, and we never submit the tx.
         const ephemeral = Keypair.random();
@@ -186,7 +186,7 @@ export async function submitContactPayment(
         throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
 
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.subscriptionContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -316,7 +316,7 @@ export async function logTrialOffer(
         throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
 
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.connectionContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -482,7 +482,7 @@ export async function withdrawFees(recipient: string): Promise<FeeWithdrawalResu
         throw new FeeWithdrawalError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
 
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.subscriptionContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -636,7 +636,7 @@ export async function purchaseSubscription(
         throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
 
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.subscriptionContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -783,7 +783,7 @@ export async function renewSubscription(
         throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
 
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.subscriptionContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -941,7 +941,7 @@ export async function cancelSubscriptionOnChain(
       const keypair = getPlatformKeypair();
 
       const account = await server.getAccount(keypair.publicKey());
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.subscriptionContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -1031,7 +1031,7 @@ export class ContractActionError extends Error {
  * Throws ContractActionError with code 'CONTRACT_NOT_PAUSED' if the simulation
  * indicates the contract is not currently paused (Soroban error code 10).
  */
-export async function unpauseContractOnChain(): Promise<ContractActionResult> {
+export async function unpauseContractOnChain(adminWallet: string): Promise<ContractActionResult> {
   return tracer.startActiveSpan('stellar.unpauseContractOnChain', async (span) => {
     span.setAttribute('stellar.contract_function', 'unpause');
     try {
@@ -1039,13 +1039,18 @@ export async function unpauseContractOnChain(): Promise<ContractActionResult> {
       const keypair = getPlatformKeypair();
 
       const account = await server.getAccount(keypair.publicKey());
-      const contract = new Contract(config.contractId);
+      // The subscription contract is the primary lifecycle entrypoint; each
+      // deployed contract exposes its own pause(admin)/unpause(admin) — route
+      // to subscriptionContractId which is the contract the admin manages for
+      // subscription-related pausing. The register contract exposes the same
+      // entrypoints for player-profile operations.
+      const contract = new Contract(config.subscriptionContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
         networkPassphrase: networkPassphrase(),
       })
-        .addOperation(contract.call('unpause'))
+        .addOperation(contract.call('unpause', Address.fromString(adminWallet).toScVal()))
         .setTimeout(30)
         .build();
 
@@ -1159,7 +1164,7 @@ export async function registerValidatorOnChain(
       const keypair = getPlatformKeypair();
 
       const account = await server.getAccount(keypair.publicKey());
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.progressContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -1238,7 +1243,7 @@ export async function registerValidatorOnChain(
  * precondition fails, so the client interprets the code based on which
  * action was invoked (mirrors unpauseContractOnChain's string matching).
  */
-export async function pauseContractOnChain(): Promise<ContractActionResult> {
+export async function pauseContractOnChain(adminWallet: string): Promise<ContractActionResult> {
   return tracer.startActiveSpan('stellar.pauseContractOnChain', async (span) => {
     span.setAttribute('stellar.contract_function', 'pause');
     try {
@@ -1246,13 +1251,13 @@ export async function pauseContractOnChain(): Promise<ContractActionResult> {
       const keypair = getPlatformKeypair();
 
       const account = await server.getAccount(keypair.publicKey());
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.subscriptionContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
         networkPassphrase: networkPassphrase(),
       })
-        .addOperation(contract.call('pause'))
+        .addOperation(contract.call('pause', Address.fromString(adminWallet).toScVal()))
         .setTimeout(30)
         .build();
 
@@ -1338,7 +1343,7 @@ export async function updateProfile(
         throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
 
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.registerContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -1470,7 +1475,7 @@ export async function queryMilestones(playerId: string): Promise<OnChainMileston
       }
 
       try {
-        const contract = new Contract(config.contractId);
+        const contract = new Contract(config.progressContractId);
         // Use a random ephemeral keypair as the simulation source — no on-chain
         // auth is required for this view-only call, and we never submit the tx.
         const ephemeral = Keypair.random();
@@ -1552,7 +1557,7 @@ export async function revokeValidatorOnChain(
       const keypair = getPlatformKeypair();
 
       const account = await server.getAccount(keypair.publicKey());
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.progressContractId);
 
       const tx = new TransactionBuilder(account, {
         fee: BASE_FEE,
@@ -1650,7 +1655,7 @@ export async function getFeeBalance(): Promise<bigint> {
   return tracer.startActiveSpan('stellar.getFeeBalance', async (span) => {
     span.setAttribute('stellar.contract_function', 'get_fee_balance');
     try {
-      const contract = new Contract(config.contractId);
+      const contract = new Contract(config.subscriptionContractId);
       const ephemeral = Keypair.random();
       const sourceAccount = new Account(ephemeral.publicKey(), '0');
 

@@ -141,13 +141,17 @@ readinessProbe:
 # -----------------------------------------------------------------------------
 # Kubernetes Secret reference
 #
-# Sensitive values (CONTRACT_ID, JWT_SECRET) are sourced from a pre-existing
+# Sensitive values (contract IDs, JWT_SECRET) are sourced from a pre-existing
 # Kubernetes Secret named "scout-off-secrets". Create it before deploying:
 #
 #   kubectl create secret generic scout-off-secrets \
-#     --from-literal=CONTRACT_ID=<value> \
+#     --from-literal=REGISTER_CONTRACT_ID=<value> \
+#     --from-literal=PROGRESS_CONTRACT_ID=<value> \
+#     --from-literal=SUBSCRIPTION_CONTRACT_ID=<value> \
+#     --from-literal=CONNECTION_CONTRACT_ID=<value> \
 #     --from-literal=JWT_SECRET=<value>
 #
+# CONTRACT_ID is also accepted for backward-compat single-contract deployments.
 # The secret name can be overridden here if your naming convention differs.
 # -----------------------------------------------------------------------------
 secretName: scout-off-secrets

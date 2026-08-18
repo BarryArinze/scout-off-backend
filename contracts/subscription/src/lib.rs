@@ -327,6 +327,146 @@ impl SubscriptionContract {
         bump_instance(&env);
         Ok(())
     }
+
+    // ── Pause / Unpause ────────────────────────────────────────────────────
+
+    /// Pause the contract, preventing all state-changing operations.
+    ///
+    /// Only the admin address set during [`initialize`] may call this function.
+    /// The guard is already wired into [`subscribe`], [`pay_to_contact`], and
+    /// [`withdraw_fees`] via [`is_paused`].  If the contract is already paused
+    /// the call is a no-op (returns `Ok`).
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::Unauthorized`] — Caller is not the admin.
+    pub fn pause(env: Env, admin: Address) -> Result<(), Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        scout_off_shared::storage::set_paused(&env, true);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    /// Unpause the contract, re-enabling all state-changing operations.
+    ///
+    /// Only the admin address may call this.  If the contract is not currently
+    /// paused the call is a no-op (returns `Ok`).
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::Unauthorized`] — Caller is not the admin.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(Error::Unauthorized);
+        }
+        scout_off_shared::storage::set_paused(&env, false);
+        bump_instance(&env);
+        Ok(())
+    }
+
+    // ── cancel_subscription ────────────────────────────────────────────────
+
+    /// Cancel the caller's active subscription, marking it as immediately expired.
+    ///
+    /// Semantics:
+    /// * The scout must have an active (non-expired) subscription; otherwise
+    ///   [`Error::NotSubscribed`] (code 8) is returned.
+    /// * No fee refund is issued — the scout forfeits the remaining subscription
+    ///   period.  This matches the documented no-refund policy.
+    /// * After cancellation [`is_subscribed`] returns `false` for this scout.
+    ///
+    /// The backend's `cancelSubscriptionOnChain` already maps error code 8 to
+    /// `SubscriptionError('NOT_SUBSCRIBED')`, so no backend change is needed
+    /// for the error path.
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    /// * [`Error::ContractPaused`] — Contract is paused.
+    /// * [`Error::NotSubscribed`] — Scout has no active subscription or it has
+    ///   already expired/been cancelled.
+    pub fn cancel_subscription(env: Env, scout: Address) -> Result<(), Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        if is_paused(&env) {
+            return Err(Error::ContractPaused);
+        }
+        scout.require_auth();
+
+        let sub_key = DataKey::Subscription(scout.clone());
+        let record: SubscriptionRecord = env
+            .storage()
+            .instance()
+            .get(&sub_key)
+            .ok_or(Error::NotSubscribed)?;
+
+        // Reject if the subscription is already expired or previously cancelled
+        // (expires_at == 0 is the sentinel we write below).
+        if env.ledger().sequence() >= record.expires_at || record.expires_at == 0 {
+            return Err(Error::NotSubscribed);
+        }
+
+        // Mark as cancelled by setting expires_at to the current ledger (= expired now).
+        let cancelled = SubscriptionRecord {
+            tier: record.tier,
+            expires_at: env.ledger().sequence(),
+            tx_hash: record.tx_hash,
+        };
+        env.storage().instance().set(&sub_key, &cancelled);
+
+        env.events().publish(
+            (Symbol::new(&env, "sub_cancelled"), scout.clone()),
+            (record.tier,),
+        );
+
+        bump_instance(&env);
+        Ok(())
+    }
+
+    // ── get_fee_balance ────────────────────────────────────────────────────
+
+    /// Return the current accumulated platform fee balance in stroops.
+    ///
+    /// This is a read-only query; it does not require authentication and does
+    /// not modify state.  The backend's `getFeeBalance()` calls this function
+    /// via `simulateTransaction`.
+    ///
+    /// Returns `0` when no fees have been accumulated (e.g. immediately after
+    /// `initialize`).
+    ///
+    /// # Errors
+    /// * [`Error::NotInitialized`] — Contract has not been initialized.
+    pub fn get_fee_balance(env: Env) -> Result<i128, Error> {
+        if !is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+        let balance: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::PlatformFeeBalance)
+            .unwrap_or(0);
+        Ok(balance)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -538,6 +678,133 @@ mod tests {
         let not_admin = Address::generate(&env);
         let result = client.try_set_platform_fee_bps(&not_admin, &250u32);
         assert!(result.is_err());
+    }
+
+    // ── pause / unpause ──────────────────────────────────────────────────────
+
+    #[test]
+    fn pause_and_unpause_round_trip() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        // Pause.
+        assert!(client.try_pause(&admin).is_ok());
+        // Operations should fail while paused.
+        let scout = Address::generate(&env);
+        fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
+        assert!(client.try_subscribe(&scout, &1u32, &30u32).is_err());
+        // Unpause.
+        assert!(client.try_unpause(&admin).is_ok());
+        // Operations should succeed again.
+        assert!(client.try_subscribe(&scout, &1u32, &30u32).is_ok());
+    }
+
+    #[test]
+    fn non_admin_cannot_pause() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        let non_admin = Address::generate(&env);
+        assert!(client.try_pause(&non_admin).is_err());
+    }
+
+    #[test]
+    fn non_admin_cannot_unpause() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        assert!(client.try_pause(&admin).is_ok());
+        let non_admin = Address::generate(&env);
+        assert!(client.try_unpause(&non_admin).is_err());
+    }
+
+    // ── cancel_subscription ──────────────────────────────────────────────────
+
+    #[test]
+    fn cancel_subscription_makes_scout_inactive() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        let scout = Address::generate(&env);
+        fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
+        client.subscribe(&scout, &1u32, &30u32);
+        assert!(client.is_subscribed(&scout));
+        // Cancel.
+        assert!(client.try_cancel_subscription(&scout).is_ok());
+        assert!(!client.is_subscribed(&scout));
+    }
+
+    #[test]
+    fn cancel_subscription_on_no_subscription_returns_not_subscribed() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        let scout = Address::generate(&env);
+        let result = client.try_cancel_subscription(&scout);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cancel_already_expired_subscription_returns_not_subscribed() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        let scout = Address::generate(&env);
+        fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
+        client.subscribe(&scout, &1u32, &1u32);
+        // Advance past expiry.
+        env.ledger().with_mut(|li| { li.sequence_number += LEDGERS_PER_DAY + 10; });
+        // Subscription is expired; cancel should return NotSubscribed.
+        let result = client.try_cancel_subscription(&scout);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cancel_subscription_when_paused_returns_paused_error() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        let scout = Address::generate(&env);
+        fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
+        client.subscribe(&scout, &1u32, &30u32);
+        client.pause(&admin);
+        let result = client.try_cancel_subscription(&scout);
+        assert!(result.is_err());
+    }
+
+    // ── get_fee_balance ──────────────────────────────────────────────────────
+
+    #[test]
+    fn get_fee_balance_returns_zero_before_any_payment() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        assert_eq!(client.get_fee_balance(), 0i128);
+    }
+
+    #[test]
+    fn get_fee_balance_increases_after_subscription() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        let scout = Address::generate(&env);
+        fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
+        client.subscribe(&scout, &1u32, &30u32);
+        let balance = client.get_fee_balance();
+        assert!(balance > 0, "fee balance must be positive after subscription");
+    }
+
+    #[test]
+    fn get_fee_balance_resets_to_zero_after_withdraw() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        let scout = Address::generate(&env);
+        fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
+        client.subscribe(&scout, &1u32, &30u32);
+        assert!(client.get_fee_balance() > 0);
+        client.withdraw_fees(&admin);
+        assert_eq!(client.get_fee_balance(), 0i128);
     }
 
     #[test]

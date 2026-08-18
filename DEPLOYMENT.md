@@ -9,7 +9,11 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 
 | Variable | Required | Notes |
 |---|---|---|
-| `CONTRACT_ID` | ✅ | Deployed Soroban contract address |
+| `CONTRACT_ID` | — | Legacy single-contract address (backward compat). Falls back as default for each per-contract var below. |
+| `REGISTER_CONTRACT_ID` | ✅ | Deployed `register` Soroban contract address |
+| `PROGRESS_CONTRACT_ID` | ✅ | Deployed `progress` Soroban contract address |
+| `SUBSCRIPTION_CONTRACT_ID` | ✅ | Deployed `subscription` Soroban contract address |
+| `CONNECTION_CONTRACT_ID` | ✅ | Deployed `connection` Soroban contract address |
 | `JWT_SECRET` | ✅ | Min 32 chars; rotate via dual-key window (see below) |
 | `JWT_SECRET_PREVIOUS` | — | Previous signing secret during rotation grace window |
 | `JWT_SECRET_PREVIOUS_UNTIL` | — | Absolute grace-window end (Unix seconds or ISO-8601). After this time previous tokens are rejected even if `JWT_SECRET_PREVIOUS` is still set |
@@ -34,6 +38,110 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `ADMIN_THRESHOLD` | — | Number of admin signatures required for high-value operations (default: `1`) |
 | `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS allowed origins (defaults per env: `*` in dev, `https://staging.scoutoff.io` in staging, `https://app.scoutoff.io,https://scoutoff.io` in prod) |
 | `ADMIN_IP_ALLOWLIST` | — | Comma-separated list of **IPv4** addresses/CIDR ranges allowed to reach admin endpoints (e.g. `192.168.1.0/24,10.0.0.1`). Unset/empty disables the check. IPv6 is not supported yet — any IPv6 client IP is rejected with 403 regardless of this setting (fail closed). |
+
+---
+
+## Multi-Contract Architecture
+
+ScoutOff deploys five separate Soroban contracts, each with its own on-chain address:
+
+| Contract | Env var | Purpose |
+|---|---|---|
+| `register` | `REGISTER_CONTRACT_ID` | Player profiles, progress levels |
+| `progress` | `PROGRESS_CONTRACT_ID` | Milestone submission and approval |
+| `subscription` | `SUBSCRIPTION_CONTRACT_ID` | Scout subscriptions, contact fees, fee balance |
+| `connection` | `CONNECTION_CONTRACT_ID` | Scout-player connections, trial offers |
+| `player_token` | _(not yet wired)_ | Player token contract (future) |
+
+### Deploying the contracts
+
+Deploy each crate to testnet (or mainnet), noting the resulting contract ID:
+
+```bash
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/register.wasm \
+  --source deployer --network testnet
+# → REGISTER_CONTRACT_ID=CABC...
+
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/progress.wasm \
+  --source deployer --network testnet
+# → PROGRESS_CONTRACT_ID=CDEF...
+
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/subscription.wasm \
+  --source deployer --network testnet
+# → SUBSCRIPTION_CONTRACT_ID=CGHI...
+
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/connection.wasm \
+  --source deployer --network testnet
+# → CONNECTION_CONTRACT_ID=CJKL...
+```
+
+### Initializing each contract
+
+```bash
+# register
+stellar contract invoke --id $REGISTER_CONTRACT_ID --source admin --network testnet \
+  -- initialize --admin $ADMIN_ADDR --token $TOKEN_ADDR --platform_fee_bps 500
+
+# progress (needs register address so it can cross-call update_progress_level)
+stellar contract invoke --id $PROGRESS_CONTRACT_ID --source admin --network testnet \
+  -- initialize --admin $ADMIN_ADDR --register_contract $REGISTER_CONTRACT_ID
+
+# subscription
+stellar contract invoke --id $SUBSCRIPTION_CONTRACT_ID --source admin --network testnet \
+  -- initialize --admin $ADMIN_ADDR --token $TOKEN_ADDR --platform_fee_bps 500
+
+# connection (needs register + subscription addresses)
+stellar contract invoke --id $CONNECTION_CONTRACT_ID --source admin --network testnet \
+  -- initialize --admin $ADMIN_ADDR \
+     --register_contract $REGISTER_CONTRACT_ID \
+     --subscription_contract $SUBSCRIPTION_CONTRACT_ID
+```
+
+### Registering authorized updaters
+
+Both `progress` and `connection` need permission to call `update_progress_level`
+on the `register` contract. Register each using the new `add_authorized_updater`
+entrypoint:
+
+```bash
+# Allow the progress contract to update player progress
+stellar contract invoke --id $REGISTER_CONTRACT_ID --source admin --network testnet \
+  -- add_authorized_updater --updater $PROGRESS_CONTRACT_ID
+
+# Allow the connection contract to update player progress (for trial offers)
+stellar contract invoke --id $REGISTER_CONTRACT_ID --source admin --network testnet \
+  -- add_authorized_updater --updater $CONNECTION_CONTRACT_ID
+```
+
+Both addresses will coexist in the allowlist — adding the second does not evict
+the first. Verify with:
+
+```bash
+stellar contract invoke --id $REGISTER_CONTRACT_ID --source any --network testnet \
+  -- get_authorized_updaters
+# → ["CDEF...", "CJKL..."]
+```
+
+### Pausing and unpausing
+
+Each contract (`register`, `subscription`, `connection`) exposes `pause(admin)`
+and `unpause(admin)` entrypoints that the backend routes to via the
+`pauseContractOnChain` / `unpauseContractOnChain` helpers in `stellar.ts`.
+The backend currently routes pause/unpause calls to the **subscription** contract.
+To pause all user-facing operations, call `pause` on each contract individually
+if needed.
+
+```bash
+stellar contract invoke --id $SUBSCRIPTION_CONTRACT_ID --source admin --network testnet \
+  -- pause --admin $ADMIN_ADDR
+```
+
+### Backward compatibility
+
+Single-contract deployments that set only `CONTRACT_ID` continue to work without
+changes. Each per-contract env var falls back to `CONTRACT_ID` when unset,
+preserving backward compatibility during staged migrations.
+
 
 ## Kubernetes / Helm Deployment
 

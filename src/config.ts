@@ -106,7 +106,33 @@ const config = {
     process.env.HORIZON_URL ?? 'https://horizon-testnet.stellar.org',
   sorobanRpcUrl:
     process.env.SOROBAN_RPC_URL ?? 'https://soroban-testnet.stellar.org',
-  contractId: required('CONTRACT_ID'),
+  /**
+   * Legacy single-contract ID — kept for backward compatibility with any code
+   * that has not yet been migrated to the per-contract IDs below.
+   * Points to the register contract by default when CONTRACT_ID is set.
+   * New code should use the specific per-contract IDs instead.
+   */
+  contractId: process.env.CONTRACT_ID ?? '',
+
+  // ── Per-contract IDs (multi-contract architecture) ──────────────────────────
+  // Each Soroban crate is deployed as its own contract with its own address.
+  // The backend must route each call to the correct contract.
+  //
+  // Fallback chain for each: specific env var → CONTRACT_ID (legacy monolith) → ''
+  // This means single-contract deployments that set only CONTRACT_ID continue to
+  // work; multi-contract deployments set each ID independently.
+
+  /** Address of the deployed `register` Soroban contract. */
+  registerContractId: process.env.REGISTER_CONTRACT_ID ?? process.env.CONTRACT_ID ?? '',
+
+  /** Address of the deployed `progress` Soroban contract. */
+  progressContractId: process.env.PROGRESS_CONTRACT_ID ?? process.env.CONTRACT_ID ?? '',
+
+  /** Address of the deployed `subscription` Soroban contract. */
+  subscriptionContractId: process.env.SUBSCRIPTION_CONTRACT_ID ?? process.env.CONTRACT_ID ?? '',
+
+  /** Address of the deployed `connection` Soroban contract. */
+  connectionContractId: process.env.CONNECTION_CONTRACT_ID ?? process.env.CONTRACT_ID ?? '',
   jwtSecret: required('JWT_SECRET'),
   /**
    * SEP-10 server signing keypair secret (Stellar strkey starting with 'S').
