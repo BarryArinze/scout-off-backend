@@ -379,7 +379,8 @@ mod register_multi_writer_invariants {
                 let stored = client.get_player(&player_id).progress_level;
                 prop_assert_eq!(
                     stored, expected,
-                    "iteration {i}: stored={stored} expected={expected}"
+                    "iteration {}: stored={} expected={}",
+                    i, stored, expected
                 );
                 prop_assert!(stored <= 3, "level must never exceed 3, got {stored}");
             }
