@@ -130,28 +130,24 @@ describe('config required env vars', () => {
     jest.resetModules();
   });
 
-  it('throws mentioning CONTRACT_ID when CONTRACT_ID is not set', async () => {
+  // CONTRACT_ID is no longer required: the multi-contract architecture (#1016)
+  // made each contract ID optional with a fallback chain (specific env var →
+  // CONTRACT_ID → ''). Only JWT_SECRET remains a hard requirement.
+  it('loads with empty contract IDs when CONTRACT_ID is not set', async () => {
     delete process.env.CONTRACT_ID;
     jest.resetModules();
-    await expect(import('../src/config')).rejects.toThrow('CONTRACT_ID');
+    const mod = await import('../src/config');
+    expect(mod.default.contractId).toBe('');
+    expect(mod.default.registerContractId).toBe('');
+    expect(mod.default.progressContractId).toBe('');
+    expect(mod.default.subscriptionContractId).toBe('');
+    expect(mod.default.connectionContractId).toBe('');
   });
 
   it('throws mentioning JWT_SECRET when JWT_SECRET is not set', async () => {
     delete process.env.JWT_SECRET;
     jest.resetModules();
     await expect(import('../src/config')).rejects.toThrow('JWT_SECRET');
-  });
-
-  it('error message clearly identifies the missing CONTRACT_ID variable', async () => {
-    delete process.env.CONTRACT_ID;
-    jest.resetModules();
-    let message = '';
-    try {
-      await import('../src/config');
-    } catch (err) {
-      message = err instanceof Error ? err.message : String(err);
-    }
-    expect(message).toContain('CONTRACT_ID');
   });
 
   it('error message clearly identifies the missing JWT_SECRET variable', async () => {
