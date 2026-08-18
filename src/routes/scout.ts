@@ -127,6 +127,12 @@ router.route('/:wallet/contacts/:playerId')
 
 /**
  * POST /api/scouts/:wallet/contacts/:playerId/unlock
+ *
+ * Pay-to-contact XLM micro-fee flow (#761): the idempotency middleware is
+ * configured with a request fingerprint (wallet + playerId) so replaying the
+ * same Idempotency-Key with a materially different request is rejected with
+ * 409 instead of reusing the cached response, and duplicate requests with the
+ * same key never submit a second blockchain transaction.
  */
 router.route("/:wallet/contacts/:playerId/unlock")
   .post(
@@ -134,6 +140,9 @@ router.route("/:wallet/contacts/:playerId/unlock")
     requireWalletOwner(),
     requireApiKeyScope('write:contacts'),
     walletRateLimit(),
+    idempotency({
+      requestFingerprint: (req) => `${req.params.wallet}:${req.params.playerId}`,
+    }),
     validateBody(unlockContactSchema),
     unlockContact,
   )

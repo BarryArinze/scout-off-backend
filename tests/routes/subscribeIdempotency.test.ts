@@ -165,7 +165,9 @@ describe('POST /api/scouts/:wallet/subscribe — idempotency', () => {
     expect(res.body.success).toBe(true);
     expect(res.body.data.transactionId).toBe('tx-first');
     // The middleware must have claimed the key before the handler ran …
-    expect(mockClaim).toHaveBeenCalledWith('key-001');
+    // (the subscribe route configures no request fingerprint, so the claim
+    // carries a null fingerprint — see #761).
+    expect(mockClaim).toHaveBeenCalledWith('key-001', null);
     // … and persisted the response afterwards via updateIdempotencyRecord.
     expect(mockUpdate).toHaveBeenCalledWith(
       'key-001',

@@ -51,21 +51,92 @@ export interface ContactPaymentResult {
   status: PaymentStatus;
 }
 
+export type PaymentErrorCode =
+  | 'INSUFFICIENT_FUNDS'
+  | 'INVALID_ACCOUNT'
+  | 'NETWORK_ERROR'
+  | 'MISSING_PLAYER'
+  | 'EXPIRED_TRUSTLINE'
+  | 'CONTRACT_PAUSED'
+  | 'CONTRACT_ERROR'
+  | 'UNKNOWN';
+
 export class PaymentError extends Error {
   constructor(
     message: string,
-    public readonly code:
-      | 'INSUFFICIENT_FUNDS'
-      | 'INVALID_ACCOUNT'
-      | 'NETWORK_ERROR'
-      | 'MISSING_PLAYER'
-      | 'EXPIRED_TRUSTLINE'
-      | 'CONTRACT_ERROR'
-      | 'UNKNOWN',
+    public readonly code: PaymentErrorCode,
   ) {
     super(message);
     this.name = 'PaymentError';
   }
+}
+
+/** Matches the contract's ContractPaused (#10) error in a simulation/result error string. */
+function isContractPausedError(message: string): boolean {
+  return /#10\b/.test(message) || /contract.?paused/i.test(message);
+}
+
+/** Matches the contract's PlayerNotFound (#3) error in a simulation/result error string. */
+function isPlayerNotFoundError(message: string): boolean {
+  return /#3\b/.test(message) || /player.?not.?found/i.test(message);
+}
+
+/** Matches Soroban contract error #7 (InsufficientFee) in a simulation/result error string. */
+function isInsufficientFeeError(message: string): boolean {
+  return /#7\b/.test(message) || /insufficient.?fee/i.test(message);
+}
+
+/**
+ * Classify a contract error message (from simulation, submission, or the
+ * confirmed transaction XDR) into the matching PaymentError, or null when the
+ * message is unrecognised.
+ */
+function contractErrorToPaymentError(message: string): PaymentError | null {
+  if (isInsufficientFeeError(message)) {
+    return new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
+  }
+  if (isContractPausedError(message)) {
+    return new PaymentError('Contract is paused; contact unlocks are unavailable', 'CONTRACT_PAUSED');
+  }
+  if (isPlayerNotFoundError(message)) {
+    return new PaymentError('Player not found on-chain', 'MISSING_PLAYER');
+  }
+  return null;
+}
+
+/**
+ * Poll `getTransaction(hash)` until the transaction reaches a final status
+ * (SUCCESS or FAILED), bounded by `config.txConfirmationTimeoutMs`.
+ *
+ * A transaction that is still NOT_FOUND when the deadline passes is reported
+ * as a PaymentError NETWORK_ERROR — a submitted-but-unconfirmed transaction
+ * must never be treated as a completed unlock by the caller.
+ */
+const TX_CONFIRMATION_POLL_INTERVAL_MS = 1_000;
+
+async function waitForTransactionConfirmation(
+  hash: string,
+): Promise<SorobanRpc.Api.GetTransactionResponse> {
+  const deadline = Date.now() + config.txConfirmationTimeoutMs;
+  let getResult;
+  try {
+    getResult = await server.getTransaction(hash);
+    while (
+      getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND &&
+      Date.now() < deadline
+    ) {
+      await new Promise((r) => setTimeout(r, TX_CONFIRMATION_POLL_INTERVAL_MS));
+      getResult = await server.getTransaction(hash);
+    }
+  } catch (err) {
+    throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
+  }
+
+  if (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+    throw new PaymentError('Transaction confirmation timed out', 'NETWORK_ERROR');
+  }
+
+  return getResult;
 }
 
 /**
@@ -160,9 +231,19 @@ export async function isSubscribed(
  *   getAccount → build tx → simulateTransaction → assembleTransaction
  *   → sign → sendTransaction → poll getTransaction until final status.
  *
+ * The fee is not supplied by the client — the contract computes it from its
+ * own PLATFORM_FEE_BPS-derived configuration (`get_contact_fee()`), so the
+ * backend never trusts a caller-supplied amount. Confirmation polling is
+ * bounded by config.txConfirmationTimeoutMs: a submitted-but-unconfirmed
+ * transaction is reported as an error, never as a completed unlock.
+ *
  * On success returns the confirmed transaction hash and a 'submitted' status.
- * Throws PaymentError with code 'INSUFFICIENT_FUNDS' when the contract
- * reports error #7 (InsufficientFee) — see contracts/subscription/src/lib.rs.
+ * Throws PaymentError with code:
+ *   'INSUFFICIENT_FUNDS' — contract error #7 (InsufficientFee)
+ *   'CONTRACT_PAUSED'    — contract error #10 (ContractPaused)
+ *   'MISSING_PLAYER'     — contract error #3 (PlayerNotFound)
+ *   'NETWORK_ERROR'      — RPC/transport failure, on-chain rejection with an
+ *                          unrecognised error, or confirmation timeout
  */
 export async function submitContactPayment(
   scoutWallet: string,
@@ -211,9 +292,8 @@ export async function submitContactPayment(
 
       if (SorobanRpc.Api.isSimulationError(simResult)) {
         const errMsg = simResult.error ?? '';
-        if (isInsufficientFeeError(errMsg)) {
-          throw new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
-        }
+        const mapped = contractErrorToPaymentError(errMsg);
+        if (mapped) throw mapped;
         throw new PaymentError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
       }
 
@@ -228,31 +308,20 @@ export async function submitContactPayment(
       }
       if (sendResult.status === 'ERROR') {
         const errMsg = String(sendResult.errorResult ?? '');
-        if (isInsufficientFeeError(errMsg)) {
-          throw new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
-        }
+        const mapped = contractErrorToPaymentError(errMsg);
+        if (mapped) throw mapped;
         throw new PaymentError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
       }
 
       const hash = sendResult.hash;
       span.setAttribute('stellar.tx_hash', hash);
 
-      let getResult;
-      try {
-        getResult = await server.getTransaction(hash);
-        while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
-          await new Promise((r) => setTimeout(r, 1000));
-          getResult = await server.getTransaction(hash);
-        }
-      } catch (err) {
-        throw new PaymentError(`RPC call failed: ${(err as Error).message}`, 'NETWORK_ERROR');
-      }
+      const getResult = await waitForTransactionConfirmation(hash);
 
       if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
         const resultMeta = ((getResult as unknown) as { resultMetaXdr?: string }).resultMetaXdr ?? '';
-        if (isInsufficientFeeError(resultMeta)) {
-          throw new PaymentError('Insufficient funds to unlock contact', 'INSUFFICIENT_FUNDS');
-        }
+        const mapped = contractErrorToPaymentError(resultMeta);
+        if (mapped) throw mapped;
         throw new PaymentError('pay_to_contact transaction failed on-chain', 'NETWORK_ERROR');
       }
 
@@ -446,11 +515,6 @@ export class FeeWithdrawalError extends Error {
   }
 }
 
-/** Matches the contract's ContractPaused (#10) error in a simulation/result error string. */
-function isContractPausedError(message: string): boolean {
-  return /#10\b/.test(message) || /contract.?paused/i.test(message);
-}
-
 /**
  * Invoke `withdraw_fees(recipient: Address, amount: i128) -> i128` on the
  * Soroban contract via the platform keypair.
@@ -636,11 +700,6 @@ export interface SubscriptionResult {
   tier: SubscriptionTier;
   expiresAt: number; // Unix timestamp
   status: 'active';
-}
-
-/** Matches Soroban contract error #7 (InsufficientFee) in a simulation/result error string. */
-function isInsufficientFeeError(message: string): boolean {
-  return /#7\b/.test(message) || /insufficient.?fee/i.test(message);
 }
 
 /**
@@ -1503,11 +1562,6 @@ export function parseMilestonesFromNative(playerId: string, native: unknown): On
       ledger: submittedAt != null ? Number(submittedAt) : null,
     };
   });
-}
-
-/** Matches the contract's PlayerNotFound (#3) error in a simulation error string. */
-function isPlayerNotFoundError(message: string): boolean {
-  return /#3\b/.test(message) || /player.?not.?found/i.test(message);
 }
 
 /**

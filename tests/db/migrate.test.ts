@@ -322,6 +322,27 @@ describe('runMigrations — integration suite (#508)', () => {
       });
     });
 
+    // --- 023_idempotency_request_fingerprint.sql ---
+    describe('023_idempotency_request_fingerprint.sql', () => {
+      it('adds the request_fingerprint column to idempotency_keys', () => {
+        expect(getColumns(sharedDb, 'idempotency_keys')).toContain('request_fingerprint');
+      });
+
+      it('records a fingerprint on claim and returns it from getIdempotencyRecord', () => {
+        const db = new Database(':memory:');
+        migrate(db);
+        db.prepare(
+          `INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status, request_fingerprint)
+           VALUES ('fp-key', 0, '', 1, 9999999999999, 'pending', 'wallet:player')`
+        ).run();
+        const row = db.prepare(
+          'SELECT request_fingerprint FROM idempotency_keys WHERE key = ?'
+        ).get('fp-key') as { request_fingerprint: string | null };
+        expect(row.request_fingerprint).toBe('wallet:player');
+        db.close();
+      });
+    });
+
     // --- 003_pending_pins.sql ---
     describe('003_pending_pins.sql', () => {
       it('creates the pending_pins table', () => {
