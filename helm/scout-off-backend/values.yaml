@@ -27,8 +27,21 @@ imagePullSecrets: []
 # -----------------------------------------------------------------------------
 # Replica count & update strategy
 # -----------------------------------------------------------------------------
-# Minimum number of replicas. The HPA will scale up from this floor.
-replicaCount: 2
+# Number of replicas to run.
+#
+# The default deployment is a SINGLE replica backed by SQLite
+# (env.DB_DRIVER: sqlite below). SQLite is a single-process, single-file
+# database with no support for concurrent access from independent processes,
+# so with replicaCount > 1 every pod would silently get its own unshared,
+# ephemeral database file: writes to one pod would be invisible to the others
+# and data would be lost on pod restart.
+#
+# Do NOT raise this above 1 while env.DB_DRIVER=sqlite. To scale horizontally:
+#   1. switch the database to PostgreSQL (env.DB_DRIVER=postgres +
+#      env.DATABASE_URL), then
+#   2. increase replicaCount and/or enable the HPA below.
+# See docs/postgres-migration.md for the migration procedure.
+replicaCount: 1
 
 # Rolling update strategy — zero downtime: never take a pod down before a new
 # one is healthy (maxUnavailable: 0) and allow one extra pod during rollout.
@@ -42,9 +55,16 @@ strategy:
 # Horizontal Pod Autoscaler
 # -----------------------------------------------------------------------------
 hpa:
-  enabled: true
-  # Lower bound — matches replicaCount above.
-  minReplicas: 2
+  # Horizontal Pod Autoscaler.
+  #
+  # Disabled by default because the default deployment is a single
+  # SQLite-backed replica (see replicaCount above) and SQLite cannot be
+  # shared across multiple pods. Enable the HPA only after switching to
+  # PostgreSQL (env.DB_DRIVER=postgres + env.DATABASE_URL). If you enable it
+  # while still on SQLite, the chart's NOTES.txt prints a loud warning.
+  enabled: false
+  # Lower bound — only meaningful when enabled.
+  minReplicas: 1
   # Upper bound — expand to handle traffic spikes.
   maxReplicas: 10
   # Scale up when average CPU across all pods exceeds this percentage.
@@ -56,7 +76,13 @@ hpa:
 # PodDisruptionBudget
 # -----------------------------------------------------------------------------
 pdb:
-  enabled: true
+  # PodDisruptionBudget.
+  #
+  # Disabled by default to match the single-replica default: with exactly one
+  # pod, minAvailable: 1 would block ALL voluntary disruptions (node drains,
+  # cluster upgrades) indefinitely. Enable it for multi-replica
+  # (PostgreSQL-backed) deployments.
+  enabled: false
   # At least one pod must remain available during voluntary disruptions
   # (node drain, rolling upgrade, etc.).
   minAvailable: 1
@@ -168,6 +194,13 @@ env:
   LOG_LEVEL: info
   METRICS_ENABLED: "true"
   # Database driver: sqlite | postgres
+  #
+  # sqlite  (default): single-process, single-file database. Suitable for the
+  #   default single-replica deployment only. SQLite has no support for
+  #   concurrent access from multiple processes, so do NOT scale beyond one
+  #   replica while this is set.
+  # postgres: required for horizontal scaling (replicaCount > 1 or HPA). Also
+  #   requires env.DATABASE_URL. See docs/postgres-migration.md.
   DB_DRIVER: sqlite
   DB_PATH: /data/scout-off.db
   # SSE keep-alive interval in ms
