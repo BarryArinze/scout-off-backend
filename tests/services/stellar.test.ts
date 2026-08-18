@@ -1283,6 +1283,97 @@ describe('submitContactPayment', () => {
       (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
     );
   });
+
+  // ── Contract error mapping (#761) ─────────────────────────────────────────
+
+  it('throws PaymentError CONTRACT_PAUSED when simulation reports contract error #10', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Contract error: #10' });
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'CONTRACT_PAUSED',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError CONTRACT_PAUSED when sendTransaction reports contract error #10', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'ERROR', errorResult: 'Contract error: #10', hash: 'x' });
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'CONTRACT_PAUSED',
+    });
+    expect(mockGetTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError CONTRACT_PAUSED when the confirmed tx XDR reports ContractPaused', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'unlock-fail-paused' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'error-payload-#10-encoded' });
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'CONTRACT_PAUSED',
+    });
+  });
+
+  it('throws PaymentError MISSING_PLAYER when simulation reports contract error #3', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Contract error: #3' });
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'MISSING_PLAYER',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws PaymentError MISSING_PLAYER when the confirmed tx XDR reports PlayerNotFound', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'unlock-fail-player' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'error-payload-#3-encoded' });
+
+    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'MISSING_PLAYER',
+    });
+  });
+
+  // ── Bounded confirmation polling (#761) ───────────────────────────────────
+
+  it('stops polling and fails predictably when confirmation exceeds the bounded timeout', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'unlock-timeout' });
+    mockGetTransaction.mockResolvedValue({ status: 'NOT_FOUND' });
+
+    jest.useFakeTimers();
+    const promise = submitContactPayment(WALLET, PLAYER_ID);
+    // Pre-attach a no-op handler so the rejection that happens while
+    // runAllTimersAsync flushes the poll loop is not flagged as unhandled.
+    promise.catch(() => {});
+    await jest.runAllTimersAsync();
+    await expect(promise).rejects.toMatchObject({
+      name: 'PaymentError',
+      code: 'NETWORK_ERROR',
+      message: expect.stringMatching(/timed out/i),
+    });
+    jest.useRealTimers();
+  });
+
+  it('returns success when the transaction confirms just before the timeout deadline', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'unlock-deadline' });
+    // NOT_FOUND for most polls, then SUCCESS — must still be accepted.
+    mockGetTransaction
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'SUCCESS' });
+
+    jest.useFakeTimers();
+    const promise = submitContactPayment(WALLET, PLAYER_ID);
+    await jest.runAllTimersAsync();
+    const result = await promise;
+    jest.useRealTimers();
+
+    expect(result.transactionId).toBe('unlock-deadline');
+    expect(result.status).toBe('submitted');
+  });
 });
 
 // ─── withdrawFees ─────────────────────────────────────────────────────────────
