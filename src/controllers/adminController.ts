@@ -1254,7 +1254,7 @@ export async function approvePendingAction(req: Request, res: Response, next: Ne
       return;
     }
 
-    const result = approveAction(req.params.id, adminWallet);
+    const result = await approveAction(req.params.id, adminWallet);
 
     if (result.status === 'duplicate') {
       res.status(409).json({
