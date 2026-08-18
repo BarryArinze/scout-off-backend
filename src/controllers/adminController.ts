@@ -6,7 +6,7 @@ import { getAllValidators, insertValidator, revokeValidatorRow, getValidatorByWa
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { STELLAR_ADDRESS_RE } from '../utils/validators';
 import { logAuditEvent } from '../services/audit';
-import { verifyAuditChain } from '../utils/auditVerify';
+import { verifyAuditChain, verifyAuditChainFull } from '../utils/auditVerify';
 import { withdrawFees as stellarWithdrawFees, FeeWithdrawalError, FeeWithdrawalResult, getFeeBalance, pauseContractOnChain, unpauseContractOnChain, registerValidatorOnChain, revokeValidatorOnChain, ValidatorActionError } from '../services/stellar';
 import { revokeToken, isTokenRevoked } from '../services/tokenBlocklist';
 import { cacheGet, cacheSet } from '../services/cache';
@@ -318,15 +318,15 @@ export async function getAuditTrail(req: Request, res: Response, next: NextFunct
 /**
  * GET /api/admin/audit/verify
  *
- * Walks the audit_log hash chain end-to-end and reports whether it is intact,
- * or — if not — the id of the first row where it breaks (see #464). Useful
- * for periodic compliance checks / incident response: a `valid: false`
- * result means a historical row was edited, deleted, or reordered outside
- * the application (e.g. direct DB access).
+ * Walks the full audit_log hash chain, collecting every violation rather than
+ * stopping at the first broken row (#764). Returns a structured integrity
+ * report with status 'ok' | 'tampered' | 'timeout', a violations array, the
+ * total chain_length, and rows_checked. Useful for periodic compliance checks
+ * and incident response.
  */
 export async function getAuditChainVerification(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const result = verifyAuditChain();
+    const result = await verifyAuditChainFull();
     res.json({ success: true, data: result });
   } catch (err) {
     next(err);

@@ -10,6 +10,13 @@ Scout-Off supports two database drivers:
 
 The migration is reversible within a maintenance window.
 
+> **Helm chart default:** the `helm/scout-off-backend` chart ships with a
+> single-replica, SQLite-backed default topology (`replicaCount: 1`, HPA and
+> PDB disabled). Horizontal scaling (multiple replicas or the HPA) requires
+> PostgreSQL — switch `env.DB_DRIVER` to `postgres` and provide
+> `env.DATABASE_URL` **before** scaling. The chart loudly warns in its
+> NOTES.txt output if you scale while still on SQLite. See DEPLOYMENT.md.
+
 ## Prerequisites
 
 - PostgreSQL 12 or later
@@ -147,7 +154,13 @@ env:
 
 ## Step 6: Enable Horizontal Scaling
 
-With PostgreSQL, multiple backend replicas can now safely share the same database:
+With PostgreSQL, multiple backend replicas can now safely share the same database.
+
+> **Helm chart:** scaling is a two-step change — first set `env.DB_DRIVER: postgres`
+> and provide `env.DATABASE_URL` (plus `DATABASE_SSL` for managed providers), then
+> raise `replicaCount` and/or enable `hpa.enabled`. Doing it in the opposite order
+> (scaling while still on SQLite) is exactly the broken combination the chart's
+> default topology guards against:
 
 ```yaml
 # Example: 3 backend replicas

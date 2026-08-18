@@ -468,31 +468,6 @@ impl SubscriptionContract {
         bump_instance(&env);
         Ok(())
     }
-
-    // ── get_fee_balance ────────────────────────────────────────────────────
-
-    /// Return the current accumulated platform fee balance in stroops.
-    ///
-    /// This is a read-only query; it does not require authentication and does
-    /// not modify state.  The backend's `getFeeBalance()` calls this function
-    /// via `simulateTransaction`.
-    ///
-    /// Returns `0` when no fees have been accumulated (e.g. immediately after
-    /// `initialize`).
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — Contract has not been initialized.
-    pub fn get_fee_balance(env: Env) -> Result<i128, Error> {
-        if !is_initialized(&env) {
-            return Err(Error::NotInitialized);
-        }
-        let balance: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PlatformFeeBalance)
-            .unwrap_or(0);
-        Ok(balance)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -898,8 +873,9 @@ mod tests {
         let scout = Address::generate(&env);
         fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
         client.subscribe(&scout, &1u32, &30u32);
-        assert!(client.get_fee_balance() > 0);
-        client.withdraw_fees(&admin);
+        let balance = client.get_fee_balance();
+        assert!(balance > 0);
+        client.withdraw_fees(&admin, &balance);
         assert_eq!(client.get_fee_balance(), 0i128);
     }
 

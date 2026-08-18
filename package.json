@@ -122,6 +122,10 @@
             "tsconfig": "<rootDir>/tsconfig.eslint.json"
           }
         },
+        "collectCoverageFrom": [
+          "src/**/*.ts",
+          "!src/**/*.d.ts"
+        ],
         "coverageThreshold": {
           "global": {
             "branches": 70,

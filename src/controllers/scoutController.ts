@@ -24,8 +24,8 @@ import {
   logTrialOffer as stellarLogTrialOffer,
   cancelSubscriptionOnChain,
 } from '../services/stellar';
-import { isValidStellarAddress } from '../utils/stellarAddress';
 import { logger } from '../utils/logger';
+import { checkWalletOwnership } from '../middleware/requireOwner';
 import { broadcaster } from '../services/eventBroadcaster';
 import config from '../config';
 import { ErrorCode } from '../utils/errorCodes';
@@ -100,14 +100,6 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
 export async function getSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-      return;
-    }
-    if (req.account !== wallet) {
-      res.status(401).json({ success: false, error: 'Unauthorized', code: ErrorCode.UNAUTHORIZED });
-      return;
-    }
 
     const now = Math.floor(Date.now() / 1000);
     const graceSeconds = gracePeriodSeconds();
@@ -182,10 +174,12 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
 export async function subscribe(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (req.account !== wallet) {
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account' });
-      return;
-    }
+    // Ownership is enforced by requireWalletOwner() at the route level; the
+    // shared guard is re-invoked here so direct callers (unit tests) get the
+    // same protection without duplicating the comparison inline.
+    // validateAddress: false preserves the historical behavior of this
+    // endpoint, which never validated the address format.
+    if (!checkWalletOwnership(req, res, { validateAddress: false })) return;
 
     const parsed = subscribeSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -249,10 +243,6 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
 export async function renewSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (req.account !== wallet) {
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account' });
-      return;
-    }
     const parsed = subscribeSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body' });
@@ -308,10 +298,6 @@ export async function renewSubscription(req: Request, res: Response, next: NextF
 export async function cancelSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (req.account !== wallet) {
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account' });
-      return;
-    }
 
     const existingSub = getLatestSubscription(wallet);
     if (!existingSub) {
@@ -359,15 +345,6 @@ export async function getUnlockedContacts(req: Request, res: Response, next: Nex
     const { wallet } = req.params;
     const { playerId } = req.query as { playerId?: string };
 
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-      return;
-    }
-    if (req.account !== wallet) {
-      res.status(401).json({ success: false, error: 'Unauthorized', code: ErrorCode.UNAUTHORIZED });
-      return;
-    }
-
     let contacts = getContactUnlocksByScout(wallet);
 
     if (playerId) {
@@ -393,18 +370,16 @@ export async function getUnlockedContacts(req: Request, res: Response, next: Nex
 export async function unlockContact(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet, playerId } = req.params;
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-      return;
-    }
     if (!wallet || !playerId) {
       res.status(400).json({ success: false, error: 'wallet and playerId are required', code: ErrorCode.VALIDATION_ERROR });
       return;
     }
 
-    if (req.account !== wallet) {
+    // Ownership is enforced by requireWalletOwner() at the route level; the
+    // shared guard is re-invoked here so direct callers (unit tests) get the
+    // same protection without duplicating the comparison inline.
+    if (!checkWalletOwnership(req, res)) {
       logger.warn(`[scout] action=unlock_contact_denied scout=${wallet} playerId=${playerId} reason=wallet_mismatch`);
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account', code: ErrorCode.WALLET_MISMATCH });
       return;
     }
 
@@ -437,6 +412,9 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
       tx_hash: result.transactionId,
       unlocked_at: Math.floor(Date.now() / 1000),
     });
+    // Player state changed (contact_unlocked) — invalidate player-list caches
+    // after the persistence succeeded so subsequent list queries stay fresh.
+    await invalidatePlayerCache();
     res.json({ success: true, data: result });
   } catch (err) {
     if (err instanceof PaymentError) {
@@ -470,11 +448,6 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
 export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-
-    if (req.account !== wallet) {
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account', code: ErrorCode.WALLET_MISMATCH });
-      return;
-    }
 
     const parsed = trialOfferSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -585,11 +558,37 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
  * `write:trial_offers` API-key scope; clients should migrate to the plural path.
  */
 export async function submitTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
-  logger.warn(
-    `[deprecation] POST /api/scouts/:wallet/trial-offer called — prefer POST /api/scouts/:wallet/trial-offers. ` +
-      'The singular path is an alias and will be removed in a future release.',
-  );
-  return createTrialOffer(req, res, next);
+  try {
+    const { wallet } = req.params;
+    const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
+
+    const playerExists = queryEvents('player_registered').some((e) => e.payload.player_id === playerId);
+    if (!playerExists) {
+      res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
+    }
+
+    const hasAccess = await scoutHasPlayerAccess(wallet, playerId);
+    if (!hasAccess) {
+      res.status(402).json({
+        success: false,
+        error: 'Scout must be subscribed or have paid the contact fee for this player',
+        code: ErrorCode.SUBSCRIPTION_REQUIRED,
+      });
+      return;
+    }
+
+    logger.info(`[scout] action=log_trial_offer_attempt scout=${wallet} playerId=${playerId}`);
+
+    const result = await stellarLogTrialOffer(wallet, playerId, detailsUri);
+    res.status(201).json({ success: true, data: result });
+  } catch (err) {
+    if (err instanceof PaymentError) {
+      res.status(402).json({ success: false, error: err.message, code: err.code });
+      return;
+    }
+    next(err);
+  }
 }
 
 // ─── GET /api/scouts/:wallet/payments ─────────────────────────────────────────
@@ -626,14 +625,6 @@ const paymentHistoryQuerySchema = z.object({
 export async function getPaymentHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-      return;
-    }
-    if (req.account !== wallet) {
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account', code: ErrorCode.WALLET_MISMATCH });
-      return;
-    }
 
     const parsed = paymentHistoryQuerySchema.safeParse(req.query);
     if (!parsed.success) {
@@ -786,10 +777,6 @@ export async function getPaymentHistory(req: Request, res: Response, next: NextF
 export async function getContactDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet, playerId } = req.params;
-    if (req.account !== wallet) {
-      res.status(401).json({ success: false, error: 'Unauthorized' });
-      return;
-    }
 
     const player = getPlayerById(playerId);
     if (!player) {
