@@ -27,6 +27,7 @@ import {
 import { logger } from '../utils/logger';
 import { checkWalletOwnership } from '../middleware/requireOwner';
 import { broadcaster } from '../services/eventBroadcaster';
+import { invalidatePlayerCache } from '../services/cache';
 import config from '../config';
 import { ErrorCode } from '../utils/errorCodes';
 import { insertTrialOffer, getTrialOffers } from '../services/indexer';
@@ -412,9 +413,10 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
       tx_hash: result.transactionId,
       unlocked_at: Math.floor(Date.now() / 1000),
     });
-    // Player state changed (contact_unlocked) — invalidate player-list caches
-    // after the persistence succeeded so subsequent list queries stay fresh.
-    await invalidatePlayerCache();
+    // Player state changed (contact_unlocked) — invalidate player-list and
+    // single-player caches after the persistence succeeded so subsequent
+    // queries stay fresh.
+    await invalidatePlayerCache(playerId);
     res.json({ success: true, data: result });
   } catch (err) {
     if (err instanceof PaymentError) {
