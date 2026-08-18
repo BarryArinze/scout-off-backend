@@ -538,7 +538,7 @@ export async function registerValidator(req: Request, res: Response, next: NextF
     return;
   }
 
-  const proposal = proposeAction('pause_contract', { validatorWallet, action: 'register_validator' }, adminWallet);
+  const proposal = proposeAction('register_validator', { validatorWallet }, adminWallet);
   if (proposal.status === 'proposed') {
     logAuditEvent({
       action: 'validator_registration',
@@ -648,7 +648,7 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
     return;
   }
 
-  const proposal = proposeAction('pause_contract', { validatorWallet, action: 'revoke_validator' }, adminWallet);
+  const proposal = proposeAction('revoke_validator', { validatorWallet }, adminWallet);
   if (proposal.status === 'proposed') {
     logAuditEvent({
       action: 'validator_revocation',
