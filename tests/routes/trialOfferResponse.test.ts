@@ -249,3 +249,103 @@ describe(`POST /api/players/${PLAYER_ID}/trial-offers/${OFFER_ID}/reject`, () =>
     expect(res.status).toBe(409);
   });
 });
+
+// ─── Shared ownership/lookup/status resolution (#1034) ────────────────────────
+
+/**
+ * accept and reject resolve the offer through one shared helper
+ * (`resolveOwnedPendingOffer`). These cases assert that both endpoints answer
+ * identically for every branch of that shared step, so the two can't drift.
+ */
+describe('accept and reject share offer resolution', () => {
+  const ENDPOINTS: ReadonlyArray<readonly [string, string]> = [
+    ['accept', `/api/players/${PLAYER_ID}/trial-offers/${OFFER_ID}/accept`],
+    ['reject', `/api/players/${PLAYER_ID}/trial-offers/${OFFER_ID}/reject`],
+  ];
+
+  describe.each(ENDPOINTS)('%s', (_action, url) => {
+    it('returns 404 when the playerId is not a registered player', async () => {
+      mockGetEvents.mockImplementation(() => []);
+      mockGetOffer.mockReturnValue(pendingOffer);
+
+      const token = makePlayerToken(PLAYER_WALLET);
+      const res = await request(app).post(url).set('Authorization', `Bearer ${token}`).send({});
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toMatch(/player not found/i);
+      expect(mockRespondOffer).not.toHaveBeenCalled();
+    });
+
+    it('returns 403 when the offer belongs to a different player', async () => {
+      mockGetOffer.mockReturnValue({ ...pendingOffer, player_id: 'someone-else' });
+
+      const token = makePlayerToken(PLAYER_WALLET);
+      const res = await request(app).post(url).set('Authorization', `Bearer ${token}`).send({});
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toMatch(/does not belong/i);
+      expect(mockRespondOffer).not.toHaveBeenCalled();
+    });
+
+    it('seeds the offer from the indexed on-chain event when no row exists', async () => {
+      mockGetEvents.mockImplementation((type?: string) => {
+        if (type === 'player_registered') {
+          return [
+            {
+              source: 'contract',
+              type: 'player_registered',
+              contractAddress: 'contract',
+              payload: { player_id: PLAYER_ID, wallet: PLAYER_WALLET },
+            },
+          ];
+        }
+        if (type === 'trial_offer_logged') {
+          return [
+            {
+              source: 'contract',
+              type: 'trial_offer_logged',
+              contractAddress: 'contract',
+              payload: {
+                offer_id: OFFER_ID,
+                player_id: PLAYER_ID,
+                scout: SCOUT_WALLET,
+                details_uri: 'ipfs://on-chain-details',
+              },
+            },
+          ];
+        }
+        return [];
+      });
+      // Missing on first lookup, present once seeded from the on-chain event.
+      mockGetOffer.mockReturnValueOnce(null).mockReturnValue(pendingOffer);
+
+      const token = makePlayerToken(PLAYER_WALLET);
+      const res = await request(app).post(url).set('Authorization', `Bearer ${token}`).send({});
+
+      expect(res.status).toBe(200);
+      expect(mockInsertOffer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          offer_id: OFFER_ID,
+          scout_wallet: SCOUT_WALLET,
+          player_id: PLAYER_ID,
+          details_uri: 'ipfs://on-chain-details',
+        }),
+      );
+      expect(mockRespondOffer).toHaveBeenCalledWith(
+        expect.objectContaining({ offer_id: OFFER_ID }),
+      );
+    });
+
+    it('returns 404 when neither a row nor an on-chain event exists', async () => {
+      mockGetOffer.mockReturnValue(null);
+
+      const token = makePlayerToken(PLAYER_WALLET);
+      const res = await request(app).post(url).set('Authorization', `Bearer ${token}`).send({});
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toMatch(/trial offer not found/i);
+      expect(mockInsertOffer).not.toHaveBeenCalled();
+      expect(mockRespondOffer).not.toHaveBeenCalled();
+    });
+  });
+});

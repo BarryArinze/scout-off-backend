@@ -940,6 +940,11 @@ export interface IdempotencyRecord {
   expires_at: number;
   /** 'pending' while the originating request is in-flight; 'complete' once saved. */
   status: 'pending' | 'complete';
+  /**
+   * Fingerprint of the originating request (e.g. wallet + playerId). NULL for
+   * endpoints that don't opt into fingerprint conflict detection.
+   */
+  request_fingerprint: string | null;
 }
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
@@ -967,15 +972,18 @@ export async function getIdempotencyRecord(key: string): Promise<IdempotencyReco
  * Returns true  — this caller owns the key; proceed with the handler.
  * Returns false — another request already claimed the key; caller must wait.
  */
-export async function claimIdempotencyKey(key: string): Promise<boolean> {
+export async function claimIdempotencyKey(
+  key: string,
+  requestFingerprint?: string | null,
+): Promise<boolean> {
   const now = Date.now();
   const sql = `
-    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status)
-    VALUES (?, 0, '', ?, ?, 'pending')
+    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status, request_fingerprint)
+    VALUES (?, 0, '', ?, ?, 'pending', ?)
     ON CONFLICT (key) DO NOTHING
   `;
   const result = await timedQueryAsync(sql, () =>
-    getDriver().run(sql, [key, now, now + IDEMPOTENCY_TTL_MS])
+    getDriver().run(sql, [key, now, now + IDEMPOTENCY_TTL_MS, requestFingerprint ?? null])
   );
   // changes === 1 means a new row was inserted (this caller won the race).
   return result.changes === 1;

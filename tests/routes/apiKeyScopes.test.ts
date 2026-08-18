@@ -22,7 +22,17 @@ const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 
 jest.mock('../../src/db', () => ({
   queryEvents: jest.fn().mockReturnValue([]),
-  getPlayerById: jest.fn(),
+  getPlayerById: jest.fn().mockReturnValue({
+    player_id: 'b8e1a1d3',
+    wallet: 'GDUP7WH3BJ3S3RGDQO5T2D3B4QN6P2ZJ3F5D6K7L8M9N0P1Q2R3S4T5U6V',
+    position: 'Forward',
+    region: 'West Africa',
+    metadata_uri: null,
+    progress_level: 1,
+    created_at: 1700000000,
+    registered_at: 1700000000,
+    is_active: 1,
+  }),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn(),
   dbRenewSubscription: jest.fn(),

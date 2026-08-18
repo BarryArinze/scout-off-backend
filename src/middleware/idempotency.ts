@@ -14,11 +14,32 @@ import { logger } from '../utils/logger';
 const IN_PROGRESS_WAIT_MS = 5_000;
 
 /**
+ * Options for the idempotency middleware.
+ */
+export interface IdempotencyOptions {
+  /**
+   * Computes a fingerprint of the logical request (e.g. the wallet + playerId
+   * path params for the contact-unlock endpoint). When set, replaying the
+   * same idempotency key with a materially different request is rejected with
+   * 409 instead of serving the cached response of the unrelated request.
+   * Return null to opt a particular request out of fingerprint checks.
+   */
+  requestFingerprint?: (req: Request) => string | null;
+}
+
+/**
  * Idempotency middleware for mutating endpoints — claim-first design.
+ *
+ * Dual API:
+ *  - Plain middleware: `router.post(path, idempotency, handler)` (no options).
+ *  - Factory: `router.post(path, idempotency({ requestFingerprint }), handler)`
+ *    to enable request-fingerprint conflict detection (Issue #761).
  *
  * Flow:
  *  1. No `Idempotency-Key` header → pass through unchanged.
- *  2. Key exists as a *complete* record → return cached response (no handler call).
+ *  2. Key exists as a *complete* record → return cached response (no handler call),
+ *       unless a fingerprint is configured and the stored fingerprint differs
+ *       from the current request's → 409 Conflict.
  *  3. Key exists as a *pending* record (another request is in-flight) →
  *       use inFlightLock to coalesce: wait up to IN_PROGRESS_WAIT_MS for the
  *       original to finish, then return its cached response.
@@ -31,7 +52,34 @@ const IN_PROGRESS_WAIT_MS = 5_000;
  *
  * Keys expire after 24 hours (controlled by IDEMPOTENCY_TTL_MS in db/index.ts).
  */
-export async function idempotency(req: Request, res: Response, next: NextFunction): Promise<void> {
+export function idempotency(req: Request, res: Response, next: NextFunction): void;
+export function idempotency(
+  options: IdempotencyOptions,
+): (req: Request, res: Response, next: NextFunction) => void;
+export function idempotency(
+  reqOrOptions: Request | IdempotencyOptions,
+  res?: Response,
+  next?: NextFunction,
+): void | ((req: Request, res: Response, next: NextFunction) => void) {
+  // Plain middleware usage: idempotency(req, res, next).
+  if (typeof (reqOrOptions as Request).params === 'object') {
+    handleIdempotency(reqOrOptions as Request, res as Response, next as NextFunction, undefined).catch(next as NextFunction);
+    return;
+  }
+
+  // Factory usage: idempotency({ requestFingerprint }).
+  const options = reqOrOptions as IdempotencyOptions;
+  return (req: Request, res: Response, next: NextFunction): void => {
+    handleIdempotency(req, res, next, options).catch(next);
+  };
+}
+
+async function handleIdempotency(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  options: IdempotencyOptions | undefined,
+): Promise<void> {
   const key = req.headers['idempotency-key'];
 
   // No key supplied — pass through without any idempotency behaviour.
@@ -41,6 +89,9 @@ export async function idempotency(req: Request, res: Response, next: NextFunctio
   }
 
   const trimmedKey = key.trim();
+  const requestFingerprint = options?.requestFingerprint
+    ? options.requestFingerprint(req)
+    : null;
 
   // ── Step 1: check for an existing record ─────────────────────────────────
   let existingRecord;
@@ -58,6 +109,11 @@ export async function idempotency(req: Request, res: Response, next: NextFunctio
   if (existingRecord) {
     if (existingRecord.status === 'complete') {
       // ── Case 2: complete cache hit ────────────────────────────────────────
+      if (fingerprintConflicts(requestFingerprint, existingRecord.request_fingerprint)) {
+        logger.warn(`[idempotency] fingerprint_conflict key=${trimmedKey}`);
+        res.status(409).json({ error: 'Idempotency key was already used with a different request' });
+        return;
+      }
       logger.info(`[idempotency] cache_hit key=${trimmedKey}`);
       res.status(existingRecord.status_code).json(JSON.parse(existingRecord.response));
       return;
@@ -65,14 +121,14 @@ export async function idempotency(req: Request, res: Response, next: NextFunctio
 
     // ── Case 3: pending (in-flight duplicate) ─────────────────────────────
     logger.info(`[idempotency] pending_duplicate key=${trimmedKey}`);
-    waitForCompletion(trimmedKey, res);
+    waitForCompletion(trimmedKey, res, requestFingerprint);
     return;
   }
 
   // ── Step 2: attempt to claim the key (atomic INSERT OR IGNORE) ───────────
   let claimed: boolean;
   try {
-    claimed = await claimIdempotencyKey(trimmedKey);
+    claimed = await claimIdempotencyKey(trimmedKey, requestFingerprint);
   } catch (err) {
     // DB claim failure is non-fatal; process normally without idempotency.
     logger.warn(
@@ -85,7 +141,7 @@ export async function idempotency(req: Request, res: Response, next: NextFunctio
   if (!claimed) {
     // Another process/thread won the INSERT race — treat as pending duplicate.
     logger.info(`[idempotency] lost_claim_race key=${trimmedKey}`);
-    waitForCompletion(trimmedKey, res);
+    waitForCompletion(trimmedKey, res, requestFingerprint);
     return;
   }
 
@@ -148,12 +204,31 @@ export async function idempotency(req: Request, res: Response, next: NextFunctio
 }
 
 /**
+ * Returns true when a stored request fingerprint conflicts with the current
+ * request's fingerprint (i.e. the same idempotency key was used with a
+ * materially different request). Fingerprint checks only apply when the
+ * middleware was configured with a requestFingerprint function; otherwise
+ * no conflict is ever reported (legacy key-only behaviour).
+ */
+function fingerprintConflicts(
+  requestFingerprint: string | null,
+  storedFingerprint: string | null | undefined,
+): boolean {
+  return (
+    requestFingerprint !== null &&
+    storedFingerprint != null &&
+    storedFingerprint !== requestFingerprint
+  );
+}
+
+/**
  * Wait for the in-flight owner to finish, then serve the cached response.
  * Falls back to a 409 if the owner doesn't complete within IN_PROGRESS_WAIT_MS.
  */
 function waitForCompletion(
   key: string,
   res: Response,
+  requestFingerprint: string | null,
 ): void {
   const timeout = new Promise<never>((_, reject) =>
     setTimeout(
@@ -174,6 +249,11 @@ function waitForCompletion(
       // Owner finished — read the completed record from the DB.
       const record = await getIdempotencyRecord(key);
       if (record && record.status === 'complete') {
+        if (fingerprintConflicts(requestFingerprint, record.request_fingerprint)) {
+          logger.warn(`[idempotency] fingerprint_conflict_after_wait key=${key}`);
+          res.status(409).json({ error: 'Idempotency key was already used with a different request' });
+          return;
+        }
         logger.info(`[idempotency] served_after_wait key=${key}`);
         res.status(record.status_code).json(JSON.parse(record.response));
       } else {

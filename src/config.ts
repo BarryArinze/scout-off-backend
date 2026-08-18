@@ -343,6 +343,13 @@ const config = {
   subscriptionGracePeriodHours: parseNumericEnv('SUBSCRIPTION_GRACE_PERIOD_HOURS', process.env.SUBSCRIPTION_GRACE_PERIOD_HOURS, 24, { min: 0, integer: true }),
   /** Global request timeout in milliseconds before the server responds with 503. */
   requestTimeoutMs: parseNumericEnv('REQUEST_TIMEOUT_MS', process.env.REQUEST_TIMEOUT_MS, 30000, { min: 1, integer: true }),
+  /**
+   * Bounded Soroban transaction-confirmation poll window (ms). When a
+   * submitted pay_to_contact/subscribe transaction has not reached a final
+   * status (SUCCESS/FAILED) within this window, the payment is reported as
+   * failed rather than treated as confirmed (Issue #761).
+   */
+  txConfirmationTimeoutMs: parseNumericEnv('TX_CONFIRMATION_TIMEOUT_MS', process.env.TX_CONFIRMATION_TIMEOUT_MS, 60000, { min: 1000, integer: true }),
   requestLog: {
     skipPaths: (process.env.LOG_SKIP_PATHS ?? '/health,/health/liveness,/health/readiness,/ready,/metrics')
       .split(',').map(p => p.trim()).filter(Boolean),

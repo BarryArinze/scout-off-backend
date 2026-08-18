@@ -1458,8 +1458,10 @@
         "tags": [
           "scouts"
         ],
-        "summary": "Submit a trial offer to a player",
+        "summary": "Submit a trial offer to a player (deprecated alias)",
+        "description": "Deprecated alias of POST /scouts/{wallet}/trial-offers. It runs the same handler, so validation, persistence, tier promotion, SSE broadcast, response body and error codes are identical. Migrate to the plural path.",
         "operationId": "submitTrialOffer",
+        "deprecated": true,
         "security": [
           {
             "bearerAuth": []
@@ -1594,7 +1596,8 @@
         "tags": [
           "scouts"
         ],
-        "summary": "Create a trial offer (on-chain event log variant)",
+        "summary": "Submit a trial offer to a player",
+        "description": "Canonical trial-offer submission. Validates the body, submits the offer on-chain, indexes it into trial_offer_events, persists it to trial_offers as pending, promotes the player to Elite Tier and broadcasts the trial_offer_logged and milestone_approved SSE events.",
         "operationId": "createTrialOffer",
         "security": [
           {
@@ -1710,6 +1713,7 @@
           "scouts"
         ],
         "summary": "Unlock a player's contact information",
+        "description": "Pay-to-contact XLM micro-fee flow (#761). Submits a Soroban pay_to_contact transaction, waits for confirmed settlement, persists the unlock in contact_unlocks, broadcasts a contact_unlocked SSE event, and returns the player's contact metadata. Supports the Idempotency-Key header: duplicate keys return the cached response without submitting a second transaction; a key reused with a materially different request returns 409.",
         "operationId": "unlockContact",
         "security": [
           {
@@ -1725,17 +1729,44 @@
           },
           {
             "$ref": "#/components/parameters/playerId"
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Opaque key; duplicate requests with the same key return the cached response without a new on-chain transaction.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Contact unlocked"
+            "description": "Contact unlocked (or already unlocked / idempotent replay)"
+          },
+          "400": {
+            "description": "Invalid request (e.g. attempting to unlock your own profile)"
           },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
+          "402": {
+            "description": "Insufficient fee / funds to unlock the contact"
+          },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "description": "Idempotency key already used with a different request"
+          },
+          "502": {
+            "description": "Soroban RPC failure or contract rejection"
+          },
+          "503": {
+            "description": "Contract paused (contact unlocks unavailable)"
           }
         }
       }

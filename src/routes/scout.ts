@@ -8,7 +8,6 @@ import {
   subscribe,
   renewSubscription,
   cancelSubscription,
-  submitTrialOffer,
   listTrialOffers,
   createTrialOffer,
   trialOfferSchema,
@@ -127,6 +126,12 @@ router.route('/:wallet/contacts/:playerId')
 
 /**
  * POST /api/scouts/:wallet/contacts/:playerId/unlock
+ *
+ * Pay-to-contact XLM micro-fee flow (#761): the idempotency middleware is
+ * configured with a request fingerprint (wallet + playerId) so replaying the
+ * same Idempotency-Key with a materially different request is rejected with
+ * 409 instead of reusing the cached response, and duplicate requests with the
+ * same key never submit a second blockchain transaction.
  */
 router.route("/:wallet/contacts/:playerId/unlock")
   .post(
@@ -134,6 +139,9 @@ router.route("/:wallet/contacts/:playerId/unlock")
     requireWalletOwner(),
     requireApiKeyScope('write:contacts'),
     walletRateLimit(),
+    idempotency({
+      requestFingerprint: (req) => `${req.params.wallet}:${req.params.playerId}`,
+    }),
     validateBody(unlockContactSchema),
     unlockContact,
   )
@@ -145,14 +153,20 @@ router.route('/:wallet/payments')
 
 /**
  * POST /api/scouts/:wallet/trial-offer
+ *
+ * DEPRECATED alias of POST /api/scouts/:wallet/trial-offers (#1034). It runs the
+ * same handler, so it carries the same middleware chain — including walletRateLimit
+ * and idempotency, which guard the on-chain submission this route now performs.
  */
 router.route('/:wallet/trial-offer')
   .post(
     requireRole('scout'),
     requireWalletOwner({ validateAddress: false }),
     requireApiKeyScope('write:trial_offers'),
+    walletRateLimit(),
+    idempotency,
     validateBody(trialOfferSchema),
-    submitTrialOffer,
+    createTrialOffer,
   )
   .all(methodNotAllowed(['POST']));
 
@@ -160,9 +174,10 @@ router.route('/:wallet/trial-offer')
  * GET /api/scouts/:wallet/trial-offers
  * POST /api/scouts/:wallet/trial-offers
  *
- * On-chain trial offer event log (#285): submits (and lists) trial offers
- * indexed locally by tx_hash. Distinct from the singular /trial-offer stub
- * endpoint above and from the accept/reject workflow in trialOfferController.
+ * Canonical trial-offer submission (#285, #770): submits the offer on-chain,
+ * indexes it locally by tx_hash, promotes the player's tier and broadcasts SSE.
+ * The singular /trial-offer path above is a deprecated alias of this POST.
+ * Distinct from the accept/reject workflow in trialOfferController.
  */
 router.route('/:wallet/trial-offers')
   .get(requireRole('scout'), listTrialOffers)

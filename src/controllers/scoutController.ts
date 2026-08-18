@@ -27,12 +27,63 @@ import {
 import { logger } from '../utils/logger';
 import { checkWalletOwnership } from '../middleware/requireOwner';
 import { broadcaster } from '../services/eventBroadcaster';
+import { invalidatePlayerCache } from '../services/cache';
 import config from '../config';
 import { ErrorCode } from '../utils/errorCodes';
 import { insertTrialOffer, getTrialOffers } from '../services/indexer';
 import { invokeContract, strVal } from '../utils/contract';
 import { isValidIpfsOrHttpsUri } from '../utils/uriValidator';
-import { invalidatePlayerCache } from '../services/cache';
+
+/**
+ * HTTP status for each PaymentError code (Issue #761).
+ *
+ * | PaymentError code   | HTTP | Meaning                                  |
+ * |---------------------|------|------------------------------------------|
+ * | INSUFFICIENT_FUNDS  | 402  | Contract error #7 — micro-fee not paid   |
+ * | EXPIRED_TRUSTLINE   | 402  | Payment-token trustline missing/expired  |
+ * | CONTRACT_PAUSED     | 503  | Contract error #10 — platform paused     |
+ * | MISSING_PLAYER      | 404  | Contract error #3 — player not on-chain  |
+ * | INVALID_ACCOUNT     | 400  | Missing/malformed wallet or playerId     |
+ * | CONTRACT_ERROR      | 502  | Contract rejected the transaction        |
+ * | NETWORK_ERROR       | 502  | RPC failure / confirmation timeout       |
+ * | UNKNOWN             | 500  | Unclassified failure                     |
+ */
+export function paymentErrorStatus(code: PaymentError['code']): number {
+  switch (code) {
+    case 'INSUFFICIENT_FUNDS':
+    case 'EXPIRED_TRUSTLINE':
+      return 402;
+    case 'CONTRACT_PAUSED':
+      return 503;
+    case 'MISSING_PLAYER':
+      return 404;
+    case 'INVALID_ACCOUNT':
+      return 400;
+    case 'CONTRACT_ERROR':
+    case 'NETWORK_ERROR':
+      return 502;
+    case 'UNKNOWN':
+      return 500;
+  }
+}
+
+/**
+ * Contact metadata returned once a scout has paid to unlock a player.
+ * The player's `metadata_uri` (IPFS CID or HTTPS URL) is the authoritative
+ * off-chain contact profile reference; unrelated private/player fields
+ * (position, region, progress, activity state) are deliberately not exposed.
+ */
+function contactDetailsBody(player: {
+  player_id: string;
+  wallet: string;
+  metadata_uri: string | null;
+}): { playerId: string; wallet: string; metadataUri: string | null } {
+  return {
+    playerId: player.player_id,
+    wallet: player.wallet,
+    metadataUri: player.metadata_uri,
+  };
+}
 
 // ─── Validation schemas ────────────────────────────────────────────────────────
 
@@ -384,21 +435,33 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
       return;
     }
 
+    // Validate the requested player before any payment is considered.
+    const player = await getPlayerById(playerId);
+    if (!player) {
+      res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
+    }
+
+    // A scout must never pay to unlock their own profile.
+    if (player.wallet === wallet) {
+      logger.warn(`[scout] action=unlock_contact_denied scout=${wallet} playerId=${playerId} reason=self_unlock`);
+      res.status(400).json({
+        success: false,
+        error: 'Cannot unlock your own profile',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+
     // Idempotent: a player already unlocked by this scout must not be charged again.
     // Return the cached contact details so the client can use them immediately.
     if (await hasContactUnlock(wallet, playerId)) {
       logger.info(`[scout] action=unlock_contact_already_unlocked scout=${wallet} playerId=${playerId}`);
-      const player = await getPlayerById(playerId);
       res.json({
         success: true,
         data: {
           alreadyUnlocked: true,
-          ...(player && {
-            playerId: player.player_id,
-            wallet: player.wallet,
-            email: `${player.player_id}@example.com`,
-            phone: '+1-555-0199',
-          }),
+          ...contactDetailsBody(player),
         },
       });
       return;
@@ -406,6 +469,9 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
 
     logger.info(`[scout] action=unlock_contact_attempt scout=${wallet} playerId=${playerId}`);
 
+    // Confirmed-settlement gate: submitContactPayment only resolves after the
+    // Soroban RPC reports a SUCCESSFUL getTransaction for the submitted tx, so
+    // the unlock row below is never written for an unconfirmed payment.
     const result = await submitContactPayment(wallet, playerId);
     await insertContactUnlock({
       scout_wallet: wallet,
@@ -413,13 +479,36 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
       tx_hash: result.transactionId,
       unlocked_at: Math.floor(Date.now() / 1000),
     });
+
     // Player state changed (contact_unlocked) — invalidate player-list caches
     // after the persistence succeeded so subsequent list queries stay fresh.
     await invalidatePlayerCache();
-    res.json({ success: true, data: result });
+
+    // Notify connected SSE clients only after confirmed settlement AND the
+    // unlock row has been persisted. A notification failure must not roll
+    // back the confirmed blockchain settlement, so broadcast is fire-and-forget
+    // (the EventBroadcaster never throws for subscriber send errors).
+    broadcaster.broadcast({
+      type: 'contact_unlocked',
+      payload: {
+        scout: wallet,
+        player_id: playerId,
+        tx_hash: result.transactionId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    res.json({
+      success: true,
+      data: {
+        ...contactDetailsBody(player),
+        transactionId: result.transactionId,
+        status: result.status,
+      },
+    });
   } catch (err) {
     if (err instanceof PaymentError) {
-      res.status(402).json({ success: false, error: err.message, code: err.code });
+      res.status(paymentErrorStatus(err.code)).json({ success: false, error: err.message, code: err.code });
       return;
     }
     next(err);
@@ -438,7 +527,14 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
   }
 }
 
-/** POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally */
+/**
+ * POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally.
+ *
+ * This is the **canonical** implementation of "a scout submits a trial offer for a player".
+ * The legacy `POST /api/scouts/:wallet/trial-offer` route wires to this same handler,
+ * so both routes share one code path — validation, on-chain submission,
+ * `trial_offer_events` + `trial_offers` persistence, Elite Tier promotion and SSE broadcast.
+ */
 export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
@@ -527,43 +623,6 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
         newTier: 3,
       },
     });
-  } catch (err) {
-    if (err instanceof PaymentError) {
-      res.status(402).json({ success: false, error: err.message, code: err.code });
-      return;
-    }
-    next(err);
-  }
-}
-
-// ─── POST /api/scouts/:wallet/trial-offer ─────────────────────────────────────
-
-/** POST /api/scouts/:wallet/trial-offer */
-export async function submitTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
-    const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
-
-    const playerExists = queryEvents('player_registered').some((e) => e.payload.player_id === playerId);
-    if (!playerExists) {
-      res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
-      return;
-    }
-
-    const hasAccess = await scoutHasPlayerAccess(wallet, playerId);
-    if (!hasAccess) {
-      res.status(402).json({
-        success: false,
-        error: 'Scout must be subscribed or have paid the contact fee for this player',
-        code: ErrorCode.SUBSCRIPTION_REQUIRED,
-      });
-      return;
-    }
-
-    logger.info(`[scout] action=log_trial_offer_attempt scout=${wallet} playerId=${playerId}`);
-
-    const result = await stellarLogTrialOffer(wallet, playerId, detailsUri);
-    res.status(201).json({ success: true, data: result });
   } catch (err) {
     if (err instanceof PaymentError) {
       res.status(402).json({ success: false, error: err.message, code: err.code });
@@ -775,12 +834,7 @@ export async function getContactDetails(req: Request, res: Response, next: NextF
 
     res.json({
       success: true,
-      data: {
-        playerId: player.player_id,
-        wallet: player.wallet,
-        email: `${player.player_id}@example.com`,
-        phone: '+1-555-0199',
-      },
+      data: contactDetailsBody(player),
     });
   } catch (err) {
     next(err);
