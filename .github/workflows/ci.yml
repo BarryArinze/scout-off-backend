@@ -58,8 +58,17 @@ jobs:
 
       - run: npm ci
 
+      # GitHub-hosted runners intermittently lose connectivity to the
+      # azure.archive.ubuntu.com mirror, making apt-get update hang or time
+      # out (observed stalling a whole job until its 30-minute budget). Point
+      # apt at the main archive mirror instead, then bound the update with a
+      # timeout and enable retries as a backstop.
       - name: Install sqlite3 CLI
-        run: sudo apt-get update && sudo apt-get install -y sqlite3
+        run: |
+          sudo sed -i 's|//azure\.archive\.ubuntu\.com|//archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors.txt 2>/dev/null || true
+          timeout 180 sudo apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=15
+          sudo apt-get install -y --no-install-recommends sqlite3
 
       - name: Validate env example
         run: node scripts/validate-env.js

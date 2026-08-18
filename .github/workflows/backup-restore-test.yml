@@ -34,8 +34,15 @@ jobs:
       - name: Build
         run: npm run build
 
+      # GitHub runners intermittently lose connectivity to the
+      # azure.archive.ubuntu.com mirror; point apt at the main archive mirror
+      # so apt-get update cannot hang the job.
       - name: Install sqlite3 CLI
-        run: sudo apt-get update && sudo apt-get install -y sqlite3 curl
+        run: |
+          sudo sed -i 's|//azure\.archive\.ubuntu\.com|//archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors.txt 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y sqlite3 curl
 
       - name: Make scripts executable
         run: chmod +x scripts/*.sh
@@ -101,6 +108,8 @@ jobs:
       - name: Install sqlite3 CLI and AWS CLI
         if: steps.check-creds.outputs.configured == 'true'
         run: |
+          sudo sed -i 's|//azure\.archive\.ubuntu\.com|//archive.ubuntu.com|g' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.sources /etc/apt/apt-mirrors.txt 2>/dev/null || true
           sudo apt-get update
           sudo apt-get install -y sqlite3 curl awscli
 
