@@ -22,7 +22,6 @@ import {
 } from '../db';
 import { decryptWebhookSecret } from '../utils/webhookSecretCipher';
 import { signWebhookPayload } from '../services/webhooks';
-import { isValidStellarAddress } from '../utils/stellarAddress';
 import { sendForbidden } from '../utils/authError';
 import { logger } from '../utils/logger';
 import type { ContractEventType } from '../types';
@@ -59,19 +58,6 @@ export const registerWebhookSchema = z.object({
 export type RegisterWebhookRequest = z.infer<typeof registerWebhookSchema>;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function assertWalletOwnership(req: Request, res: Response): boolean {
-  const { wallet } = req.params;
-  if (!isValidStellarAddress(wallet)) {
-    res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-    return false;
-  }
-  if (req.account !== wallet) {
-    sendForbidden(res, 'Forbidden: wallet mismatch');
-    return false;
-  }
-  return true;
-}
 
 /** Mask a plaintext secret for safe display in list responses. */
 function maskSecret(plaintext: string): string {
@@ -113,8 +99,6 @@ export async function registerWebhook(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const parsed = registerWebhookSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -172,8 +156,6 @@ export async function listWebhooks(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const rows = getWebhookSubscriptionsByScout(req.params.wallet);
 
     res.json({
@@ -202,8 +184,6 @@ export async function deleteWebhook(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       res.status(400).json({ success: false, error: 'Invalid subscription id' });
@@ -244,8 +224,6 @@ export async function testWebhook(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       res.status(400).json({ success: false, error: 'Invalid subscription id' });

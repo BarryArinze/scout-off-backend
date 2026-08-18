@@ -25,6 +25,7 @@ On every indexed contract event, the backend POSTs:
 
 ```json
 {
+  "deliveryId": "550e8400-e29b-41d4-a716-446655440000",
   "eventType": "player_registered",
   "payload": { "...": "..." }
 }
@@ -36,6 +37,19 @@ to every subscriber's URL, with headers:
 Content-Type: application/json
 X-Webhook-Signature: sha256=<hex-encoded HMAC-SHA256 digest>
 ```
+
+The `deliveryId` field is a UUID v4 generated once per logical delivery. It
+is included in the signed body, so a receiver can trust it is authentic and
+unmodified. The same `deliveryId` is reused across dead-letter replays of
+the same logical delivery, enabling receiver-side deduplication.
+
+**Migration note (existing subscribers):** The payload shape has changed from
+`{ eventType, payload }` to `{ deliveryId, eventType, payload }`. Existing
+subscribers that destructure only `eventType` and `payload` will continue to
+work — the new `deliveryId` field is additive and does not break existing
+code that ignores unknown keys. Subscribers that validate the payload shape
+(e.g. strict JSON Schema validation) must update their schema to accept the
+new field.
 
 Delivery uses exponential backoff (3 attempts by default: 500ms, then 1000ms
 between attempts) via `postWebhookWithRetry` in `src/services/webhooks.ts`.
@@ -51,7 +65,8 @@ sha256=HMAC_SHA256(secret, raw_request_body_bytes)
 The HMAC is computed over the **raw bytes of the request body exactly as
 sent** — do not re-serialize the parsed JSON before verifying, since
 key ordering/whitespace differences would produce a different digest than
-what was signed.
+what was signed. The `deliveryId` field is part of the signed body, so
+a receiver can rely on it being authentic.
 
 This mirrors the pattern used by Stripe and GitHub webhooks: recompute the
 HMAC yourself with your subscription's secret, and compare it to the value in
@@ -95,17 +110,65 @@ Note the receiver must read the **raw body** (e.g. `express.raw()`) for the
 signature check — parsing JSON first and re-stringifying it is not
 guaranteed to reproduce the exact bytes that were signed.
 
+### Receiver-side deduplication
+
+Every webhook delivery — both the initial dispatch and dead-letter replays —
+includes a `deliveryId` (UUID v4) in the signed payload body. Replays of the
+same logical delivery carry the identical `deliveryId`, while genuinely
+distinct events produce distinct IDs.
+
+To deduplicate on the receiver side:
+
+1. **Extract `deliveryId`** from the parsed JSON body.
+2. **Maintain an in-memory or persistent dedup cache** keyed on `deliveryId`.
+3. **On each delivery**, check whether the `deliveryId` already exists in the
+cache. If it does, acknowledge the webhook (return 200) but skip processing.
+4. **If the `deliveryId` is new**, process the event and add it to the cache.
+
+Example (Node.js):
+
+```js
+const deliveryCache = new Map(); // key: deliveryId, value: timestamp
+const DEDUP_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+function isDuplicate(deliveryId) {
+  if (deliveryCache.has(deliveryId)) return true;
+  deliveryCache.set(deliveryId, Date.now());
+  return false;
+}
+
+// Periodically prune expired entries
+setInterval(() => {
+  const cutoff = Date.now() - DEDUP_TTL_MS;
+  for (const [id, ts] of deliveryCache) {
+    if (ts < cutoff) deliveryCache.delete(id);
+  }
+}, 60_000);
+```
+
+**Important:** Verify the HMAC signature before checking the dedup cache to
+ensure you are not accepting forged `deliveryId` values.
+
 ## Dead-letter queue
 
 If all retry attempts for a given subscriber are exhausted, the delivery is
 persisted to the `webhook_dead_letters` table (`db/013_webhook_dead_letters.sql`)
 instead of being dropped, with:
 
-- `payload` — the JSON body that was being delivered
+- `payload` — the JSON body that was being delivered (includes `deliveryId`)
+- `delivery_id` — the stable delivery identifier for deduplication
 - `url` — the target subscriber URL
 - `failure_reason` — the error message from the final failed attempt
 - `attempts` — number of attempts made
-- `status` — `'pending'` until successfully replayed, then `'replayed'`
+- `status` — `'pending'` until claimed for retry, `'in_progress'` while a
+  retry sweep is processing it, then `'replayed'` on success
+- `locked_by` — identifier of the worker processing the row (null when not claimed)
+- `locked_at` — timestamp when the row was claimed
+
+The retry job uses atomic claims (`UPDATE ... WHERE status = 'pending'`) to
+ensure that at most one concurrent sweep processes a given row, even if
+multiple sweeps overlap. The same `deliveryId` from the original delivery is
+preserved in the payload, so subscriber-side dedup works across replays.
 
 This never throws back into the caller that triggered the event — a broken or
 slow subscriber cannot fail an unrelated request (e.g. player registration).

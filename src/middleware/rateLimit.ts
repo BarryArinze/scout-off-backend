@@ -4,6 +4,7 @@ import { RateLimitStore } from './rateLimitStore';
 import { InMemoryRateLimitStore } from './inMemoryRateLimitStore';
 import { RedisRateLimitStore } from './redisRateLimitStore';
 import { getRedisClient } from '../services/redis';
+import { logger } from '../utils/logger';
 
 function createStore(): RateLimitStore {
   const redis = getRedisClient();
@@ -35,6 +36,26 @@ export interface RateLimitOptions {
 /**
  * Simple in-process or Redis-backed IP-based rate limiter.
  * Configurable via windowMs and max; excess requests return HTTP 429.
+ *
+ * ## Fail-open policy
+ *
+ * When the backing store (Redis) raises an error, the request is *allowed*
+ * rather than rejected.  This is an explicit availability-over-security
+ * trade-off: a Redis outage temporarily disables distributed throttling
+ * rather than taking all API endpoints offline.
+ *
+ * Rationale:
+ * - The protected endpoints are public APIs and auth endpoints that must
+ *   remain available to legitimate users even during infrastructure failures.
+ * - A Redis outage is not itself an attack vector — an attacker who takes
+ *   down Redis would already have significant infrastructure access.
+ * - During a Redis outage the in-process InMemoryRateLimitStore does NOT
+ *   automatically kick in; operators should monitor Redis availability.
+ * - The fail-open decision is logged at `warn` level so operators can detect
+ *   and respond to Redis problems.
+ *
+ * If a future security review requires fail-closed behavior for specific
+ * routes, pass a custom `store` that implements the fail-closed policy.
  */
 export function rateLimit(options: RateLimitOptions = {}) {
   const windowMs = options.windowMs ?? config.rateLimit.windowMs;
@@ -61,7 +82,10 @@ export function rateLimit(options: RateLimitOptions = {}) {
       }
       next();
     } catch (err) {
-      next(err);
+      // Redis (or other store) error: fail open — allow the request rather
+      // than returning a 500.  Log at warn so operators can investigate.
+      logger.warn('[rate-limit] store error, failing open', { ip, err });
+      next();
     }
   };
 }
@@ -70,6 +94,8 @@ export function rateLimit(options: RateLimitOptions = {}) {
  * Simple in-process or Redis-backed wallet-based rate limiter.
  * Configurable via windowMs and max; excess requests return HTTP 429.
  * If req.account is not present, it calls next().
+ *
+ * Inherits the same fail-open policy as `rateLimit` — see above.
  */
 export function walletRateLimit(options: RateLimitOptions = {}) {
   const windowMs = options.windowMs ?? config.rateLimit.windowMs;
@@ -96,7 +122,9 @@ export function walletRateLimit(options: RateLimitOptions = {}) {
       }
       next();
     } catch (err) {
-      next(err);
+      // Redis (or other store) error: fail open.
+      logger.warn('[rate-limit] store error, failing open', { wallet, err });
+      next();
     }
   };
 }

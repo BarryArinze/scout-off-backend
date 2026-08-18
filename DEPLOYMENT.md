@@ -148,6 +148,33 @@ preserving backward compatibility during staged migrations.
 The `helm/scout-off-backend/` directory contains a production-grade Helm 3 chart
 (API version `v2`) for deploying the backend to Kubernetes.
 
+### Default topology: single-replica SQLite
+
+The chart's defaults deploy a **single replica backed by SQLite**:
+`replicaCount: 1`, `hpa.enabled: false`, `pdb.enabled: false`, and
+`env.DB_DRIVER: sqlite`. This is the only topology that is internally
+consistent out of the box — SQLite is a single-process, single-file database
+with no support for concurrent access from multiple processes, so scaling to
+multiple pods while on SQLite would give every pod its own unshared, ephemeral
+database file (writes invisible across pods, data lost on restart).
+
+To scale horizontally you **must** switch to PostgreSQL first:
+
+```bash
+helm upgrade --install scout-off-backend ./helm/scout-off-backend \
+  --set env.DB_DRIVER=postgres \
+  --set env.DATABASE_URL=postgresql://user:pass@host:5432/db \
+  --set replicaCount=3 \
+  --set hpa.enabled=true
+```
+
+See [docs/postgres-migration.md](docs/postgres-migration.md) for the migration
+procedure. If you override the defaults into the broken combination
+(SQLite + more than one replica, or SQLite + HPA enabled), the chart prints a
+loud warning in its NOTES.txt output instead of silently deploying it; the
+`scripts/validate-helm-chart.sh` CI check enforces this invariant on every
+push.
+
 ### Prerequisites
 
 - Helm 3.x installed (`helm version`)
@@ -259,10 +286,12 @@ Common overrides:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `image.tag` | chart appVersion | Docker image tag to deploy |
-| `replicaCount` | `2` | Minimum pod count (HPA floor) |
-| `hpa.maxReplicas` | `10` | Maximum pods under autoscaling |
+| `replicaCount` | `1` | Pod count. Keep at `1` while `env.DB_DRIVER=sqlite` (SQLite is single-process); raise it only after switching to PostgreSQL |
+| `hpa.enabled` | `false` | Enable autoscaling. Requires `env.DB_DRIVER=postgres` + `env.DATABASE_URL` |
+| `hpa.maxReplicas` | `10` | Maximum pods under autoscaling (only when `hpa.enabled=true`) |
 | `hpa.targetCPUUtilizationPercentage` | `70` | CPU threshold to trigger scale-up |
 | `hpa.targetMemoryUtilizationPercentage` | `80` | Memory threshold to trigger scale-up |
+| `pdb.enabled` | `false` | Enable a PodDisruptionBudget. Enable for multi-replica (PostgreSQL-backed) deployments |
 | `ingress.enabled` | `false` | Expose the service via an Ingress |
 | `ingress.hosts[0].host` | `api.scoutoff.io` | Public hostname |
 | `ingress.tls[0].secretName` | `scout-off-tls` | TLS certificate Secret name |
@@ -287,8 +316,9 @@ helm template scout-off-backend ./helm/scout-off-backend \
   --set image.tag=local-test
 ```
 
-This produces a Deployment, HPA, PodDisruptionBudget, Service, ConfigMap, and
-(when `ingress.enabled=true`) an Ingress resource.
+This produces a Deployment, Service, ConfigMap, and (when `ingress.enabled=true`)
+an Ingress resource. The HPA and PodDisruptionBudget are only rendered when
+`hpa.enabled=true` / `pdb.enabled=true` respectively.
 
 ### 7. Uninstall
 

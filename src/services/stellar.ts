@@ -421,13 +421,15 @@ export type FeeWithdrawalErrorCode =
   | 'NO_FEES'
   | 'INVALID_RECIPIENT'
   | 'NETWORK_ERROR'
-  | 'CONTRACT_PAUSED';
+  | 'CONTRACT_PAUSED'
+  | 'INSUFFICIENT_FEES';
 
 /** Non-retryable codes — the caller should not retry without corrective action. */
 const NON_RETRYABLE_CODES: ReadonlySet<FeeWithdrawalErrorCode> = new Set([
   'NO_FEES',
   'INVALID_RECIPIENT',
   'CONTRACT_PAUSED',
+  'INSUFFICIENT_FEES',
 ]);
 
 export class FeeWithdrawalError extends Error {
@@ -450,27 +452,57 @@ function isContractPausedError(message: string): boolean {
 }
 
 /**
- * Invoke `withdraw_fees(recipient: Address) -> u128` on the Soroban contract
- * via the platform keypair.
+ * Invoke `withdraw_fees(recipient: Address, amount: i128) -> i128` on the
+ * Soroban contract via the platform keypair.
  *
  * Flow mirrors pauseContractOnChain() / cancelSubscriptionOnChain():
  *   getAccount → build tx → simulateTransaction → assembleTransaction
  *   → sign → sendTransaction → poll getTransaction until final status.
  *
- * On success, parses the confirmed transaction's u128 return value and
- * throws FeeWithdrawalError('No fees available', 'NO_FEES') if it is zero
- * rather than returning a zero-amount result. Throws
- * FeeWithdrawalError(..., 'CONTRACT_PAUSED') if the contract's paused-state
- * guard (error #10) rejects the call, and (..., 'NETWORK_ERROR') for any
- * RPC/transport failure.
+ * `amountStroops` is the caller-validated withdrawal amount in stroops and
+ * is encoded as an i128 argument in the contract call, so the on-chain
+ * `withdraw_fees` enforces the exact requested amount (rejecting anything
+ * above the available balance) instead of silently draining the vault.
+ * When `amountStroops` is omitted (the legacy endpoint), the full available
+ * balance is fetched first and withdrawn — that endpoint's historical
+ * "withdraw everything" behaviour.
+ *
+ * On success, parses the confirmed transaction's i128 return value — the
+ * actual amount withdrawn — and throws FeeWithdrawalError('No fees
+ * available', 'NO_FEES') if it is zero rather than returning a zero-amount
+ * result. Throws FeeWithdrawalError(..., 'CONTRACT_PAUSED') if the
+ * contract's paused-state guard (error #10) rejects the call,
+ * (..., 'INSUFFICIENT_FEES') if the contract's balance guard (error #7)
+ * rejects the amount, and (..., 'NETWORK_ERROR') for any RPC/transport
+ * failure.
  */
-export async function withdrawFees(recipient: string): Promise<FeeWithdrawalResult> {
+export async function withdrawFees(recipient: string, amountStroops?: string): Promise<FeeWithdrawalResult> {
   return tracer.startActiveSpan('stellar.withdrawFees', async (span) => {
     span.setAttribute('stellar.contract_function', 'withdraw_fees');
     try {
       if (!recipient) {
         throw new FeeWithdrawalError('Missing recipient', 'INVALID_RECIPIENT');
       }
+
+      // Resolve the withdrawal amount. The fully-specified v2 endpoint passes
+      // an explicit admin-validated amountStroops; the legacy endpoint omits
+      // it, in which case the entire available balance is withdrawn (its
+      // historical behaviour) — fetched first so the amount is still encoded
+      // and enforced by the contract call.
+      let requested: bigint;
+      if (amountStroops === undefined) {
+        const balance = await getFeeBalance();
+        if (balance <= 0n) {
+          throw new FeeWithdrawalError('No fees available to withdraw', 'NO_FEES');
+        }
+        requested = balance;
+      } else {
+        requested = BigInt(amountStroops);
+        if (requested <= 0n) {
+          throw new FeeWithdrawalError('No fees available to withdraw', 'NO_FEES');
+        }
+      }
+      span.setAttribute('stellar.withdraw_amount', requested.toString());
 
       const { getPlatformKeypair } = await import('../utils/signer');
       const keypair = getPlatformKeypair();
@@ -489,7 +521,11 @@ export async function withdrawFees(recipient: string): Promise<FeeWithdrawalResu
         networkPassphrase: networkPassphrase(),
       })
         .addOperation(
-          contract.call('withdraw_fees', Address.fromString(recipient).toScVal()),
+          contract.call(
+            'withdraw_fees',
+            Address.fromString(recipient).toScVal(),
+            nativeToScVal(requested, { type: 'i128' }),
+          ),
         )
         .setTimeout(30)
         .build();
@@ -505,6 +541,12 @@ export async function withdrawFees(recipient: string): Promise<FeeWithdrawalResu
         const errMsg = simResult.error ?? '';
         if (isContractPausedError(errMsg)) {
           throw new FeeWithdrawalError('Contract is paused; withdrawal not available', 'CONTRACT_PAUSED');
+        }
+        if (isInsufficientFeeError(errMsg)) {
+          throw new FeeWithdrawalError(
+            'Requested withdrawal amount exceeds the available fee balance',
+            'INSUFFICIENT_FEES',
+          );
         }
         throw new FeeWithdrawalError(`Simulation failed: ${errMsg}`, 'NETWORK_ERROR');
       }
@@ -522,6 +564,12 @@ export async function withdrawFees(recipient: string): Promise<FeeWithdrawalResu
         const errMsg = String(sendResult.errorResult ?? '');
         if (isContractPausedError(errMsg)) {
           throw new FeeWithdrawalError('Contract is paused; withdrawal not available', 'CONTRACT_PAUSED');
+        }
+        if (isInsufficientFeeError(errMsg)) {
+          throw new FeeWithdrawalError(
+            'Requested withdrawal amount exceeds the available fee balance',
+            'INSUFFICIENT_FEES',
+          );
         }
         throw new FeeWithdrawalError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
       }
@@ -544,6 +592,12 @@ export async function withdrawFees(recipient: string): Promise<FeeWithdrawalResu
         const resultMeta = ((getResult as unknown) as { resultMetaXdr?: string }).resultMetaXdr ?? '';
         if (isContractPausedError(resultMeta)) {
           throw new FeeWithdrawalError('Contract is paused; withdrawal not available', 'CONTRACT_PAUSED');
+        }
+        if (isInsufficientFeeError(resultMeta)) {
+          throw new FeeWithdrawalError(
+            'Requested withdrawal amount exceeds the available fee balance',
+            'INSUFFICIENT_FEES',
+          );
         }
         throw new FeeWithdrawalError('withdraw_fees transaction failed on-chain', 'NETWORK_ERROR');
       }
@@ -1639,7 +1693,7 @@ export class FeeBalanceError extends Error {
 
 /**
  * Read the current accumulated platform fee balance from the Soroban contract
- * by invoking `get_fee_balance() -> u128` via simulateTransaction.
+ * by invoking `get_fee_balance() -> i128` via simulateTransaction.
  *
  * This is a read-only call — no transaction is signed or submitted.  Uses an
  * ephemeral keypair as the simulation source (same pattern as isSubscribed /

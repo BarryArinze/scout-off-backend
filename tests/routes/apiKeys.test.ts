@@ -139,13 +139,38 @@ describe('resolveApiKey (unit)', () => {
     expect(resolveApiKey('somekey')).toBeNull();
   });
 
-  it('returns scout_wallet and id when key matches', () => {
+  it('returns scout_wallet, id, and parsed scopes when key matches', () => {
     const { key, keyHash } = generateApiKey();
     mockGetAllActive.mockReturnValueOnce([
-      { id: 42, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'test', created_at: 0, last_used_at: null, revoked_at: null },
+      { id: 42, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'test', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null },
     ]);
     const result = resolveApiKey(key);
-    expect(result).toEqual({ scout_wallet: SCOUT_A, id: 42 });
+    // Legacy key: null scopes → parsed as null (unrestricted) for the shared
+    // scope contract (#1019).
+    expect(result).toEqual({ scout_wallet: SCOUT_A, id: 42, scopes: null });
+  });
+
+  it('resolves the parsed scope list for a restricted key', () => {
+    const { key, keyHash } = generateApiKey();
+    mockGetAllActive.mockReturnValueOnce([
+      {
+        id: 43,
+        key_hash: keyHash,
+        scout_wallet: SCOUT_A,
+        label: 'restricted',
+        created_at: 0,
+        last_used_at: null,
+        revoked_at: null,
+        scopes: JSON.stringify(['read:milestones', 'write:contacts']),
+        rate_limit_per_minute: null,
+      },
+    ]);
+    const result = resolveApiKey(key);
+    expect(result).toEqual({
+      scout_wallet: SCOUT_A,
+      id: 43,
+      scopes: ['read:milestones', 'write:contacts'],
+    });
   });
 
   it('returns null when no key matches', () => {

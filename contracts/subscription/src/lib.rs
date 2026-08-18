@@ -257,16 +257,41 @@ impl SubscriptionContract {
         Self::calculate_contact_fee(&env)
     }
 
+    /// Return the accumulated platform fee balance in stroops.
+    ///
+    /// View-only (no auth required). Returns 0 when no fees have accrued.
+    /// The backend reads this via `get_fee_balance()` before proposing a
+    /// withdrawal so it can reject over-balance requests client-side too.
+    pub fn get_fee_balance(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::PlatformFeeBalance)
+            .unwrap_or(0)
+    }
+
     /// Withdraw accumulated platform fees to the admin address.
     ///
-    /// Requires admin auth. Transfers all accumulated fees from this contract
-    /// to the admin, resets the balance, and emits fees_withdrawn.
-    pub fn withdraw_fees(env: Env, admin: Address) -> Result<i128, Error> {
+    /// Requires admin auth. Transfers exactly `amount` stroops from this
+    /// contract to the admin, decrements the stored balance by that amount,
+    /// and emits fees_withdrawn with the actually-withdrawn amount (the
+    /// return value), so a caller-specified partial withdrawal is enforced
+    /// on-chain rather than silently draining the whole vault.
+    ///
+    /// Rejects with Error::InvalidInput when `amount <= 0` and with
+    /// Error::InsufficientFee when `amount` exceeds the available balance —
+    /// this balance check is authoritative: the backend re-checks it via
+    /// get_fee_balance() before submitting, but the contract is the final
+    /// guard against withdrawing more than it holds.
+    pub fn withdraw_fees(env: Env, admin: Address, amount: i128) -> Result<i128, Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
         }
         if is_paused(&env) {
             return Err(Error::ContractPaused);
+        }
+
+        if amount <= 0 {
+            return Err(Error::InvalidInput);
         }
 
         let stored_admin: Address = env
@@ -286,8 +311,8 @@ impl SubscriptionContract {
             .get(&DataKey::PlatformFeeBalance)
             .unwrap_or(0);
 
-        if balance <= 0 {
-            return Ok(0);
+        if amount > balance {
+            return Err(Error::InsufficientFee);
         }
 
         let token_addr: Address = env
@@ -296,19 +321,20 @@ impl SubscriptionContract {
             .get(&DataKey::Token)
             .ok_or(Error::NotInitialized)?;
         let token = TokenClient::new(&env, &token_addr);
-        token.transfer(&env.current_contract_address(), &admin, &balance);
+        token.transfer(&env.current_contract_address(), &admin, &amount);
 
+        let remaining = balance - amount;
         env.storage()
             .instance()
-            .set(&DataKey::PlatformFeeBalance, &0i128);
+            .set(&DataKey::PlatformFeeBalance, &remaining);
 
         env.events().publish(
             (Symbol::new(&env, "fees_withdrawn"),),
-            (admin.clone(), balance),
+            (admin.clone(), amount),
         );
 
         bump_instance(&env);
-        Ok(balance)
+        Ok(amount)
     }
 
     /// Update the platform fee in basis points. Only the admin may call this.
@@ -441,31 +467,6 @@ impl SubscriptionContract {
 
         bump_instance(&env);
         Ok(())
-    }
-
-    // ── get_fee_balance ────────────────────────────────────────────────────
-
-    /// Return the current accumulated platform fee balance in stroops.
-    ///
-    /// This is a read-only query; it does not require authentication and does
-    /// not modify state.  The backend's `getFeeBalance()` calls this function
-    /// via `simulateTransaction`.
-    ///
-    /// Returns `0` when no fees have been accumulated (e.g. immediately after
-    /// `initialize`).
-    ///
-    /// # Errors
-    /// * [`Error::NotInitialized`] — Contract has not been initialized.
-    pub fn get_fee_balance(env: Env) -> Result<i128, Error> {
-        if !is_initialized(&env) {
-            return Err(Error::NotInitialized);
-        }
-        let balance: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::PlatformFeeBalance)
-            .unwrap_or(0);
-        Ok(balance)
     }
 }
 
@@ -635,8 +636,10 @@ mod tests {
         let scout = Address::generate(&env);
         fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
         client.subscribe(&scout, &1u32, &30u32);
-        let withdrawn = client.withdraw_fees(&admin);
-        assert!(withdrawn > 0);
+        // fee = 1_000_000 × 1 × 30 = 30_000_000 stroops
+        let withdrawn = client.withdraw_fees(&admin, &30_000_000i128);
+        assert_eq!(withdrawn, 30_000_000);
+        assert_eq!(client.get_fee_balance(), 0);
     }
 
     #[test]
@@ -648,8 +651,76 @@ mod tests {
         fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
         client.subscribe(&scout, &1u32, &30u32);
         let non_admin = Address::generate(&env);
-        let result = client.try_withdraw_fees(&non_admin);
+        let result = client.try_withdraw_fees(&non_admin, &30_000_000i128);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn withdraw_fees_partial_amount_withdraws_only_requested() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        let scout = Address::generate(&env);
+        fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
+        client.subscribe(&scout, &1u32, &30u32);
+
+        // Subscription fee: BASE_FEE_STROOPS (1_000_000) × tier-1 multiplier × 30 days.
+        let total: i128 = 30_000_000;
+        let partial: i128 = 10_000_000;
+
+        let token_client = TokenClient::new(&env, &token);
+        assert_eq!(token_client.balance(&client.address), total);
+
+        // A partial withdrawal moves only the requested amount on-chain —
+        // not the full balance.
+        let withdrawn = client.withdraw_fees(&admin, &partial);
+        assert_eq!(withdrawn, partial);
+        assert_eq!(token_client.balance(&client.address), total - partial);
+        assert_eq!(client.get_fee_balance(), total - partial);
+
+        // The remainder can be withdrawn afterwards — the vault drains to zero.
+        let withdrawn_rest = client.withdraw_fees(&admin, &(total - partial));
+        assert_eq!(withdrawn_rest, total - partial);
+        assert_eq!(client.get_fee_balance(), 0);
+        assert_eq!(token_client.balance(&client.address), 0);
+    }
+
+    #[test]
+    fn withdraw_fees_rejects_amount_exceeding_balance() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        let scout = Address::generate(&env);
+        fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
+        client.subscribe(&scout, &1u32, &30u32);
+
+        let result = client.try_withdraw_fees(&admin, &30_000_001i128);
+        assert!(result.is_err());
+        // The rejected call leaves the vault untouched.
+        assert_eq!(client.get_fee_balance(), 30_000_000);
+    }
+
+    #[test]
+    fn withdraw_fees_rejects_zero_and_negative_amounts() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+
+        assert!(client.try_withdraw_fees(&admin, &0i128).is_err());
+        assert!(client.try_withdraw_fees(&admin, &-1i128).is_err());
+    }
+
+    #[test]
+    fn get_fee_balance_tracks_accrued_fees() {
+        let env = Env::default();
+        let (client, admin, token) = setup(&env);
+        client.initialize(&admin, &token, &500u32);
+        assert_eq!(client.get_fee_balance(), 0);
+
+        let scout = Address::generate(&env);
+        fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
+        client.subscribe(&scout, &1u32, &30u32);
+        assert_eq!(client.get_fee_balance(), 30_000_000);
     }
 
     #[test]
@@ -802,8 +873,9 @@ mod tests {
         let scout = Address::generate(&env);
         fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
         client.subscribe(&scout, &1u32, &30u32);
-        assert!(client.get_fee_balance() > 0);
-        client.withdraw_fees(&admin);
+        let balance = client.get_fee_balance();
+        assert!(balance > 0);
+        client.withdraw_fees(&admin, &balance);
         assert_eq!(client.get_fee_balance(), 0i128);
     }
 

@@ -238,6 +238,7 @@ export function resetMetrics(): void {
   cacheCountsStore.hits = 0;
   cacheCountsStore.misses = 0;
   cacheCountsStore.evictions = 0;
+  cacheInvalidationStore.total = 0;
   resetIpReputationCounters();
 }
 
@@ -275,6 +276,36 @@ export function recordCacheEviction(): void {
 /** Returns a snapshot of the cache operation counters. */
 export function getCacheMetrics(): CacheCounts {
   return { ...cacheCountsStore };
+}
+
+// ─── Cache invalidation counter ────────────────────────────────────────────────
+//
+// `cache_invalidation_total` counts every player-list cache invalidation
+// performed by this process:
+//   - one increment per `invalidatePlayerCache()` operation (local calls, e.g.
+//     from the indexer after a player state change), and
+//   - one increment per `invalidate:players` pub/sub message received from a
+//     sibling instance that clears the local player-list cache.
+//
+// So across a multi-instance deployment each logical invalidation produces one
+// increment on the originating instance and one on every instance that applies
+// it locally — the metric reflects actual invalidation activity per process.
+
+export interface CacheInvalidationCounts {
+  total: number;
+}
+
+/** In-memory cache invalidation counter. */
+export const cacheInvalidationStore: CacheInvalidationCounts = { total: 0 };
+
+/** Record one player-list cache invalidation operation (local or received). */
+export function recordCacheInvalidation(): void {
+  cacheInvalidationStore.total += 1;
+}
+
+/** Returns the current cache invalidation counter. */
+export function getCacheInvalidationTotal(): number {
+  return cacheInvalidationStore.total;
 }
 
 // ─── Webhook dead-letter counters ─────────────────────────────────────────────
@@ -368,6 +399,11 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   lines.push('# HELP cache_evictions_total Total number of lazy cache evictions (expired key reads)');
   lines.push('# TYPE cache_evictions_total counter');
   lines.push(`cache_evictions_total ${cache.evictions}`);
+
+  // Cache invalidation counter.
+  lines.push('# HELP cache_invalidation_total Total number of player-list cache invalidations performed (local operations and received invalidate:players messages)');
+  lines.push('# TYPE cache_invalidation_total counter');
+  lines.push(`cache_invalidation_total ${cacheInvalidationStore.total}`);
 
   // IPFS operation duration histogram.
   lines.push('# HELP ipfs_operation_duration_seconds IPFS operation latency in seconds');

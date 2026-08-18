@@ -37,8 +37,7 @@ import {
   type SavedSearchRow,
 } from '../db';
 import { cacheGet, cacheSet } from '../services/cache';
-import { isValidStellarAddress } from '../utils/stellarAddress';
-import { sendForbidden } from '../utils/authError';
+import { checkWalletOwnership } from '../middleware/requireOwner';
 import { getTierMeta, tierName } from '../utils/tier';
 import { logger } from '../utils/logger';
 import { queryEvents } from '../db';
@@ -381,14 +380,10 @@ export async function getScoutRecommendations(
     const { wallet } = req.params;
 
     // ── Ownership guard ──────────────────────────────────────────────────────
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-      return;
-    }
-    if (req.account !== wallet) {
-      sendForbidden(res, 'Forbidden: wallet mismatch');
-      return;
-    }
+    // Enforced by requireWalletOwner() at the route level; re-invoked here so
+    // direct callers (unit tests) get the same protection from the shared
+    // implementation instead of an inline copy.
+    if (!checkWalletOwnership(req, res)) return;
 
     // ── Query param validation ───────────────────────────────────────────────
     const parsed = recQuerySchema.safeParse(req.query);

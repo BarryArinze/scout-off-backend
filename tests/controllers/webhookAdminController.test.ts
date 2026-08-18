@@ -40,6 +40,7 @@ describe('listDeadLetters', () => {
       url,
       eventType: 'trial_offer_logged',
       payload: rawPayload,
+      deliveryId: 'del-list-test-001',
       failureReason: 'Webhook dispatch failed with status 500',
       attempts: 3,
     });
@@ -98,7 +99,8 @@ describe('replayDeadLetter', () => {
       subscriptionId: sub.id,
       url,
       eventType: 'player_registered',
-      payload: JSON.stringify({ eventType: 'player_registered', payload: { wallet: 'GABC' } }),
+      payload: JSON.stringify({ deliveryId: 'del-replay-test-001', eventType: 'player_registered', payload: { wallet: 'GABC' } }),
+      deliveryId: 'del-replay-test-001',
       failureReason: 'Webhook dispatch failed with status 500',
       attempts: 3,
     });
@@ -136,7 +138,8 @@ describe('replayDeadLetter', () => {
         subscriptionId: sub.id,
         url,
         eventType: 'fees_withdrawn',
-        payload: JSON.stringify({ eventType: 'fees_withdrawn', payload: {} }),
+        payload: JSON.stringify({ deliveryId: 'del-replay-fail-001', eventType: 'fees_withdrawn', payload: {} }),
+        deliveryId: 'del-replay-fail-001',
         failureReason: 'original failure',
         attempts: 3,
       });
@@ -193,7 +196,8 @@ describe('replayDeadLetter', () => {
       subscriptionId: sub.id,
       url,
       eventType: 'contact_unlocked',
-      payload: JSON.stringify({ eventType: 'contact_unlocked', payload: {} }),
+      payload: JSON.stringify({ deliveryId: 'del-already-replayed-001', eventType: 'contact_unlocked', payload: {} }),
+      deliveryId: 'del-already-replayed-001',
       failureReason: 'original failure',
       attempts: 3,
     });

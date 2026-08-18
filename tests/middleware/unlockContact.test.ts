@@ -19,8 +19,9 @@ jest.mock('../../src/db', () => ({
 }));
 
 import { unlockContact } from '../../src/controllers/scoutController';
-import { submitContactPayment } from '../../src/services/stellar';
+import { submitContactPayment, PaymentError } from '../../src/services/stellar';
 import { logger } from '../../src/utils/logger';
+import * as cacheModule from '../../src/services/cache';
 
 const mockSubmit = submitContactPayment as jest.Mock;
 const mockWarn = (logger.warn as jest.Mock);
@@ -88,5 +89,41 @@ describe('unlockContact', () => {
     const res = makeRes();
     await unlockContact(req, res, next);
     expect((res.status as jest.Mock)).toHaveBeenCalledWith(400);
+  });
+
+  // #763 — contact_unlocked is a player-state-changing event: after the unlock
+  // row is persisted the player-list cache must be invalidated so list queries
+  // reflect the change. Invalidation must NOT happen if the payment/persistence
+  // fails.
+  describe('cache invalidation on contact_unlocked', () => {
+    it('invalidates the player-list cache only after the unlock is persisted', async () => {
+      const invalidateSpy = jest
+        .spyOn(cacheModule, 'invalidatePlayerCache')
+        .mockResolvedValue(undefined);
+      mockSubmit.mockResolvedValue({ transactionId: 'abc', status: 'submitted' });
+
+      const req = { params: { wallet: WALLET, playerId: PLAYER }, account: WALLET } as unknown as Request;
+      const res = makeRes();
+      await unlockContact(req, res, next);
+
+      expect(invalidateSpy).toHaveBeenCalledTimes(1);
+      expect((res.json as jest.Mock)).toHaveBeenCalledWith(expect.objectContaining({ success: true }));
+      invalidateSpy.mockRestore();
+    });
+
+    it('does not invalidate the cache when the unlock payment fails', async () => {
+      const invalidateSpy = jest
+        .spyOn(cacheModule, 'invalidatePlayerCache')
+        .mockResolvedValue(undefined);
+      mockSubmit.mockRejectedValue(new PaymentError('payment failed', 'PAYMENT_FAILED'));
+
+      const req = { params: { wallet: WALLET, playerId: PLAYER }, account: WALLET } as unknown as Request;
+      const res = makeRes();
+      await unlockContact(req, res, next);
+
+      expect(invalidateSpy).not.toHaveBeenCalled();
+      expect((res.status as jest.Mock)).toHaveBeenCalledWith(402);
+      invalidateSpy.mockRestore();
+    });
   });
 });
