@@ -32,6 +32,14 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: >-
+        Long-lived scout API key (alternative to a Bearer JWT). Restricted keys
+        may only perform operations covered by their granted scopes (#1019).
+        Legacy keys without a scope list are unrestricted.
 
   parameters:
     playerId:
@@ -747,6 +755,7 @@ paths:
       operationId: subscribe
       security:
         - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/walletParam"
       requestBody:
@@ -990,6 +999,7 @@ paths:
       operationId: unlockContact
       security:
         - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/walletParam"
         - $ref: "#/components/parameters/playerId"
@@ -1072,11 +1082,33 @@ paths:
       operationId: issueApiKey
       security:
         - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/walletParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  maxLength: 100
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                    example: write:contacts
+                  description: >-
+                    Optional explicit scope list. Omitted → legacy key with
+                    unrestricted scout-level access. Restricted keys are
+                    enforced on mutating endpoints (#1019).
       responses:
         "201":
           description: API key issued
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
     get:
@@ -1085,6 +1117,7 @@ paths:
       operationId: listApiKeys
       security:
         - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/walletParam"
       responses:
@@ -1100,6 +1133,7 @@ paths:
       operationId: revokeApiKey
       security:
         - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
         - $ref: "#/components/parameters/walletParam"
         - name: id

@@ -279,6 +279,101 @@ curl "http://localhost:3000/api/admin/events" \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 ```
 
+## API-key scopes (#1019)
+
+Long-lived API keys (issued via `POST /api/scouts/:wallet/api-keys`) can be
+used in place of a Bearer JWT for server-to-server integrations:
+
+```
+X-API-Key: <raw-key>
+```
+
+### Scope semantics
+
+Every API key carries an optional `scopes` list. Authorization is enforced
+through a single shared contract (`src/utils/apiKeyScopes.ts`) used by both
+REST middleware (`requireApiKeyScope`) and GraphQL context/resolvers — the two
+surfaces can never drift apart.
+
+| Key state | Behavior |
+|-----------|----------|
+| `scopes` is `NULL` / missing / empty | **Legacy key — unrestricted.** Keeps full scout-level access, exactly as before scope enforcement existed. |
+| `scopes` is the migration-default list (`read:players`, `read:milestones`, `write:contacts`, `read:subscription`) | **Legacy — unrestricted.** The `db/014_api_key_scopes.sql` column default was written into every pre-existing row, so it is treated as "predates scope enforcement" rather than as a restricted set. |
+| `scopes` is malformed JSON | **Legacy — unrestricted** (fail-open, logged). A corrupt row must never brick a valid key. |
+| `scopes` is any other JSON array | **Restricted.** Only operations covered by a granted scope are permitted; everything else returns `403` (REST) or a GraphQL `UNAUTHORIZED` error. |
+
+### Scope vocabulary
+
+| Scope | Operations |
+|-------|------------|
+| `read:players` | Read player profiles (public data) |
+| `read:milestones` | Read player milestones |
+| `read:subscription` | Read subscription status (`GET /scouts/:wallet/subscription`, GraphQL `scoutSubscription`) |
+| `read:contacts` | Read unlocked contact details |
+| `write:contacts` | Unlock contacts |
+| `write:subscriptions` | Subscribe / renew / cancel subscriptions |
+| `write:trial_offers` | Create trial offers |
+| `write:webhooks` | Register / delete / test webhooks |
+| `write:api_keys` | Issue / revoke API keys |
+| `write:bookmarks` | Manage bookmarks and bookmark folders |
+| `write:notes` | Create / update / delete scout notes |
+| `write:saved_searches` | Create / update / delete saved searches |
+| `write:player_tokens` | Purchase player tokens |
+
+### Issuing restricted keys
+
+Omit `scopes` (or pass an empty array) for a legacy/unrestricted key. Pass an
+explicit list to restrict the key:
+
+```bash
+curl -X POST "http://localhost:3000/api/scouts/G.../api-keys" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "label": "ci-bot", "scopes": ["read:milestones", "write:contacts"] }'
+```
+
+Unknown scope strings are rejected at issuance (`400`). A restricted key that
+lacks the scope for an operation receives `403` with `reason.requiredScope`
+and `reason.providedScopes`.
+
+### GraphQL scope enforcement
+
+GraphQL accepts the same `X-API-Key` header. Restricted keys are enforced on
+GraphQL read scopes: `milestones` requires `read:milestones`, and
+`scoutSubscription` requires `read:subscription`. Legacy keys and
+JWT/anonymous requests are never scope-gated.
+
+## SSE live revocation & wallet blocklisting (#1019)
+
+`GET /api/events/stream` authenticates when the connection is established, but
+an *established* connection is also monitored so revoked tokens and
+blocklisted wallets lose access immediately:
+
+- **Token revocation** — if the JWT used to open the stream is revoked (e.g.
+  `POST /auth/logout` or admin token revocation), the connection emits a
+  terminal `session_ended` event with `reason: "token_revoked"` and closes.
+  No further protected events are delivered.
+- **Wallet blocklisting** — if the authenticated wallet is blocklisted, the
+  connection emits `session_ended` with `reason: "wallet_blocklisted"` and
+  closes. Blocklisted wallets also cannot open a new stream (`403`).
+
+### Detection bound
+
+| Scenario | Bound |
+|----------|-------|
+| Revocation/blocklist processed in the **same process** as the SSE connection | **Immediate** — delivered synchronously via in-process events. |
+| Revocation/blocklist persisted by **another instance** | **≤ `SSE_AUTH_SWEEP_INTERVAL_MS`** (default `30 000` ms). A single sweep query per process (never one per keep-alive tick) picks up cross-process changes. |
+
+There is no database query per keep-alive tick — the keep-alive path stays
+O(1) regardless of how many connections are open.
+
+### Managing the wallet blocklist
+
+The blocklist is persisted in `wallet_blocklist` (migration `022`). The
+service (`src/services/walletBlocklist.ts`) exposes `blocklistWallet`,
+`unblocklistWallet`, `isWalletBlocklisted`, and an in-process
+`onWalletBlocked` event.
+
 ## Auth-related endpoints
 
 ### `GET /auth/challenge?account=G...`
