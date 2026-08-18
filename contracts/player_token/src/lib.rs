@@ -167,9 +167,11 @@ impl PlayerTokenContract {
     /// * `buyer`     — purchasing address (must authorise this call).
     ///
     /// # Errors
-    /// * [`Error::NotInitialized`]    — contract not initialised.
-    /// * [`Error::InvalidInput`]      — no tokens issued for this player, or
-    ///                                  `amount` is zero, or not enough unsold supply.
+    /// * [`Error::NotInitialized`]     — contract not initialised.
+    /// * [`Error::InvalidInput`]       — no tokens issued for this player, or
+    ///                                   `amount` is zero.
+    /// * [`Error::InsufficientSupply`] — `amount` exceeds the player's remaining
+    ///                                   unsold supply.
     pub fn buy_token(env: Env, player_id: u64, amount: u64, buyer: Address) -> Result<(), Error> {
         if !is_initialized(&env) {
             return Err(Error::NotInitialized);
@@ -188,7 +190,7 @@ impl PlayerTokenContract {
 
         let remaining = meta.total_supply.checked_sub(meta.sold).unwrap_or(0);
         if amount > remaining {
-            return Err(Error::InsufficientFee); // reuse as "insufficient supply"
+            return Err(Error::InsufficientSupply);
         }
 
         // Update or create holder balance.
@@ -451,7 +453,26 @@ mod tests {
         let (client, _admin) = setup(&env);
         let buyer = Address::generate(&env);
         client.issue_tokens(&1u64, &10u64);
-        assert!(client.try_buy_token(&1u64, &11u64, &buyer).is_err());
+        assert_eq!(
+            client.try_buy_token(&1u64, &11u64, &buyer),
+            Err(Ok(Error::InsufficientSupply))
+        );
+    }
+
+    #[test]
+    fn buy_token_exactly_exhausts_supply_succeeds() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let buyer = Address::generate(&env);
+        client.issue_tokens(&1u64, &10u64);
+        // Buying exactly the remaining supply must succeed.
+        assert!(client.try_buy_token(&1u64, &10u64, &buyer).is_ok());
+        assert_eq!(client.get_balance(&1u64, &buyer), 10);
+        // Any further purchase is rejected with InsufficientSupply.
+        assert_eq!(
+            client.try_buy_token(&1u64, &1u64, &buyer),
+            Err(Ok(Error::InsufficientSupply))
+        );
     }
 
     #[test]
