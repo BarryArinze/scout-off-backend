@@ -342,17 +342,17 @@ const config = {
     sampleRate: parseNumericEnv('LOG_SAMPLE_RATE', process.env.LOG_SAMPLE_RATE, 1, { min: 0, max: 1, integer: false }),
   },
   /** TTL for player list cache entries in milliseconds. */
-  playerCacheTtlMs: parseInt(process.env.PLAYER_CACHE_TTL_MS ?? '60000', 10),
+  playerCacheTtlMs: parseNumericEnv('PLAYER_CACHE_TTL_MS', process.env.PLAYER_CACHE_TTL_MS, 60000, { min: 0, integer: true }),
 
   /** Access token TTL in seconds (default: 15 minutes). Configurable via JWT_ACCESS_TTL_SECONDS. */
-  jwtAccessTtlSeconds: parseInt(process.env.JWT_ACCESS_TTL_SECONDS ?? '900', 10),
+  jwtAccessTtlSeconds: parseNumericEnv('JWT_ACCESS_TTL_SECONDS', process.env.JWT_ACCESS_TTL_SECONDS, 900, { min: 1, integer: true }),
 
   /** Refresh token TTL in seconds (default: 7 days). */
   jwtRefreshTtlSeconds: 7 * 24 * 60 * 60,
 
   playerImport: {
     /** Maximum number of rows accepted per bulk player import request. */
-    maxBatchSize: parseInt(process.env.PLAYER_IMPORT_MAX_BATCH ?? '500', 10),
+    maxBatchSize: parseNumericEnv('PLAYER_IMPORT_MAX_BATCH', process.env.PLAYER_IMPORT_MAX_BATCH, 500, { min: 1, integer: true }),
   },
 
   // When set, the search cache (src/services/cache.ts) uses Redis so cache
@@ -361,16 +361,16 @@ const config = {
   redisUrl: process.env.REDIS_URL || '',
 
   /** TTL for pinJson deduplication cache entries in milliseconds (default: 5 min). */
-  pinJsonCacheTtlMs: parseInt(process.env.PIN_JSON_CACHE_TTL_MS ?? '300000', 10),
+  pinJsonCacheTtlMs: parseNumericEnv('PIN_JSON_CACHE_TTL_MS', process.env.PIN_JSON_CACHE_TTL_MS, 300000, { min: 0, integer: true }),
 
   /** Maximum evidence file size in bytes (default: 50 MB). */
-  evidenceMaxBytes: parseInt(process.env.EVIDENCE_MAX_BYTES ?? String(50 * 1024 * 1024), 10),
+  evidenceMaxBytes: parseNumericEnv('EVIDENCE_MAX_BYTES', process.env.EVIDENCE_MAX_BYTES, 50 * 1024 * 1024, { min: 1, integer: true }),
 
   /** TTL for multi-admin action proposals in milliseconds (default: 1 hour). */
-  adminActionTtlMs: parseInt(process.env.ADMIN_ACTION_TTL_MS ?? '3600000', 10),
+  adminActionTtlMs: parseNumericEnv('ADMIN_ACTION_TTL_MS', process.env.ADMIN_ACTION_TTL_MS, 3600000, { min: 1, integer: true }),
 
   /** Minimum response size in bytes to trigger compression (default: 1024 bytes). */
-  compressionThresholdBytes: parseInt(process.env.COMPRESSION_THRESHOLD ?? process.env.COMPRESSION_THRESHOLD_BYTES ?? '1024', 10),
+  compressionThresholdBytes: parseNumericEnv('COMPRESSION_THRESHOLD', process.env.COMPRESSION_THRESHOLD ?? process.env.COMPRESSION_THRESHOLD_BYTES, 1024, { min: 1, integer: true }),
 
 };
 
