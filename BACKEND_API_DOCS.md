@@ -1126,19 +1126,26 @@ All error responses follow this shape:
 ```json
 {
   "success": false,
-  "error": "<human-readable message>"
+  "error": "<human-readable message>",
+  "code": "<machine-readable error code>",
+  "correlationId": "<optional request correlation ID>"
 }
 ```
 
-Common HTTP status codes:
+The `code` field provides a machine-readable error classification for programmatic error handling. The mapping from HTTP status to error code is:
 
-| Code | Meaning                       |
-| ---- | ----------------------------- |
-| 400  | Validation error              |
-| 401  | Missing or invalid auth token |
-| 403  | Insufficient permissions      |
-| 404  | Resource not found            |
-| 500  | Internal server error         |
+| HTTP Status | Error Code                | Meaning                       |
+| ----------- | ------------------------- | ----------------------------- |
+| 400         | `VALIDATION_ERROR`        | Invalid input data            |
+| 401         | `UNAUTHORIZED`            | Missing or invalid auth token |
+| 403         | `FORBIDDEN`               | Insufficient permissions      |
+| 404         | `NOT_FOUND`               | Resource not found            |
+| 409         | `CONFLICT`                | Resource conflict             |
+| 413         | `PAYLOAD_TOO_LARGE`       | Request body exceeds limits   |
+| 415         | `UNSUPPORTED_MEDIA_TYPE`  | Invalid content type          |
+| 500         | `INTERNAL_SERVER_ERROR`   | Server error                  |
+
+**Note:** When an error is thrown with an explicit `code` property already set, that code takes precedence over the status-based mapping.
 
 ---
 
