@@ -1,18 +1,25 @@
 import fs from 'fs';
 import path from 'path';
-import { DbDriver } from './driver';
-import config from '../config';
+import { DbDriver, DbTxHandle } from './driver';
+import { PostgresDriver } from './postgres-driver';
 
 const MIGRATIONS_DIR = path.resolve(__dirname, '../../db');
 
-export function runMigrations(driver: DbDriver): void {
-  // Create migrations table
-  const createMigrationsTableSql =
-    config.dbDriver === 'postgres'
-      ? 'CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)'
-      : `CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`;
+export async function runMigrations(driver: DbDriver): Promise<void> {
+  // Dialect selection is derived from the `driver` instance actually passed
+  // in, not from the process-wide config.dbDriver — callers (notably tests)
+  // legitimately construct a SqliteDriver directly regardless of what
+  // DB_DRIVER is set to for the rest of the process, and applying
+  // PostgreSQL-dialect migration SQL against a real SQLite connection in
+  // that case throws a syntax error (e.g. "near EXISTS").
+  const isPostgres = driver instanceof PostgresDriver;
 
-  driver.exec(createMigrationsTableSql);
+  // Create migrations table
+  const createMigrationsTableSql = isPostgres
+    ? 'CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, applied_at BIGINT NOT NULL)'
+    : `CREATE TABLE IF NOT EXISTS migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)`;
+
+  await driver.exec(createMigrationsTableSql);
 
   const files = fs
     .readdirSync(MIGRATIONS_DIR)
@@ -20,7 +27,7 @@ export function runMigrations(driver: DbDriver): void {
     .sort();
 
   for (const file of files) {
-    const already = driver.get<{ id: string }>(
+    const already = await driver.get<{ id: string }>(
       'SELECT id FROM migrations WHERE id = ?',
       [file]
     );
@@ -30,7 +37,7 @@ export function runMigrations(driver: DbDriver): void {
     let sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');
 
     // For PostgreSQL migrations, use the _postgres version if available
-    if (config.dbDriver === 'postgres') {
+    if (isPostgres) {
       const postgresFile = file.replace('.sql', '_postgres.sql');
       const postgresPath = path.join(MIGRATIONS_DIR, postgresFile);
       if (fs.existsSync(postgresPath)) {
@@ -41,9 +48,9 @@ export function runMigrations(driver: DbDriver): void {
       }
     }
 
-    driver.transaction(() => {
-      driver.exec(sql);
-      driver.run('INSERT INTO migrations (id, applied_at) VALUES (?, ?)', [
+    await driver.transaction(async (tx: DbTxHandle) => {
+      await tx.exec(sql);
+      await tx.run('INSERT INTO migrations (id, applied_at) VALUES (?, ?)', [
         file,
         Date.now(),
       ]);

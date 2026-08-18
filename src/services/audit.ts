@@ -18,19 +18,31 @@ export interface AuditEvent {
 
 /**
  * Log an audit event for compliance tracking.
- * Persists to the audit_log SQLite table and emits an info log line.
+ * Persists to the tamper-evident audit_log table and emits an info log line.
+ *
+ * A persistence failure is never swallowed silently: it is logged at
+ * `critical` severity with the full event and error detail, then rethrown so
+ * a caller that awaits this can surface it (e.g. fail the admin action
+ * rather than let it proceed with no audit trail). Callers that intentionally
+ * treat auditing as best-effort (e.g. auth failure logging, where blocking a
+ * 401 response on a DB round-trip is undesirable) must attach their own
+ * `.catch()` — see src/middleware/auth.ts — rather than this function
+ * swallowing the error on their behalf.
  */
-export function logAuditEvent(event: AuditEvent): void {
+export async function logAuditEvent(event: AuditEvent): Promise<void> {
   logger.info('[audit]', JSON.stringify(event));
   try {
-    insertAuditLog({
+    await insertAuditLog({
       action: event.contractAction ?? event.action,
       adminWallet: event.adminWallet,
       queryParams: { ...event.queryParams, ...(event.contractAction ? { parentAction: event.action } : {}) },
       createdAt: event.timestamp,
     });
-  } catch {
-    // DB write failure must not break the request
-    logger.warn('[audit] failed to persist audit event to DB');
+  } catch (err) {
+    logger.critical('[audit] failed to persist audit event to DB — audit trail has a gap', {
+      event,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
   }
 }

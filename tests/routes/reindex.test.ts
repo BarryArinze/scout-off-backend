@@ -4,7 +4,7 @@ import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
 import * as db from '../../src/db';
 
 // Stub out the parts that admin.test.ts doesn't need to hit the real DB
-jest.mock('../../src/services/audit', () => ({ logAuditEvent: jest.fn() }));
+jest.mock('../../src/services/audit', () => ({ logAuditEvent: jest.fn().mockResolvedValue(undefined) }));
 jest.mock('../../src/services/stellar', () => ({
   ...jest.requireActual('../../src/services/stellar'),
   withdrawFees: jest.fn(),

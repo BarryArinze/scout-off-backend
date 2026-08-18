@@ -55,8 +55,8 @@ export async function getAuditLog(req: Request, res: Response, next: NextFunctio
       return;
     }
     const { startDate, endDate, action, limit, offset } = parsed.data;
-    const rows = getAuditLogs({ action, startDate, endDate, limit, offset });
-    const total = getAuditLogsCount({ action, startDate, endDate });
+    const rows = await getAuditLogs({ action, startDate, endDate, limit, offset });
+    const total = await getAuditLogsCount({ action, startDate, endDate });
     res.json({
       success: true,
       data: rows.map((r) => ({ ...r, query_params: JSON.parse(r.query_params) })),
@@ -80,7 +80,7 @@ export async function getAuditLog(req: Request, res: Response, next: NextFunctio
  */
 export async function getAuditChainVerification(req: Request, res: Response, next: NextFunction) {
   try {
-    const result = verifyAuditChain();
+    const result = await verifyAuditChain();
     res.json({ success: true, data: result });
   } catch (err) {
     next(err);
@@ -143,12 +143,12 @@ export async function getFeeSummary(req: Request, res: Response, next: NextFunct
       return;
     }
     const adminWallet = req.account ?? 'unknown';
-    logAuditEvent({
+    await logAuditEvent({
       action: 'fee_history_query',
       adminWallet,
       queryParams: req.query as Record<string, unknown>,
       timestamp: new Date().toISOString(),
-    });
+    }).catch(() => {});
     const withdrawals = queryEvents('fees_withdrawn').map((e) => e.payload as Record<string, unknown>);
     const body: ApiResponse<Record<string, unknown>[]> = { success: true, data: withdrawals };
     res.json(body);
@@ -160,7 +160,7 @@ export async function getFeeSummary(req: Request, res: Response, next: NextFunct
 /** GET /api/admin/validators */
 export async function listValidators(req: Request, res: Response, next: NextFunction) {
   try {
-    res.json({ success: true, data: getAllValidators() });
+    res.json({ success: true, data: await getAllValidators() });
   } catch (err) {
     next(err);
   }
@@ -186,27 +186,27 @@ export async function registerValidator(req: Request, res: Response, next: NextF
   try {
     logger.info(`[admin] action=register_validator admin=${adminWallet} target=${validatorWallet}`);
     // Audit the attempt before submitting the on-chain transaction (pre-transaction state).
-    logAuditEvent({
+    await logAuditEvent({
       action: 'validator_registration',
       adminWallet,
       queryParams: { validatorWallet },
       timestamp: new Date().toISOString(),
       contractAction: 'register_validator',
-    });
+    }).catch(() => {});
 
     const result = await registerValidatorOnChain(validatorWallet);
 
     // Only mutate the local row once the chain has confirmed the register —
     // never mark it active locally while the contract call is still in flight.
-    insertValidator(validatorWallet, result.transactionId);
+    await insertValidator(validatorWallet, result.transactionId);
 
-    logAuditEvent({
+    await logAuditEvent({
       action: 'validator_registration',
       adminWallet,
       queryParams: { validatorWallet, transactionId: result.transactionId, outcome: 'success' },
       timestamp: new Date().toISOString(),
       contractAction: 'register_validator',
-    });
+    }).catch(() => {});
 
     res.status(202).json({
       success: true,
@@ -214,7 +214,7 @@ export async function registerValidator(req: Request, res: Response, next: NextF
       transactionId: result.transactionId,
     });
   } catch (err) {
-    logAuditEvent({
+    await logAuditEvent({
       action: 'validator_registration',
       adminWallet,
       queryParams: {
@@ -225,7 +225,7 @@ export async function registerValidator(req: Request, res: Response, next: NextF
       },
       timestamp: new Date().toISOString(),
       contractAction: 'register_validator',
-    });
+    }).catch(() => {});
 
     if (err instanceof ValidatorActionError) {
       switch (err.code) {
@@ -263,7 +263,7 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
 
   try {
     // Short-circuit on already-revoked local state before touching the chain.
-    const existing = getValidatorByWallet(validatorWallet);
+    const existing = await getValidatorByWallet(validatorWallet);
     if (existing?.revoked_at != null) {
       res.status(409).json({
         success: false,
@@ -275,27 +275,27 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
 
     logger.info(`[admin] action=revoke_validator admin=${adminWallet} target=${validatorWallet}`);
     // Audit the attempt before submitting the on-chain transaction (pre-transaction state).
-    logAuditEvent({
+    await logAuditEvent({
       action: 'validator_revocation',
       adminWallet,
       queryParams: { validatorWallet },
       timestamp: new Date().toISOString(),
       contractAction: 'revoke_validator',
-    });
+    }).catch(() => {});
 
     const result = await revokeValidatorOnChain(validatorWallet);
 
     // Only mutate the local row once the chain has confirmed the revoke —
     // never mark revoked locally while the contract call is still in flight.
-    revokeValidatorRow(validatorWallet, result.transactionId);
+    await revokeValidatorRow(validatorWallet, result.transactionId);
 
-    logAuditEvent({
+    await logAuditEvent({
       action: 'validator_revocation',
       adminWallet,
       queryParams: { validatorWallet, transactionId: result.transactionId, outcome: 'success' },
       timestamp: new Date().toISOString(),
       contractAction: 'revoke_validator',
-    });
+    }).catch(() => {});
 
     res.status(202).json({
       success: true,
@@ -303,7 +303,7 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
       transactionId: result.transactionId,
     });
   } catch (err) {
-    logAuditEvent({
+    await logAuditEvent({
       action: 'validator_revocation',
       adminWallet,
       queryParams: {
@@ -314,7 +314,7 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
       },
       timestamp: new Date().toISOString(),
       contractAction: 'revoke_validator',
-    });
+    }).catch(() => {});
 
     if (err instanceof ValidatorActionError) {
       switch (err.code) {
@@ -352,23 +352,23 @@ export async function pauseContract(req: Request, res: Response, next: NextFunct
     // Check threshold for high-value operations
     const proposal = proposeAction('pause_contract', {}, adminWallet);
     if (proposal.status === 'immediate') {
-      logAuditEvent({
+      await logAuditEvent({
         action: 'contract_state_change',
         adminWallet,
         queryParams: {},
         timestamp: new Date().toISOString(),
         contractAction: 'pause_contract',
-      });
+      }).catch(() => {});
 
       const result = await pauseContractOnChain();
 
-      logAuditEvent({
+      await logAuditEvent({
         action: 'contract_state_change',
         adminWallet,
         queryParams: { transactionId: result.transactionId, outcome: 'success' },
         timestamp: new Date().toISOString(),
         contractAction: 'pause_contract',
-      });
+      }).catch(() => {});
 
       res.status(202).json({
         success: true,
@@ -407,23 +407,23 @@ export async function unpauseContract(req: Request, res: Response, next: NextFun
     // Check threshold for high-value operations
     const proposal = proposeAction('unpause_contract', {}, adminWallet);
     if (proposal.status === 'immediate') {
-      logAuditEvent({
+      await logAuditEvent({
         action: 'contract_state_change',
         adminWallet,
         queryParams: {},
         timestamp: new Date().toISOString(),
         contractAction: 'unpause_contract',
-      });
+      }).catch(() => {});
 
       const result = await unpauseContractOnChain();
 
-      logAuditEvent({
+      await logAuditEvent({
         action: 'contract_state_change',
         adminWallet,
         queryParams: { transactionId: result.transactionId, outcome: 'success' },
         timestamp: new Date().toISOString(),
         contractAction: 'unpause_contract',
-      });
+      }).catch(() => {});
 
       res.status(202).json({
         success: true,
@@ -554,12 +554,12 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
   if (config.adminThreshold > 1) {
     const parsed = withdrawFeesSchema.safeParse(req.body);
     if (!parsed.success) {
-      logAuditEvent({
+      await logAuditEvent({
         action: 'fee_withdrawal_attempt',
         adminWallet,
         queryParams: { error: 'validation_failed', reason: parsed.error.errors[0]?.message },
         timestamp: new Date().toISOString(),
-      });
+      }).catch(() => {});
       res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body', code: ErrorCode.VALIDATION_ERROR });
       return;
     }
@@ -574,12 +574,12 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
   const parsed = withdrawFeesSchema.safeParse(req.body);
 
   if (!parsed.success) {
-    logAuditEvent({
+    await logAuditEvent({
       action: 'fee_withdrawal_attempt',
       adminWallet,
       queryParams: { error: 'validation_failed', reason: parsed.error.errors[0]?.message },
       timestamp: new Date().toISOString(),
-    });
+    }).catch(() => {});
     res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body', code: ErrorCode.VALIDATION_ERROR });
     return;
   }
@@ -588,13 +588,13 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
 
   // Concurrency guard: reject duplicate simultaneous withdrawals.
   if (withdrawalInProgress) {
-    logAuditEvent({
+    await logAuditEvent({
       action: 'fee_withdrawal_attempt',
       adminWallet,
       queryParams: { recipient, error: 'concurrent_withdrawal_rejected' },
       timestamp: new Date().toISOString(),
       contractAction: 'withdraw_fees',
-    });
+    }).catch(() => {});
     res.status(409).json({ success: false, error: 'A withdrawal is already in progress', code: ErrorCode.CONFLICT });
     return;
   }
@@ -603,7 +603,7 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
   try {
     const result: FeeWithdrawalResult = await stellarWithdrawFees(recipient);
 
-    logAuditEvent({
+    await logAuditEvent({
       action: 'fee_withdrawal_attempt',
       adminWallet,
       queryParams: {
@@ -615,7 +615,7 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
       },
       timestamp: new Date().toISOString(),
       contractAction: 'withdraw_fees',
-    });
+    }).catch(() => {});
 
     res.status(200).json({
       success: true,
@@ -630,7 +630,7 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
     const errorCode = err instanceof FeeWithdrawalError ? err.code : 'UNKNOWN';
     const retryable = err instanceof FeeWithdrawalError ? err.retryable : false;
 
-    logAuditEvent({
+    await logAuditEvent({
       action: 'fee_withdrawal_attempt',
       adminWallet,
       queryParams: {
@@ -642,7 +642,7 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
       },
       timestamp: new Date().toISOString(),
       contractAction: 'withdraw_fees',
-    });
+    }).catch(() => {});
 
     if (err instanceof FeeWithdrawalError) {
       switch (err.code) {
@@ -682,7 +682,7 @@ export async function getValidatorStatsEndpoint(req: Request, res: Response, nex
       res.status(400).json({ success: false, error: 'Invalid validator wallet address' });
       return;
     }
-    const stats = getValidatorStats(wallet);
+    const stats = await getValidatorStats(wallet);
     if (stats) {
       res.json({
         success: true,
@@ -746,12 +746,12 @@ export async function updatePlatformFee(req: Request, res: Response, next: NextF
     const parsed = updatePlatformFeeSchema.safeParse(req.body);
 
     if (!parsed.success) {
-      logAuditEvent({
+      await logAuditEvent({
         action: 'platform_fee_update_attempt',
         adminWallet,
         queryParams: { error: 'validation_failed', reason: parsed.error.errors[0]?.message },
         timestamp: new Date().toISOString(),
-      });
+      }).catch(() => {});
       res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body' });
       return;
     }
@@ -759,13 +759,13 @@ export async function updatePlatformFee(req: Request, res: Response, next: NextF
     const { platformFeeBps } = parsed.data;
 
     logger.info(`[admin] action=update_platform_fee admin=${adminWallet} platformFeeBps=${platformFeeBps}`);
-    logAuditEvent({
+    await logAuditEvent({
       action: 'platform_fee_update_attempt',
       adminWallet,
       queryParams: { platformFeeBps, outcome: 'submitted' },
       timestamp: new Date().toISOString(),
       contractAction: 'set_platform_fee_bps',
-    });
+    }).catch(() => {});
 
     // NOTE: Contract-level update is simulated. Real invocation will call set_platform_fee_bps() on the Soroban contract.
     res.status(202).json({
@@ -961,10 +961,10 @@ export function parseCsvBody(text: string): ImportValidatorEntry[] {
  *   - A validator that was previously revoked is re-registered (same as single-
  *     registration, which also does INSERT OR REPLACE)
  */
-export function processBatch(
+export async function processBatch(
   entries: ImportValidatorEntry[],
   adminWallet: string,
-): ImportValidatorResult[] {
+): Promise<ImportValidatorResult[]> {
   const results: ImportValidatorResult[] = [];
   // Track wallets already seen in this batch to handle intra-batch duplicates
   const seenInBatch = new Set<string>();
@@ -986,7 +986,7 @@ export function processBatch(
     }
 
     // 3. Check DB for an already-active (non-revoked) registration
-    const existing = getValidatorByWallet(wallet);
+    const existing = await getValidatorByWallet(wallet);
     if (existing && existing.revoked_at === null) {
       results.push({ wallet, status: 'duplicate', reason: 'already registered', label, region });
       seenInBatch.add(wallet);
@@ -996,7 +996,7 @@ export function processBatch(
     // 4. Register — reuses the same insertValidator path as the single endpoint
     logger.info(`[admin] action=import_register_validator admin=${adminWallet} target=${wallet}`);
     // TODO: invoke register_validator on Soroban contract (same as single-registration endpoint)
-    insertValidator(wallet);
+    await insertValidator(wallet);
     seenInBatch.add(wallet);
     results.push({ wallet, status: 'registered', label, region });
   }
@@ -1066,7 +1066,7 @@ export async function importValidators(req: Request, res: Response, next: NextFu
       return;
     }
 
-    const results = processBatch(entries, adminWallet);
+    const results = await processBatch(entries, adminWallet);
 
     const registered = results.filter((r) => r.status === 'registered').length;
     const duplicates = results.filter((r) => r.status === 'duplicate').length;
@@ -1076,12 +1076,12 @@ export async function importValidators(req: Request, res: Response, next: NextFu
       `[admin] action=import_validators admin=${adminWallet} total=${results.length} registered=${registered} duplicates=${duplicates} invalid=${invalid}`,
     );
 
-    logAuditEvent({
+    await logAuditEvent({
       action: 'bulk_validator_import',
       adminWallet,
       queryParams: { total: results.length, registered, duplicates, invalid },
       timestamp: new Date().toISOString(),
-    });
+    }).catch(() => {});
 
     res.status(200).json({
       success: true,

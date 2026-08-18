@@ -82,7 +82,7 @@ describe('indexEvents — player tier in DB matches approved-milestone count (#3
       ],
     });
     await indexEvents();
-    expect(getPlayerById(player)?.progress_level).toBe(0);
+    expect((await getPlayerById(player))?.progress_level).toBe(0);
 
     // Helper: approve `n` more milestones in a single indexer batch.
     const approve = async (n: number) => {
@@ -95,13 +95,13 @@ describe('indexEvents — player tier in DB matches approved-milestone count (#3
     };
 
     await approve(1); // total 1 approved → tier 1
-    expect(getPlayerById(player)?.progress_level).toBe(1);
+    expect((await getPlayerById(player))?.progress_level).toBe(1);
 
     await approve(2); // total 3 approved → tier 2
-    expect(getPlayerById(player)?.progress_level).toBe(2);
+    expect((await getPlayerById(player))?.progress_level).toBe(2);
 
     await approve(3); // total 6 approved → tier 3
-    expect(getPlayerById(player)?.progress_level).toBe(3);
+    expect((await getPlayerById(player))?.progress_level).toBe(3);
   });
 
   it('counts milestones per player — one player\'s approvals do not promote another', async () => {
@@ -125,7 +125,7 @@ describe('indexEvents — player tier in DB matches approved-milestone count (#3
     });
     await indexEvents();
 
-    expect(getPlayerById(alice)?.progress_level).toBe(2); // 3 milestones → tier 2
-    expect(getPlayerById(bob)?.progress_level).toBe(1); // 1 milestone → tier 1
+    expect((await getPlayerById(alice))?.progress_level).toBe(2); // 3 milestones → tier 2
+    expect((await getPlayerById(bob))?.progress_level).toBe(1); // 1 milestone → tier 1
   });
 });

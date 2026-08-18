@@ -11,6 +11,18 @@ jest.mock('../../src/services/ipfs', () => ({
 jest.mock('../../src/db', () => ({
   queryEvents: jest.fn(),
   getPendingMilestones: jest.fn(),
+  // src/utils/audit.ts's recordAudit (called from validatorController's
+  // submitMilestoneEvidence and getPendingMilestones) calls this directly.
+  insertAuditLog: jest.fn().mockResolvedValue({
+    id: 1,
+    action: 'mock',
+    admin_wallet: '',
+    query_params: '{}',
+    created_at: new Date().toISOString(),
+    prev_hash: null,
+    hash: 'mock-hash',
+    event_source: 'app_event',
+  }),
 }));
 
 jest.mock('../../src/services/indexer', () => ({

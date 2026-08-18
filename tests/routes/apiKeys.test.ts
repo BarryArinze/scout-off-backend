@@ -38,7 +38,7 @@ jest.mock('../../src/db', () => ({
   revokeApiKeyById: jest.fn(),
   getApiKeyByHash: jest.fn().mockReturnValue(null),
   getAllActiveApiKeys: jest.fn().mockReturnValue([]),
-  touchApiKeyLastUsed: jest.fn(),
+  touchApiKeyLastUsed: jest.fn().mockResolvedValue(undefined),
   // bookmarks
   insertBookmark: jest.fn(),
   deleteBookmark: jest.fn(),
@@ -134,26 +134,26 @@ describe('generateApiKey / verifyApiKey (unit)', () => {
 describe('resolveApiKey (unit)', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('returns null when getAllActiveApiKeys returns empty array', () => {
+  it('returns null when getAllActiveApiKeys returns empty array', async () => {
     mockGetAllActive.mockReturnValueOnce([]);
-    expect(resolveApiKey('somekey')).toBeNull();
+    expect(await resolveApiKey('somekey')).toBeNull();
   });
 
-  it('returns scout_wallet and id when key matches', () => {
+  it('returns scout_wallet and id when key matches', async () => {
     const { key, keyHash } = generateApiKey();
     mockGetAllActive.mockReturnValueOnce([
       { id: 42, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'test', created_at: 0, last_used_at: null, revoked_at: null },
     ]);
-    const result = resolveApiKey(key);
+    const result = await resolveApiKey(key);
     expect(result).toEqual({ scout_wallet: SCOUT_A, id: 42 });
   });
 
-  it('returns null when no key matches', () => {
+  it('returns null when no key matches', async () => {
     const { keyHash } = generateApiKey();
     mockGetAllActive.mockReturnValueOnce([
       { id: 1, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null },
     ]);
-    expect(resolveApiKey('completely-different-key')).toBeNull();
+    expect(await resolveApiKey('completely-different-key')).toBeNull();
   });
 });
 

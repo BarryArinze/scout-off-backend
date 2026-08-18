@@ -19,7 +19,8 @@ export async function getFeatureFlags(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const flags = getAllFeatureFlags().map((row) => ({
+    const rows = await getAllFeatureFlags();
+    const flags = rows.map((row) => ({
       name: row.name,
       enabled: row.enabled === 1,
       updated_at: row.updated_at,
@@ -49,7 +50,7 @@ export async function updateFeatureFlag(
 
     const { name, enabled } = parsed.data;
     const updatedBy = req.account ?? 'unknown';
-    setFeatureFlag(name, enabled, updatedBy);
+    await setFeatureFlag(name, enabled, updatedBy);
 
     res.json({
       success: true,

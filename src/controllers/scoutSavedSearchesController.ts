@@ -102,7 +102,7 @@ export async function createSavedSearch(
     const now = Math.floor(Date.now() / 1000);
     const filtersJson = JSON.stringify(filters);
 
-    const id = insertSavedSearch({
+    const id = await insertSavedSearch({
       scout_wallet: req.params.wallet,
       name,
       filters: filtersJson,
@@ -145,7 +145,7 @@ export async function listSavedSearches(
   try {
     if (!assertWalletOwnership(req, res)) return;
 
-    const rows = getSavedSearchesByScout(req.params.wallet);
+    const rows = await getSavedSearchesByScout(req.params.wallet);
 
     const data = rows.map((row) => ({
       id:           row.id,
@@ -189,7 +189,7 @@ export async function deleteSavedSearchHandler(
       return;
     }
 
-    const removed = deleteSavedSearch(id, req.params.wallet);
+    const removed = await deleteSavedSearch(id, req.params.wallet);
     if (!removed) {
       res.status(404).json({ success: false, error: 'Saved search not found' });
       return;

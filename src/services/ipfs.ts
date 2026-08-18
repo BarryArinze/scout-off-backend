@@ -136,42 +136,46 @@ export async function pinJson(body: object): Promise<string> {
         return cid;
       }
 
-      const now = new Date().toISOString();
-      const acquiredLock = insertPendingPin({
-        payload: JSON.stringify(body),
-        hash,
-        created_at: now,
-        last_tried: now,
-      });
+      // Registered in `inflightPins` synchronously, before this function's
+      // first await, so that concurrent same-process callers for the same
+      // hash (e.g. Promise.all([pinJson(x), pinJson(x)])) always see this
+      // entry via the `inflightPins.has(hash)` check above and take the
+      // inflight-hit path, rather than both racing to acquire the DB-level
+      // lock below. If this were built with an `await` in front of it (e.g.
+      // awaiting insertPendingPin first, then registering), a second
+      // same-tick caller could run before this one reaches that await and
+      // wouldn't see the in-flight entry yet — a real regression versus the
+      // old fully-synchronous locking, which never yielded control before
+      // registering.
+      const pinPromise = (async () => {
+        const now = new Date().toISOString();
+        const acquiredLock = await insertPendingPin({
+          payload: JSON.stringify(body),
+          hash,
+          created_at: now,
+          last_tried: now,
+        });
 
-      if (acquiredLock === false) {
-        logger.debug(`[ipfs] pinJson lock contended — polling for completion (hash=${hash.slice(0, 8)}…)`);
-        const start = Date.now();
-        const MAX_POLL_MS = 30000;
-        while (Date.now() - start < MAX_POLL_MS) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          const pollCached = pinJsonCache.get(hash);
-          if (pollCached && Date.now() - pollCached.timestamp < ttlMs) {
-            span.setAttribute('ipfs.cid', pollCached.cid);
-            return pollCached.cid;
-          }
-          if (inflightPins.has(hash)) {
-            const cid = await inflightPins.get(hash)!;
-            span.setAttribute('ipfs.cid', cid);
-            return cid;
-          }
-          if (!isPendingPinByHash(hash)) {
-            const finalCached = pinJsonCache.get(hash);
-            if (finalCached && Date.now() - finalCached.timestamp < ttlMs) {
-              span.setAttribute('ipfs.cid', finalCached.cid);
-              return finalCached.cid;
+        if (acquiredLock === false) {
+          logger.debug(`[ipfs] pinJson lock contended — polling for completion (hash=${hash.slice(0, 8)}…)`);
+          const start = Date.now();
+          const MAX_POLL_MS = 30000;
+          while (Date.now() - start < MAX_POLL_MS) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            const pollCached = pinJsonCache.get(hash);
+            if (pollCached && Date.now() - pollCached.timestamp < ttlMs) {
+              return pollCached.cid;
             }
-            break;
+            if (!(await isPendingPinByHash(hash))) {
+              const finalCached = pinJsonCache.get(hash);
+              if (finalCached && Date.now() - finalCached.timestamp < ttlMs) {
+                return finalCached.cid;
+              }
+              break;
+            }
           }
         }
-      }
 
-      const pinPromise = (async () => {
         try {
           const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
           const cid = res.data.IpfsHash as string;
@@ -181,10 +185,10 @@ export async function pinJson(body: object): Promise<string> {
         } catch (err) {
           logger.critical('[ipfs] Pinata unavailable — queueing payload for retry', (err as Error).message);
           const failTime = new Date().toISOString();
-          insertPendingPin({ payload: JSON.stringify(body), created_at: failTime, last_tried: failTime });
+          await insertPendingPin({ payload: JSON.stringify(body), created_at: failTime, last_tried: failTime });
           throw err;
         } finally {
-          deletePendingPinByHash(hash);
+          await deletePendingPinByHash(hash);
           inflightPins.delete(hash);
         }
       })();
@@ -286,15 +290,15 @@ export async function checkHealth(): Promise<void> {
  */
 export async function retryPendingPins(): Promise<void> {
   if (!isPinataConfigured()) return;
-  const pending = getPendingPins();
+  const pending = await getPendingPins();
   for (const row of pending) {
     try {
       const body = JSON.parse(row.payload) as object;
       const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
       logger.info(`[ipfs] retried pending pin id=${row.id} cid=${res.data.IpfsHash as string}`);
-      deletePendingPin(row.id);
+      await deletePendingPin(row.id);
     } catch {
-      incrementPendingPinAttempts(row.id);
+      await incrementPendingPinAttempts(row.id);
     }
   }
 }

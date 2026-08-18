@@ -61,11 +61,12 @@ export async function getScoutRecommendations(
     const regionCounts = new Map<string, number>();
     const positionCounts = new Map<string, number>();
 
+    const allPlayers = await queryPlayers({ includeDeactivated: true });
     for (const ev of unlockedEvents) {
       const playerId = String(ev.payload.player_id);
       // We only have player position/region from the players table.
       // Use queryPlayers as a fallback later; here we just count based on player row.
-      const playerRow = queryPlayers({ includeDeactivated: true }).find((p) => p.player_id === playerId);
+      const playerRow = allPlayers.find((p) => p.player_id === playerId);
       if (!playerRow) continue;
       if (playerRow.region)
         regionCounts.set(
@@ -85,7 +86,7 @@ export async function getScoutRecommendations(
       [...positionCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
 
     // Candidate pool: prefer filtering by top preferences, then backfill if needed.
-    const candidatesA = queryPlayers({
+    const candidatesA = await queryPlayers({
       region: topRegion ?? undefined,
       position: topPosition ?? undefined,
       minTier,
@@ -93,7 +94,7 @@ export async function getScoutRecommendations(
 
     const candidates = candidatesA.length
       ? candidatesA
-      : queryPlayers({
+      : await queryPlayers({
           minTier,
         });
 

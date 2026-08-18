@@ -51,7 +51,7 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
     }
 
     // Ensure the offer exists and belongs to this player
-    let offer = getTrialOfferById(offerId);
+    let offer = await getTrialOfferById(offerId);
 
     if (!offer) {
       // Try to seed from on-chain indexed events (backward compatibility)
@@ -63,14 +63,14 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
         return;
       }
       // Insert the offer from on-chain data so we can record the response
-      insertTrialOffer({
+      await insertTrialOffer({
         offer_id: offerId,
         scout_wallet: event.payload.scout as string,
         player_id: playerId,
         details_uri: (event.payload.details_uri ?? '') as string,
         created_at: Math.floor(Date.now() / 1000),
       });
-      offer = getTrialOfferById(offerId);
+      offer = await getTrialOfferById(offerId);
     }
 
     if (!offer) {
@@ -93,7 +93,7 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
     }
 
     const now = Math.floor(Date.now() / 1000);
-    respondToTrialOffer({ offer_id: offerId, status: 'accepted', responded_at: now });
+    await respondToTrialOffer({ offer_id: offerId, status: 'accepted', responded_at: now });
 
     logger.info(`[trialOffer] accepted offerId=${offerId} playerId=${playerId}`);
 
@@ -149,7 +149,7 @@ export async function rejectTrialOffer(req: Request, res: Response, next: NextFu
     }
     const reason = bodyParsed.data.reason;
 
-    let offer = getTrialOfferById(offerId);
+    let offer = await getTrialOfferById(offerId);
 
     if (!offer) {
       // Try to seed from on-chain indexed events (backward compatibility)
@@ -160,14 +160,14 @@ export async function rejectTrialOffer(req: Request, res: Response, next: NextFu
         res.status(404).json({ success: false, error: 'Trial offer not found' });
         return;
       }
-      insertTrialOffer({
+      await insertTrialOffer({
         offer_id: offerId,
         scout_wallet: event.payload.scout as string,
         player_id: playerId,
         details_uri: (event.payload.details_uri ?? '') as string,
         created_at: Math.floor(Date.now() / 1000),
       });
-      offer = getTrialOfferById(offerId);
+      offer = await getTrialOfferById(offerId);
     }
 
     if (!offer) {
@@ -190,7 +190,7 @@ export async function rejectTrialOffer(req: Request, res: Response, next: NextFu
     }
 
     const now = Math.floor(Date.now() / 1000);
-    respondToTrialOffer({ offer_id: offerId, status: 'rejected', reject_reason: reason, responded_at: now });
+    await respondToTrialOffer({ offer_id: offerId, status: 'rejected', reject_reason: reason, responded_at: now });
 
     logger.info(`[trialOffer] rejected offerId=${offerId} playerId=${playerId} reason=${reason ?? 'none'}`);
 

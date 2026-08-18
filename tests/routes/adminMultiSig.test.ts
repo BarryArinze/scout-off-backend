@@ -125,7 +125,7 @@ jest.mock('../../src/db', () => {
 });
 
 jest.mock('../../src/services/audit', () => ({
-  logAuditEvent: jest.fn(),
+  logAuditEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../../src/utils/logger', () => ({

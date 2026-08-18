@@ -28,11 +28,11 @@ const SCOUT_WALLET = 'GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN';
 
 describe('#285 trial_offers', () => {
   describe('insertTrialOffer + getTrialOffers (DB layer)', () => {
-    it('persists an offer and retrieves it by scout wallet', () => {
+    it('persists an offer and retrieves it by scout wallet', async () => {
       const now = Math.floor(Date.now() / 1000);
-      insertTrialOffer(SCOUT_WALLET, 'player-1', 'ipfs://QmTest', 'tx-hash-1', now);
+      await insertTrialOffer(SCOUT_WALLET, 'player-1', 'ipfs://QmTest', 'tx-hash-1', now);
 
-      const offers = getTrialOffers(SCOUT_WALLET);
+      const offers = await getTrialOffers(SCOUT_WALLET);
       expect(offers.length).toBeGreaterThanOrEqual(1);
 
       const offer = offers.find((o) => o.tx_hash === 'tx-hash-1');
@@ -43,12 +43,12 @@ describe('#285 trial_offers', () => {
       expect(offer!.created_at).toBe(now);
     });
 
-    it('does not insert duplicate tx_hash', () => {
+    it('does not insert duplicate tx_hash', async () => {
       const now = Math.floor(Date.now() / 1000);
-      insertTrialOffer(SCOUT_WALLET, 'player-2', 'ipfs://QmDup', 'tx-dup', now);
-      insertTrialOffer(SCOUT_WALLET, 'player-2', 'ipfs://QmDup', 'tx-dup', now);
+      await insertTrialOffer(SCOUT_WALLET, 'player-2', 'ipfs://QmDup', 'tx-dup', now);
+      await insertTrialOffer(SCOUT_WALLET, 'player-2', 'ipfs://QmDup', 'tx-dup', now);
 
-      const offers = getTrialOffers(SCOUT_WALLET).filter((o) => o.tx_hash === 'tx-dup');
+      const offers = (await getTrialOffers(SCOUT_WALLET)).filter((o) => o.tx_hash === 'tx-dup');
       expect(offers.length).toBe(1);
     });
   });
@@ -61,7 +61,7 @@ describe('#285 trial_offers', () => {
 
     it('returns offer list for authenticated scout', async () => {
       // Pre-seed an offer
-      insertTrialOffer(SCOUT_WALLET, 'player-3', 'ipfs://QmGet', 'tx-get-test', Math.floor(Date.now() / 1000));
+      await insertTrialOffer(SCOUT_WALLET, 'player-3', 'ipfs://QmGet', 'tx-get-test', Math.floor(Date.now() / 1000));
 
       const token = await getScoutToken();
       const res = await request(app)
@@ -103,7 +103,7 @@ describe('#285 trial_offers', () => {
       expect(res.body.data.transactionId).toBe('mock-tx-hash-trial-offer-test');
 
       // Verify persisted
-      const stored = getTrialOffers(SCOUT_WALLET).find(
+      const stored = (await getTrialOffers(SCOUT_WALLET)).find(
         (o) => o.tx_hash === 'mock-tx-hash-trial-offer-test'
       );
       expect(stored).toBeDefined();

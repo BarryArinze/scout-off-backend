@@ -45,6 +45,24 @@ jest.mock('../../src/db', () => ({
   insertAdminActionSignature: jest.fn(),
   getAdminActionSignature: jest.fn().mockReturnValue(null),
   getAdminActionSignatures: jest.fn().mockReturnValue([]),
+  // src/utils/audit.ts's recordAudit (used by filterPlayers, milestone
+  // submission/listing) calls this directly — not mocked via
+  // services/audit's logAuditEvent below.
+  insertAuditLog: jest.fn().mockResolvedValue({
+    id: 1,
+    action: 'mock',
+    admin_wallet: '',
+    query_params: '{}',
+    created_at: new Date().toISOString(),
+    prev_hash: null,
+    hash: 'mock-hash',
+    event_source: 'app_event',
+  }),
+  // src/app.ts's /health and /ready probes go through getDriver().
+  getDriver: jest.fn().mockReturnValue({
+    get: jest.fn().mockResolvedValue({ '?column?': 1 }),
+    run: jest.fn().mockResolvedValue({ changes: 1, lastId: 0 }),
+  }),
 }));
 
 jest.mock('../../src/services/indexer', () => ({
@@ -120,7 +138,7 @@ jest.mock('../../src/services/stellar', () => ({
 }));
 
 jest.mock('../../src/services/audit', () => ({
-  logAuditEvent: jest.fn(),
+  logAuditEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
 // ─── Shape helpers ────────────────────────────────────────────────────────────

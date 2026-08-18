@@ -4,7 +4,7 @@
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import app from '../../src/app';
-import { getDb } from '../../src/db';
+import { getDriver } from '../../src/db';
 import {
   clearFeatureFlagCache,
   isFeatureEnabled,
@@ -27,15 +27,14 @@ function getScoutToken(): string {
 }
 
 describe('Admin feature flags (#494)', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     clearFeatureFlagCache();
-    getDb()
-      .prepare(
-        `INSERT INTO feature_flags (name, enabled, updated_at, updated_by)
-         VALUES (?, 1, ?, 'system')
-         ON CONFLICT(name) DO UPDATE SET enabled = 1, updated_by = 'system'`,
-      )
-      .run(FeatureFlags.SAVED_SEARCHES, Date.now());
+    await getDriver().run(
+      `INSERT INTO feature_flags (name, enabled, updated_at, updated_by)
+       VALUES (?, 1, ?, 'system')
+       ON CONFLICT(name) DO UPDATE SET enabled = 1, updated_by = 'system'`,
+      [FeatureFlags.SAVED_SEARCHES, Date.now()],
+    );
     clearFeatureFlagCache();
   });
 
@@ -97,7 +96,7 @@ describe('Admin feature flags (#494)', () => {
     });
 
     it('updates a flag and takes effect immediately without restart', async () => {
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
 
       const disableRes = await request(app)
         .put('/api/admin/feature-flags')
@@ -106,7 +105,7 @@ describe('Admin feature flags (#494)', () => {
 
       expect(disableRes.status).toBe(200);
       expect(disableRes.body.data.enabled).toBe(false);
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
 
       const enableRes = await request(app)
         .put('/api/admin/feature-flags')
@@ -114,7 +113,7 @@ describe('Admin feature flags (#494)', () => {
         .send({ name: FeatureFlags.SAVED_SEARCHES, enabled: true });
 
       expect(enableRes.status).toBe(200);
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(true);
     });
 
     it('persists flag state to the database', async () => {
@@ -125,12 +124,13 @@ describe('Admin feature flags (#494)', () => {
 
       clearFeatureFlagCache();
 
-      const row = getDb()
-        .prepare('SELECT enabled FROM feature_flags WHERE name = ?')
-        .get(FeatureFlags.SAVED_SEARCHES) as { enabled: number };
+      const row = (await getDriver().get(
+        'SELECT enabled FROM feature_flags WHERE name = ?',
+        [FeatureFlags.SAVED_SEARCHES],
+      )) as { enabled: number };
 
       expect(row.enabled).toBe(0);
-      expect(isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
+      expect(await isFeatureEnabled(FeatureFlags.SAVED_SEARCHES)).toBe(false);
     });
   });
 });

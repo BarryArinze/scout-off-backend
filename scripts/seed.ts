@@ -27,7 +27,6 @@ if (!process.env.CONTRACT_ID)
 if (!process.env.JWT_SECRET) process.env.JWT_SECRET = 'seed-script';
 
 import { initDb, getDb, insertOrUpdatePlayer, updatePlayerProgress } from '../src/db';
-import { runMigrations } from '../src/db/migrate';
 
 // ─── Sample data ──────────────────────────────────────────────────────────────
 
@@ -252,10 +251,11 @@ const EVENTS: Array<{
 
 // ─── Seeding logic ────────────────────────────────────────────────────────────
 
-function seed(): void {
-  initDb();
+async function seed(): Promise<void> {
+  // initDb() already applies pending migrations internally — no separate
+  // runMigrations() call needed here.
+  await initDb();
   const db = getDb();
-  runMigrations(db);
 
   console.log('🌱  ScoutOff seed starting…\n');
 
@@ -269,7 +269,7 @@ function seed(): void {
       skippedPlayers.push(p.player_id);
       continue;
     }
-    insertOrUpdatePlayer({
+    await insertOrUpdatePlayer({
       player_id: p.player_id,
       wallet: p.wallet,
       position: p.position,
@@ -277,7 +277,7 @@ function seed(): void {
       metadata_uri: p.metadata_uri,
       created_at: p.created_at,
     });
-    updatePlayerProgress(p.player_id, p.progress_level);
+    await updatePlayerProgress(p.player_id, p.progress_level);
     insertedPlayers.push(p.player_id);
   }
 
@@ -318,4 +318,7 @@ function seed(): void {
   console.log(`    Scout Beta  (basic):   ${SCOUT_BETA}`);
 }
 
-seed();
+seed().catch((err) => {
+  console.error('Seed failed:', err);
+  process.exit(1);
+});

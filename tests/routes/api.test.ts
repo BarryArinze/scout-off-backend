@@ -87,6 +87,11 @@ jest.mock('../../src/db', () => {
       auditRows = [];
       nextAuditId = 1;
     },
+    // src/app.ts's /health and /ready probes go through getDriver().
+    getDriver: jest.fn().mockReturnValue({
+      get: jest.fn().mockResolvedValue({ '?column?': 1 }),
+      run: jest.fn().mockResolvedValue({ changes: 1, lastId: 0 }),
+    }),
   };
 });
 
@@ -517,7 +522,7 @@ describe('GET /api/players — search audit logging', () => {
 
   it('records an anonymous player_search entry when no auth token is provided', async () => {
     await request(app).get('/api/players?region=europe');
-    const entry = queryAudit({ eventType: 'player_search' })[0];
+    const entry = (await queryAudit({ eventType: 'player_search' }))[0];
     expect(entry).toBeDefined();
     expect(entry!.actorWallet).toBe('anonymous');
     expect(entry!.eventType).toBe('player_search');
@@ -529,7 +534,7 @@ describe('GET /api/players — search audit logging', () => {
     await request(app)
       .get('/api/players?position=striker')
       .set('Authorization', `Bearer ${token}`);
-    const entry = queryAudit({ eventType: 'player_search' })[0];
+    const entry = (await queryAudit({ eventType: 'player_search' }))[0];
     expect(entry).toBeDefined();
     expect(entry!.actorWallet).toBe(scoutWallet);
   });

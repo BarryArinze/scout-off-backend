@@ -41,7 +41,7 @@ export async function submitMilestoneEvidence(req: Request, res: Response, next:
       `[validator] action=submit_milestone validator=${validatorWallet} playerId=${playerId} milestoneType=${milestoneType} evidenceCid=${evidenceCid} correlationId=${correlationId}`
     );
 
-    recordAudit(validatorWallet, 'milestone_submitted', { playerId, milestoneType, evidenceCid }, `correlationId=${correlationId}`);
+    await recordAudit(validatorWallet, 'milestone_submitted', { playerId, milestoneType, evidenceCid }, `correlationId=${correlationId}`);
 
     res.status(201).json({ success: true, data: { evidenceCid } });
   } catch (err) {
@@ -54,7 +54,7 @@ export async function getPendingMilestones(req: Request, res: Response, next: Ne
   try {
     const { region, position, playerId, page, pageSize } = pendingQuerySchema.parse(req.query);
     const validatorWallet = req.params.wallet || req.account;
-    const { data, total } = getPendingMilestonesFromDb({
+    const { data, total } = await getPendingMilestonesFromDb({
       validatorWallet: validatorWallet,
       region,
       position,
@@ -73,8 +73,8 @@ export async function getPendingMilestones(req: Request, res: Response, next: Ne
     }));
 
     const currentValidatorWallet = req.account ?? 'unknown';
-    recordAudit(
-      currentValidatorWallet, 
+    await recordAudit(
+      currentValidatorWallet,
       'pending_milestones_viewed', 
       { 
         region: region ?? null, 

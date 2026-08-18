@@ -22,8 +22,8 @@ export interface AuditChainVerification {
  * was deleted (which shifts every subsequent row's expected prev_hash), or
  * rows were reordered/inserted out of band.
  */
-export function verifyAuditChain(): AuditChainVerification {
-  const rows: AuditLogRow[] = getAllAuditLogRows();
+export async function verifyAuditChain(): Promise<AuditChainVerification> {
+  const rows: AuditLogRow[] = await getAllAuditLogRows();
   let expectedPrevHash = GENESIS_HASH;
 
   for (const row of rows) {

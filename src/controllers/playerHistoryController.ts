@@ -14,14 +14,14 @@ export interface PlayerProfileHistoryItem {
 /**
  * GET /api/players/:playerId/history
  */
-export function getPlayerHistory(
+export async function getPlayerHistory(
   req: Request,
   res: Response,
   next: NextFunction,
 ) {
   try {
     const playerId = playerIdSchema.parse(req.params.playerId);
-    const rows = getPlayerProfileHistory(playerId);
+    const rows = await getPlayerProfileHistory(playerId);
 
     const body: ApiResponse<PlayerProfileHistoryItem[]> = {
       success: true,

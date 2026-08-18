@@ -110,52 +110,52 @@ describe('parseCsvBody()', () => {
 // ─── Unit tests: processBatch ─────────────────────────────────────────────────
 
 describe('processBatch()', () => {
-  it('registers a valid address', () => {
+  it('registers a valid address', async () => {
     const wallet = Keypair.random().publicKey();
-    const results = processBatch([{ wallet }], 'admin-wallet');
+    const results = await processBatch([{ wallet }], 'admin-wallet');
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe('registered');
     expect(results[0].wallet).toBe(wallet);
   });
 
-  it('rejects an invalid address', () => {
-    const results = processBatch([{ wallet: 'NOTVALID' }], 'admin-wallet');
+  it('rejects an invalid address', async () => {
+    const results = await processBatch([{ wallet: 'NOTVALID' }], 'admin-wallet');
     expect(results[0].status).toBe('invalid');
     expect(results[0].reason).toMatch(/invalid Stellar address/i);
   });
 
-  it('marks intra-batch duplicates as duplicate', () => {
+  it('marks intra-batch duplicates as duplicate', async () => {
     const wallet = Keypair.random().publicKey();
-    const results = processBatch([{ wallet }, { wallet }], 'admin-wallet');
+    const results = await processBatch([{ wallet }, { wallet }], 'admin-wallet');
     expect(results[0].status).toBe('registered');
     expect(results[1].status).toBe('duplicate');
     expect(results[1].reason).toMatch(/duplicate within batch/i);
   });
 
-  it('marks already-registered validators as duplicate', () => {
+  it('marks already-registered validators as duplicate', async () => {
     const wallet = Keypair.random().publicKey();
     // First registration
-    processBatch([{ wallet }], 'admin-wallet');
+    await processBatch([{ wallet }], 'admin-wallet');
     // Second batch with same wallet
-    const results = processBatch([{ wallet }], 'admin-wallet');
+    const results = await processBatch([{ wallet }], 'admin-wallet');
     expect(results[0].status).toBe('duplicate');
     expect(results[0].reason).toMatch(/already registered/i);
   });
 
-  it('includes label and region in results', () => {
+  it('includes label and region in results', async () => {
     const wallet = Keypair.random().publicKey();
-    const results = processBatch([{ wallet, label: 'Ali', region: 'Africa' }], 'admin-wallet');
+    const results = await processBatch([{ wallet, label: 'Ali', region: 'Africa' }], 'admin-wallet');
     expect(results[0].label).toBe('Ali');
     expect(results[0].region).toBe('Africa');
   });
 
-  it('processes a mixed batch returning correct statuses for each entry', () => {
+  it('processes a mixed batch returning correct statuses for each entry', async () => {
     const validNew = Keypair.random().publicKey();
     const alreadyRegistered = Keypair.random().publicKey();
     // Pre-register one
-    processBatch([{ wallet: alreadyRegistered }], 'admin-wallet');
+    await processBatch([{ wallet: alreadyRegistered }], 'admin-wallet');
 
-    const results = processBatch(
+    const results = await processBatch(
       [
         { wallet: validNew },
         { wallet: 'BAD_WALLET' },

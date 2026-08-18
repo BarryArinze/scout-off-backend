@@ -77,7 +77,7 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
   const graceThreshold = now - gracePeriodSeconds();
 
   // 2. Local subscriptions table (authoritative for renewal/cancellation state)
-  const localSub = getLatestSubscription(scoutWallet);
+  const localSub = await getLatestSubscription(scoutWallet);
   if (localSub && localSub.expires_at > graceThreshold) return true;
 
   // 3. Indexed scout_subscribed events (fallback for pre-table records)
@@ -89,7 +89,7 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
   }
 
   // 4. Dedicated contact_unlocks table
-  return hasContactUnlock(scoutWallet, playerId);
+  return await hasContactUnlock(scoutWallet, playerId);
 }
 
 // ─── GET /api/scouts/:wallet/subscription ─────────────────────────────────────
@@ -127,7 +127,7 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
     }
 
     // Check local subscriptions table first
-    const localSub = getLatestSubscription(wallet);
+    const localSub = await getLatestSubscription(wallet);
     if (localSub) {
       const active = localSub.expires_at > now;
       const gracePeriodActive = !active && localSub.expires_at > now - graceSeconds;
@@ -189,7 +189,7 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
     // Safe retries (#idempotency): a duplicate key within the TTL returns the
     // cached response instead of triggering a new on-chain transaction.
     if (idempotencyKey) {
-      const cached = getIdempotencyRecord(idempotencyKey);
+      const cached = await getIdempotencyRecord(idempotencyKey);
       if (cached) {
         res.status(cached.status_code).json(JSON.parse(cached.response));
         return;
@@ -205,7 +205,7 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
     const result = await purchaseSubscription(wallet, tier, duration);
 
     // Persist locally
-    insertSubscription({
+    await insertSubscription({
       scout_wallet: wallet,
       tier,
       expires_at: result.expiresAt,
@@ -213,12 +213,12 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
     });
 
     const body = { success: true, data: result };
-    if (idempotencyKey) saveIdempotencyRecord(idempotencyKey, 201, body);
+    if (idempotencyKey) await saveIdempotencyRecord(idempotencyKey, 201, body);
     res.status(201).json(body);
   } catch (err) {
     if (err instanceof PaymentError) {
       const body = { success: false, error: err.message, code: err.code };
-      if (idempotencyKey) saveIdempotencyRecord(idempotencyKey, 402, body);
+      if (idempotencyKey) await saveIdempotencyRecord(idempotencyKey, 402, body);
       res.status(402).json(body);
       return;
     }
@@ -248,13 +248,13 @@ export async function renewSubscription(req: Request, res: Response, next: NextF
     }
     const { tier, duration } = parsed.data;
 
-    const existingSub = getLatestSubscription(wallet);
+    const existingSub = await getLatestSubscription(wallet);
 
     if (existingSub) {
       // Renewal path — extend existing subscription
       const result = await stellarRenewSubscription(wallet, tier, duration, existingSub.expires_at);
 
-      dbRenewSubscription({
+      await dbRenewSubscription({
         id: existingSub.id,
         tier,
         expires_at: result.expiresAt,
@@ -266,7 +266,7 @@ export async function renewSubscription(req: Request, res: Response, next: NextF
       // No subscription exists — create a new one (same as POST)
       const result = await purchaseSubscription(wallet, tier, duration);
 
-      insertSubscription({
+      await insertSubscription({
         scout_wallet: wallet,
         tier,
         expires_at: result.expiresAt,
@@ -301,7 +301,7 @@ export async function cancelSubscription(req: Request, res: Response, next: Next
       return;
     }
 
-    const existingSub = getLatestSubscription(wallet);
+    const existingSub = await getLatestSubscription(wallet);
     if (!existingSub) {
       res.status(404).json({ success: false, error: 'No active subscription found' });
       return;
@@ -313,7 +313,7 @@ export async function cancelSubscription(req: Request, res: Response, next: Next
     const onChainResult = await cancelSubscriptionOnChain(wallet);
 
     const now = Math.floor(Date.now() / 1000);
-    dbCancelSubscription({ id: existingSub.id, cancelled_at: now });
+    await dbCancelSubscription({ id: existingSub.id, cancelled_at: now });
 
     logger.info(`[scout] action=cancel_subscription scout=${wallet} subId=${existingSub.id} txId=${onChainResult.transactionId}`);
 
@@ -356,7 +356,7 @@ export async function getUnlockedContacts(req: Request, res: Response, next: Nex
       return;
     }
 
-    let contacts = getContactUnlocksByScout(wallet);
+    let contacts = await getContactUnlocksByScout(wallet);
 
     if (playerId) {
       contacts = contacts.filter((c) => c.player_id === playerId);
@@ -397,7 +397,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
     }
 
     // Idempotent: a player already unlocked by this scout must not be charged again.
-    if (hasContactUnlock(wallet, playerId)) {
+    if (await hasContactUnlock(wallet, playerId)) {
       logger.info(`[scout] action=unlock_contact_already_unlocked scout=${wallet} playerId=${playerId}`);
       res.json({ success: true, data: { alreadyUnlocked: true } });
       return;
@@ -406,7 +406,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
     logger.info(`[scout] action=unlock_contact_attempt scout=${wallet} playerId=${playerId}`);
 
     const result = await submitContactPayment(wallet, playerId);
-    insertContactUnlock({
+    await insertContactUnlock({
       scout_wallet: wallet,
       player_id: playerId,
       tx_hash: result.transactionId,
@@ -428,7 +428,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
 export async function listTrialOffers(req: Request, res: Response, next: NextFunction) {
   try {
     const { wallet } = req.params;
-    res.json({ success: true, data: getTrialOffers(wallet) });
+    res.json({ success: true, data: await getTrialOffers(wallet) });
   } catch (err) {
     next(err);
   }
@@ -442,7 +442,7 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
 
     const result = await invokeContract('log_trial_offer', [strVal(wallet), strVal(playerId), strVal(detailsUri)]);
     const createdAt = Math.floor(Date.now() / 1000);
-    insertTrialOffer(wallet, playerId, detailsUri, result.hash, createdAt);
+    await insertTrialOffer(wallet, playerId, detailsUri, result.hash, createdAt);
 
     res.status(201).json({ success: true, data: { transactionId: result.hash } });
   } catch (err) {
@@ -542,13 +542,13 @@ export async function getContactDetails(req: Request, res: Response, next: NextF
       return;
     }
 
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({ success: false, error: 'Player not found' });
       return;
     }
 
-    const hasUnlocked = hasContactUnlock(wallet, playerId);
+    const hasUnlocked = await hasContactUnlock(wallet, playerId);
 
     if (!hasUnlocked) {
       res.status(403).json({ success: false, error: 'Contact not unlocked' });

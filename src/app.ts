@@ -20,20 +20,32 @@ import { API_PREFIX, API_V1_PREFIX } from './config';
 import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
 import { requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
-import { getDb } from './db';
+import { getDriver } from './db';
 import { getVersionInfo } from './version';
 
-/** Probe the SQLite database with a lightweight SELECT 1.
- *  Resolves 'ok' or 'error'; never rejects.
- *  A configurable timeout (default 2 s) guards against a locked DB hanging the health check.
+/**
+ * Race a thunk's result against a timeout, resolving 'error' (never
+ * rejecting, never throwing) on a synchronous throw, an async rejection, or
+ * a timeout. Takes a thunk rather than an already-created promise so a
+ * synchronous throw from evaluating the call itself (e.g. getDriver()
+ * throwing "Database not initialised") is also caught — an already-created
+ * promise argument can't protect against a throw that happens before the
+ * promise even exists.
  */
-async function probeDb(timeoutMs = 2_000): Promise<'ok' | 'error'> {
+function withTimeout(fn: () => Promise<unknown>, timeoutMs: number): Promise<'ok' | 'error'> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => resolve('error'), timeoutMs);
     try {
-      getDb().prepare('SELECT 1').get();
-      clearTimeout(timer);
-      resolve('ok');
+      Promise.resolve(fn()).then(
+        () => {
+          clearTimeout(timer);
+          resolve('ok');
+        },
+        () => {
+          clearTimeout(timer);
+          resolve('error');
+        },
+      );
     } catch {
       clearTimeout(timer);
       resolve('error');
@@ -41,27 +53,33 @@ async function probeDb(timeoutMs = 2_000): Promise<'ok' | 'error'> {
   });
 }
 
-/** Probe SQLite writability with a heartbeat-row upsert into indexer_state.
- *  Catches disk-full/permissions regressions that a read-only SELECT 1 would miss.
+/** Probe the database with a lightweight SELECT 1. Works identically under
+ *  DB_DRIVER=sqlite and DB_DRIVER=postgres — both go through DbDriver, so
+ *  neither driver can hang the event loop while this is in flight.
  *  Resolves 'ok' or 'error'; never rejects.
- *  A configurable timeout (default 2 s) guards against a locked DB hanging the readiness check.
+ *  A configurable timeout (default 2 s) guards against a locked/unreachable DB
+ *  hanging the health check.
+ */
+async function probeDb(timeoutMs = 2_000): Promise<'ok' | 'error'> {
+  return withTimeout(() => getDriver().get('SELECT 1'), timeoutMs);
+}
+
+/** Probe DB writability with a heartbeat-row upsert into indexer_state.
+ *  Catches disk-full/permissions regressions (SQLite) or connection-pool
+ *  exhaustion (PostgreSQL) that a read-only SELECT 1 would miss.
+ *  Resolves 'ok' or 'error'; never rejects.
+ *  A configurable timeout (default 2 s) guards against a locked/unreachable DB
+ *  hanging the readiness check.
  */
 async function probeDbWritable(timeoutMs = 2_000): Promise<'ok' | 'error'> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve('error'), timeoutMs);
-    try {
-      getDb()
-        .prepare(
-          "INSERT INTO indexer_state (key, value) VALUES ('health_heartbeat', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .run(String(Date.now()));
-      clearTimeout(timer);
-      resolve('ok');
-    } catch {
-      clearTimeout(timer);
-      resolve('error');
-    }
-  });
+  return withTimeout(
+    () =>
+      getDriver().run(
+        "INSERT INTO indexer_state (key, value) VALUES ('health_heartbeat', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [String(Date.now())],
+      ),
+    timeoutMs,
+  );
 }
 
 const app = express();

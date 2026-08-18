@@ -40,6 +40,17 @@ jest.mock('../../src/db', () => ({
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn().mockReturnValue(1),
   insertOrUpdatePlayer: jest.fn(),
+  // src/utils/audit.ts's recordAudit (called from filterPlayers) calls this directly.
+  insertAuditLog: jest.fn().mockResolvedValue({
+    id: 1,
+    action: 'mock',
+    admin_wallet: '',
+    query_params: '{}',
+    created_at: new Date().toISOString(),
+    prev_hash: null,
+    hash: 'mock-hash',
+    event_source: 'app_event',
+  }),
 }));
 
 import { queryPlayers, countPlayers } from '../../src/db';

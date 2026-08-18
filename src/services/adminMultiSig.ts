@@ -52,7 +52,7 @@ export function proposeAction(
       adminWallet: proposer,
       queryParams: { actionType, threshold: required, outcome: 'immediate' },
       timestamp: new Date().toISOString(),
-    });
+    }).catch(() => {});
     return { actionId: '', status: 'immediate' };
   }
 
@@ -85,7 +85,7 @@ export function proposeAction(
       outcome: 'multisig_pending',
     },
     timestamp: new Date().toISOString(),
-  });
+  }).catch(() => {});
 
   return { actionId, status: 'proposed' };
 }
@@ -153,7 +153,7 @@ export function approveAction(
       outcome: collected >= action.required_signatures ? 'threshold_met' : 'partially_signed',
     },
     timestamp: new Date().toISOString(),
-  });
+  }).catch(() => {});
 
   if (collected >= action.required_signatures) {
     updatePendingAdminActionStatus(actionId, 'executed');

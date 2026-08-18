@@ -147,17 +147,77 @@ env:
 
 ## Step 6: Enable Horizontal Scaling
 
-With PostgreSQL, multiple backend replicas can now safely share the same database:
+With PostgreSQL, multiple backend replicas can safely share the same database.
+This section describes exactly what "safely" means here (#1014) — concretely,
+not as a general promise.
 
 ```yaml
 # Example: 3 backend replicas
 replicas: 3
 ```
 
-All instances will:
-- Connect to the same PostgreSQL database
-- Use row-level locking and transactions for consistency
-- Benefit from connection pooling via PgBouncer or pgpool2 (optional)
+### What every instance actually does
+
+- **Connects to the same PostgreSQL database** through its own connection
+  pool (`pg.Pool`, default size 10 — see `PostgresDriver`'s constructor in
+  `src/db/postgres-driver.ts`). Every query is genuinely `await`-ed against
+  that pool; there is no busy-waiting or blocking of the Node event loop, so
+  concurrent requests within and across replicas are served in parallel
+  (bounded by pool size), not serialized.
+- **Every application code path goes through the same `DbDriver` abstraction**
+  on both SQLite and PostgreSQL (`src/db/driver.ts`) — the raw
+  `better-sqlite3` handle (`getDb()`) is no longer reachable from application
+  code outside the driver implementations themselves, so behavior (return
+  shapes, error semantics, transactional guarantees) is the same regardless
+  of which driver a given deployment runs.
+- **Multi-statement writes run inside a real transaction**
+  (`driver.transaction(fn)`), which on PostgreSQL is a genuine
+  `BEGIN`/`COMMIT`/`ROLLBACK` on one dedicated pooled connection per call —
+  not row-level locking in the general sense, and not automatic protection
+  against every possible race. A transaction only prevents another
+  transaction from observing its uncommitted writes; it does **not** by
+  itself stop two concurrent transactions from both reading the same "last
+  row" under PostgreSQL's default READ COMMITTED isolation and then both
+  writing based on that stale read.
+- **The one place in this codebase where that specific race matters — the
+  audit-log hash chain's "read the previous hash, then insert" sequence
+  (`insertAuditLog` in `src/db/index.ts`) — is closed explicitly**, via
+  `tx.lockForWrite('audit_log')` (`DbTxHandle.lockForWrite`,
+  `src/db/driver.ts`). On PostgreSQL this takes a transaction-scoped
+  advisory lock (`pg_advisory_xact_lock`) before the read, so concurrent
+  `insertAuditLog` calls across every replica linearize instead of racing;
+  on SQLite it's a no-op because `SqliteDriver` already serializes all
+  transactions on its single connection. This is what makes the hash chain
+  provably unbroken under concurrent load — verified by a live-Postgres test
+  that fires 120 simultaneous inserts and checks the resulting chain has no
+  gaps (`tests/db/postgresIntegration.test.ts`).
+- **`audit_log.hash` and `audit_log.event_source` are `NOT NULL` on both
+  drivers** (`db/012_audit_log_hash_chain_postgres.sql`,
+  `db/014_audit_log_hash_not_null_postgres.sql`) — a previous version of the
+  PostgreSQL schema allowed `NULL` in both columns, silently weakening the
+  tamper-evidence guarantee the hash chain exists to provide. A write that
+  fails now throws (`insertAuditLog` propagates the error;
+  `logAuditEvent` logs it at `critical` severity and rethrows) rather than
+  being silently dropped.
+- **SQLite's single-writer connection uses WAL mode and a 5-second
+  `busy_timeout`** (`src/db/index.ts`) so readers and a writer can proceed
+  concurrently instead of blocking on the default rollback journal, and a
+  write under transient lock contention waits and retries at the SQLite
+  engine level instead of failing immediately with `SQLITE_BUSY`.
+- **No general row-level locking is applied outside the audit-log path
+  described above.** Other multi-statement writes in this codebase (player
+  upserts, feature-flag toggles, saved-search CRUD, etc.) are each scoped to
+  a single logical resource keyed by its own primary key, so ordinary
+  PostgreSQL MVCC/row-versioning semantics under READ COMMITTED are
+  sufficient — there is no other "read stale value across two connections,
+  then write" sequence in the current codebase. If you add one, it needs the
+  same `lockForWrite`-style treatment; a transaction alone does not
+  guarantee it's race-free.
+- **Connection pooling via PgBouncer or pgpool2 remains optional** — see
+  [PostgreSQL Connection Pooling](#postgresql-connection-pooling-optional)
+  below. `pg.Pool`'s own per-process pooling is sufficient for most
+  deployment sizes; an external pooler helps once you're running many
+  replicas against a database with a limited `max_connections`.
 
 ## Rollback Procedure
 
@@ -374,6 +434,23 @@ A: Use tools like:
 - `pg_stat_statements` (query performance)
 - `pgAdmin` (web UI)
 - `Prometheus + postgres_exporter` (metrics)
+
+**Q: How is the PostgreSQL driver actually tested — is it just mocked?**
+
+A: No. `.github/workflows/ci.yml`'s `postgres` job runs the application test
+suite against a real `postgres:16-alpine` service container on every push
+and pull request (excluding only the test files that exercise the
+events/indexer, admin-multisig, and webhook-delivery subsystems, which are
+owned by separate issues and still use SQLite directly by design). You can
+run the same thing locally with `npm run test:postgres` against a Postgres
+instance reachable at `DATABASE_URL` (`docker-compose up -d postgres` starts
+one). Separately, `tests/db/postgresIntegration.test.ts` runs against a live
+instance too (set `POSTGRES_TEST_URL` or `DATABASE_URL`) and specifically
+proves: 60+ concurrent queries complete in pool-bounded parallel time (not
+serialized), a slow in-flight query never blocks the Node event loop, `NULL`
+inserts into `audit_log.hash`/`event_source` are rejected, and 120
+simultaneous audit-log writes produce zero silent loss with an unbroken hash
+chain.
 
 ## Support
 

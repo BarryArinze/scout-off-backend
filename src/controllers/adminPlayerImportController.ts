@@ -189,12 +189,12 @@ export async function importPlayers(req: Request, res: Response, next: NextFunct
       `[admin] action=import_players admin=${adminWallet} total=${results.length} succeeded=${succeeded} failed=${failed}`,
     );
 
-    logAuditEvent({
+    await logAuditEvent({
       action: 'bulk_player_import',
       adminWallet,
       queryParams: { total: results.length, succeeded, failed },
       timestamp: new Date().toISOString(),
-    });
+    }).catch(() => {});
 
     res.status(200).json({
       success: true,

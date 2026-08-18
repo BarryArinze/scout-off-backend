@@ -89,7 +89,7 @@ export async function registerPlayer(
     // Write to DB immediately so GET /players/:playerId returns 200 without
     // waiting for the indexer to process the blockchain event (#282).
     const playerId = createId();
-    insertOrUpdatePlayer({
+    await insertOrUpdatePlayer({
       player_id: playerId,
       wallet: parsed.wallet,
       position: sanitizedPosition,
@@ -139,7 +139,7 @@ export async function getPlayer(
     const cacheKey = `players:${playerId}`;
     let data = await cacheGet<Record<string, unknown>>(cacheKey);
     if (!data) {
-      const row = getPlayerById(playerId);
+      const row = await getPlayerById(playerId);
       if (!row) {
         res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
         return;
@@ -226,7 +226,7 @@ export async function filterPlayers(
       return;
     }
 
-    const rows = queryPlayers({
+    const rows = await queryPlayers({
       region: sanitizedRegion,
       position: normalizedPosition ?? sanitizedPosition,
       minTier,
@@ -234,7 +234,7 @@ export async function filterPlayers(
       offset: (page - 1) * pageSize,
     });
 
-    const total = countPlayers({
+    const total = await countPlayers({
       region: sanitizedRegion,
       position: normalizedPosition ?? sanitizedPosition,
       minTier,
@@ -255,7 +255,7 @@ export async function filterPlayers(
     await cacheSet(cacheKey, result);
 
     const scoutWallet = req.account ?? 'anonymous';
-    recordAudit(scoutWallet, 'player_search', {
+    await recordAudit(scoutWallet, 'player_search', {
       region: sanitizedRegion ?? null,
       position: normalizedPosition ?? sanitizedPosition ?? null,
       minTier: minTier ?? null,
@@ -291,7 +291,7 @@ export async function updatePlayer(
     const result = await updateProfile(playerId, metadataUri);
 
     // Append a profile version history row after the on-chain update succeeds.
-    insertPlayerProfileHistory({
+    await insertPlayerProfileHistory({
       player_id: playerId,
       metadata_uri: result.metadataUri,
       changed_at: Date.now(),
@@ -332,7 +332,7 @@ export async function getPlayerMilestones(
     }
     const playerId = sanitizeInput(req.params.playerId);
 
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
       return;
@@ -388,12 +388,12 @@ export async function deactivatePlayerEndpoint(
       return;
     }
     const playerId = sanitizeInput(req.params.playerId);
-    const row = getPlayerById(playerId);
+    const row = await getPlayerById(playerId);
     if (!row) {
       res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
       return;
     }
-    deactivatePlayer(playerId);
+    await deactivatePlayer(playerId);
     await invalidatePlayerCache(playerId);
     res.json({ success: true, message: "Player profile deactivated successfully" });
   } catch (err) {
@@ -414,12 +414,12 @@ export async function reactivatePlayerEndpoint(
       return;
     }
     const playerId = sanitizeInput(req.params.playerId);
-    const row = getPlayerById(playerId);
+    const row = await getPlayerById(playerId);
     if (!row) {
       res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
       return;
     }
-    reactivatePlayer(playerId);
+    await reactivatePlayer(playerId);
     await invalidatePlayerCache(playerId);
     res.json({ success: true, message: "Player profile reactivated successfully" });
   } catch (err) {

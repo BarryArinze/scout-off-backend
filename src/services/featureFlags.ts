@@ -23,27 +23,27 @@ export function clearFeatureFlagCache(): void {
  * Returns whether a named feature flag is enabled.
  * Reads from an in-process cache that is refreshed on admin updates.
  */
-export function isFeatureEnabled(
+export async function isFeatureEnabled(
   flagName: string,
   _context?: FeatureFlagContext,
-): boolean {
+): Promise<boolean> {
   if (cache.has(flagName)) {
     return cache.get(flagName)!;
   }
 
-  const row = getFeatureFlag(flagName);
+  const row = await getFeatureFlag(flagName);
   const enabled = row?.enabled === 1;
   cache.set(flagName, enabled);
   return enabled;
 }
 
 /** Update a flag at runtime and refresh the in-process cache immediately. */
-export function setFeatureFlag(
+export async function setFeatureFlag(
   flagName: string,
   enabled: boolean,
   updatedBy: string,
-): void {
-  upsertFeatureFlag({
+): Promise<void> {
+  await upsertFeatureFlag({
     name: flagName,
     enabled: enabled ? 1 : 0,
     updated_at: Date.now(),

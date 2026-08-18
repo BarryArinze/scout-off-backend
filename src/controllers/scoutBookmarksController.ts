@@ -71,14 +71,14 @@ export async function addBookmark(
     const { playerId } = req.params;
 
     // Verify the player exists
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({ success: false, error: 'Player not found' });
       return;
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const inserted = insertBookmark({
+    const inserted = await insertBookmark({
       scout_wallet: req.params.wallet,
       player_id: playerId,
       created_at: now,
@@ -115,7 +115,7 @@ export async function removeBookmark(
     if (!assertWalletOwnership(req, res)) return;
 
     const { playerId } = req.params;
-    const removed = deleteBookmark(req.params.wallet, playerId);
+    const removed = await deleteBookmark(req.params.wallet, playerId);
 
     if (!removed) {
       res.status(404).json({ success: false, error: 'Bookmark not found' });
@@ -144,19 +144,20 @@ export async function listBookmarks(
   try {
     if (!assertWalletOwnership(req, res)) return;
 
-    const bookmarks: ScoutBookmarkRow[] = getBookmarksByScout(req.params.wallet);
+    const bookmarks: ScoutBookmarkRow[] = await getBookmarksByScout(req.params.wallet);
 
     // Enrich with full player data
-    const enriched = bookmarks
-      .map((b) => {
-        const player = getPlayerById(b.player_id);
+    const enrichedWithNulls = await Promise.all(
+      bookmarks.map(async (b) => {
+        const player = await getPlayerById(b.player_id);
         if (!player) return null;
         return {
           ...serializePlayer(player),
           bookmarked_at: b.created_at,
         };
-      })
-      .filter((p): p is NonNullable<typeof p> => p !== null);
+      }),
+    );
+    const enriched = enrichedWithNulls.filter((p): p is NonNullable<typeof p> => p !== null);
 
     res.json({ success: true, data: enriched });
   } catch (err) {

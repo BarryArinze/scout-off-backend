@@ -63,7 +63,7 @@ export async function putScoutNote(
     const sanitizedNote = sanitizeInput(parsed.data.note);
     const now = Math.floor(Date.now() / 1000);
 
-    upsertScoutNote({
+    await upsertScoutNote({
       scout_wallet: req.params.wallet,
       player_id: playerId,
       note_text: sanitizedNote,
@@ -103,7 +103,7 @@ export async function getScoutNoteHandler(
     if (!validateWalletOwnership(req, res)) return;
 
     const { playerId } = req.params;
-    const row = getScoutNote(req.params.wallet, playerId);
+    const row = await getScoutNote(req.params.wallet, playerId);
 
     if (!row) {
       res.status(404).json({ success: false, error: 'Note not found' });
@@ -139,7 +139,7 @@ export async function listScoutNotesHandler(
   try {
     if (!validateWalletOwnership(req, res)) return;
 
-    const rows = getScoutNotes(req.params.wallet);
+    const rows = await getScoutNotes(req.params.wallet);
 
     res.json({
       success: true,

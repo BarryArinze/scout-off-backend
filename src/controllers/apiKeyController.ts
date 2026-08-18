@@ -68,8 +68,8 @@ export function verifyApiKey(rawKey: string, keyHash: string): boolean {
  * circular dependency — auth.ts calls this function only at runtime via a
  * lazy require so the module graph stays acyclic at load time.
  */
-export function resolveApiKey(rawKey: string): { scout_wallet: string; id: number } | null {
-  const rows: ApiKeyRow[] = getAllActiveApiKeys();
+export async function resolveApiKey(rawKey: string): Promise<{ scout_wallet: string; id: number } | null> {
+  const rows: ApiKeyRow[] = await getAllActiveApiKeys();
   for (const row of rows) {
     if (verifyApiKey(rawKey, row.key_hash)) {
       return { scout_wallet: row.scout_wallet, id: row.id };
@@ -125,7 +125,7 @@ export async function issueApiKey(
     const { key, keyHash } = generateApiKey();
     const now = Math.floor(Date.now() / 1000);
 
-    const id = insertApiKey({
+    const id = await insertApiKey({
       key_hash: keyHash,
       scout_wallet: req.params.wallet,
       label: parsed.data.label,
@@ -162,7 +162,7 @@ export async function listApiKeys(
   try {
     if (!assertWalletOwnership(req, res)) return;
 
-    const rows: ApiKeyRow[] = listApiKeysByWallet(req.params.wallet);
+    const rows: ApiKeyRow[] = await listApiKeysByWallet(req.params.wallet);
 
     res.json({
       success: true,
@@ -201,7 +201,7 @@ export async function revokeApiKey(
       return;
     }
 
-    const revoked = revokeApiKeyById(id, req.params.wallet);
+    const revoked = await revokeApiKeyById(id, req.params.wallet);
     if (!revoked) {
       res.status(404).json({ success: false, error: 'API key not found' });
       return;

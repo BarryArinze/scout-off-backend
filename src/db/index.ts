@@ -25,6 +25,17 @@ export function timedQuery<T>(sql: string, fn: () => T): T {
   return result;
 }
 
+/** Async counterpart to {@link timedQuery} for DbDriver-backed call sites. */
+export async function timedQueryAsync<T>(sql: string, fn: () => Promise<T>): Promise<T> {
+  const start = Date.now();
+  const result = await fn();
+  const duration = Date.now() - start;
+  if (duration >= slowQueryThresholdMs()) {
+    logger.warn(`[db] slow query ${duration}ms: ${sql}`);
+  }
+  return result;
+}
+
 // ─── Connection & schema ──────────────────────────────────────────────────────
 
 let _driver: DbDriver | null = null;
@@ -46,14 +57,20 @@ export async function initDb(): Promise<void> {
       );
     }
 
-    const pgDriver = new PostgresDriver(config.databaseUrl, config.databaseSsl);
+    const pgDriver = new PostgresDriver(config.databaseUrl, config.databaseSsl, config.databasePoolSize);
     await pgDriver.connect();
     _driver = pgDriver;
 
-    logger.info('[db] Connected to PostgreSQL');
+    logger.info(`[db] Connected to PostgreSQL (pool size ${config.databasePoolSize})`);
   } else {
     // SQLite initialization (default)
     _db = new Database(config.dbPath);
+    // WAL mode lets readers and a writer proceed concurrently instead of
+    // blocking each other on the default rollback journal, and busy_timeout
+    // makes a writer that does contend for the single write lock retry for
+    // up to 5s instead of failing immediately with SQLITE_BUSY.
+    _db.pragma('journal_mode = WAL');
+    _db.pragma('busy_timeout = 5000');
     _driver = new SqliteDriver(_db);
 
     // Create initial schema inline (for backwards compatibility with in-memory test databases)
@@ -112,7 +129,7 @@ export async function initDb(): Promise<void> {
   }
 
   // Run migrations (SQL migration files from db/ directory)
-  runMigrations(_driver);
+  await runMigrations(_driver);
 
   // Seed a subscription row for the legacy WEBHOOK_URL/WEBHOOK_ENABLED config on
   // first startup, so single-subscriber deployments keep working with the new
@@ -360,41 +377,37 @@ export interface PlayerProfileHistoryRow {
   tx_hash: string;
 }
 
-export function insertPlayerProfileHistory(p: {
+export async function insertPlayerProfileHistory(p: {
   player_id: string;
   metadata_uri: string;
   changed_at: number;
   tx_hash: string;
-}): void {
-  getDb()
-    .prepare(
-      `INSERT INTO player_profile_history (player_id, metadata_uri, changed_at, tx_hash)
-       VALUES (?, ?, ?, ?)`,
-    )
-    .run(p.player_id, p.metadata_uri, p.changed_at, p.tx_hash);
+}): Promise<void> {
+  const sql = `INSERT INTO player_profile_history (player_id, metadata_uri, changed_at, tx_hash)
+       VALUES (?, ?, ?, ?)`;
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [p.player_id, p.metadata_uri, p.changed_at, p.tx_hash]),
+  );
 }
 
-export function getPlayerProfileHistory(
+export async function getPlayerProfileHistory(
   playerId: string,
-): PlayerProfileHistoryRow[] {
-  return getDb()
-    .prepare(
-      `SELECT metadata_uri, changed_at, tx_hash
+): Promise<PlayerProfileHistoryRow[]> {
+  const sql = `SELECT metadata_uri, changed_at, tx_hash
        FROM player_profile_history
        WHERE player_id = ?
-       ORDER BY changed_at DESC`,
-    )
-    .all(playerId) as PlayerProfileHistoryRow[];
+       ORDER BY changed_at DESC`;
+  return timedQueryAsync(sql, () => getDriver().all<PlayerProfileHistoryRow>(sql, [playerId]));
 }
 
-export function insertOrUpdatePlayer(p: {
+export async function insertOrUpdatePlayer(p: {
   player_id: string;
   wallet: string;
   position?: string;
   region?: string;
   metadata_uri?: string;
   created_at?: number;
-}): void {
+}): Promise<void> {
   const sql = `INSERT INTO players (player_id, wallet, position, region, metadata_uri, created_at)
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT(player_id) DO UPDATE SET
@@ -402,17 +415,17 @@ export function insertOrUpdatePlayer(p: {
          position     = excluded.position,
          region       = excluded.region,
          metadata_uri = excluded.metadata_uri`;
-  timedQuery(sql, () =>
-    getDb().prepare(sql).run(p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null)
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null])
   );
 }
 
 /** @deprecated Use insertOrUpdatePlayer instead. Will be removed in next release. */
 export const upsertPlayer = insertOrUpdatePlayer;
 
-export function updatePlayerProgress(playerId: string, level: number): void {
+export async function updatePlayerProgress(playerId: string, level: number): Promise<void> {
   const sql = 'UPDATE players SET progress_level = ? WHERE player_id = ?';
-  timedQuery(sql, () => getDb().prepare(sql).run(level, playerId));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [level, playerId]));
 }
 
 export interface ValidatorStatsRow {
@@ -421,24 +434,24 @@ export interface ValidatorStatsRow {
   milestones_rejected: number;
 }
 
-export function incrementValidatorApproved(wallet: string): void {
+export async function incrementValidatorApproved(wallet: string): Promise<void> {
   const sql = `INSERT INTO validator_stats (wallet, milestones_approved, milestones_rejected)
                VALUES (?, 1, 0)
                ON CONFLICT(wallet) DO UPDATE SET milestones_approved = milestones_approved + 1`;
-  timedQuery(sql, () => getDb().prepare(sql).run(wallet));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [wallet]));
 }
 
-export function incrementValidatorRejected(wallet: string): void {
+export async function incrementValidatorRejected(wallet: string): Promise<void> {
   const sql = `INSERT INTO validator_stats (wallet, milestones_approved, milestones_rejected)
                VALUES (?, 0, 1)
                ON CONFLICT(wallet) DO UPDATE SET milestones_rejected = milestones_rejected + 1`;
-  timedQuery(sql, () => getDb().prepare(sql).run(wallet));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [wallet]));
 }
 
-export function getValidatorStats(wallet: string): ValidatorStatsRow | null {
+export async function getValidatorStats(wallet: string): Promise<ValidatorStatsRow | null> {
   const sql = 'SELECT * FROM validator_stats WHERE wallet = ?';
-  return timedQuery(sql, () => 
-    (getDb().prepare(sql).get(wallet) as ValidatorStatsRow | undefined) ?? null
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<ValidatorStatsRow>(sql, [wallet])) ?? null
   );
 }
 
@@ -451,23 +464,26 @@ export interface PendingMilestoneRow {
   submitted_at: number;
 }
 
-export function insertPendingMilestone(
+export async function insertPendingMilestone(
   milestoneId: string,
   playerId: string,
   validatorWallet: string,
   milestoneType: string,
   evidenceUri: string,
   submittedAt: number
-): void {
-  const sql = `INSERT OR IGNORE INTO pending_milestones 
-               (milestone_id, player_id, validator_wallet, milestone_type, evidence_uri, submitted_at) 
-               VALUES (?, ?, ?, ?, ?, ?)`;
-  timedQuery(sql, () => getDb().prepare(sql).run(milestoneId, playerId, validatorWallet, milestoneType, evidenceUri, submittedAt));
+): Promise<void> {
+  const sql = `INSERT INTO pending_milestones
+               (milestone_id, player_id, validator_wallet, milestone_type, evidence_uri, submitted_at)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT (milestone_id) DO NOTHING`;
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [milestoneId, playerId, validatorWallet, milestoneType, evidenceUri, submittedAt])
+  );
 }
 
-export function removePendingMilestone(milestoneId: string): void {
+export async function removePendingMilestone(milestoneId: string): Promise<void> {
   const sql = 'DELETE FROM pending_milestones WHERE milestone_id = ?';
-  timedQuery(sql, () => getDb().prepare(sql).run(milestoneId));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [milestoneId]));
 }
 
 export interface GetPendingMilestonesOptions {
@@ -479,8 +495,8 @@ export interface GetPendingMilestonesOptions {
   pageSize?: number;
 }
 
-export function getPendingMilestones(options: GetPendingMilestonesOptions): { data: PendingMilestoneRow[], total: number } {
-  const db = getDb();
+export async function getPendingMilestones(options: GetPendingMilestonesOptions): Promise<{ data: PendingMilestoneRow[], total: number }> {
+  const driver = getDriver();
   // We need to join with players to filter by position and region
   const whereConditions: string[] = [];
   const params: (string | number)[] = [];
@@ -505,41 +521,43 @@ export function getPendingMilestones(options: GetPendingMilestonesOptions): { da
   const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
 
   // Get total count
-  const countSql = `SELECT COUNT(*) AS total FROM pending_milestones pm 
-                    LEFT JOIN players p ON pm.player_id = p.player_id 
+  const countSql = `SELECT COUNT(*) AS total FROM pending_milestones pm
+                    LEFT JOIN players p ON pm.player_id = p.player_id
                     ${whereClause}`;
-  const countRow = timedQuery(countSql, () => db.prepare(countSql).get(...params) as { total: number });
-  const total = countRow.total;
+  const countRow = await timedQueryAsync(countSql, () => driver.get<{ total: number }>(countSql, params));
+  const total = Number(countRow?.total ?? 0);
 
   // Get paginated data
   const page = options.page || 1;
   const pageSize = options.pageSize || 20;
   const offset = (page - 1) * pageSize;
-  const dataSql = `SELECT pm.* FROM pending_milestones pm 
-                   LEFT JOIN players p ON pm.player_id = p.player_id 
+  const dataSql = `SELECT pm.* FROM pending_milestones pm
+                   LEFT JOIN players p ON pm.player_id = p.player_id
                    ${whereClause}
                    ORDER BY pm.submitted_at DESC
                    LIMIT ? OFFSET ?`;
-  const data = timedQuery(dataSql, () => db.prepare(dataSql).all(...params, pageSize, offset) as PendingMilestoneRow[]);
+  const data = await timedQueryAsync(dataSql, () =>
+    driver.all<PendingMilestoneRow>(dataSql, [...params, pageSize, offset])
+  );
 
   return { data, total };
 }
 
-export function getPlayerById(playerId: string): PlayerRow | null {
+export async function getPlayerById(playerId: string): Promise<PlayerRow | null> {
   const sql = 'SELECT * FROM players WHERE player_id = ?';
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(playerId) as PlayerRow | undefined) ?? null
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<PlayerRow>(sql, [playerId])) ?? null
   );
 }
 
-export function deactivatePlayer(playerId: string): void {
+export async function deactivatePlayer(playerId: string): Promise<void> {
   const sql = 'UPDATE players SET is_active = 0 WHERE player_id = ?';
-  timedQuery(sql, () => getDb().prepare(sql).run(playerId));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [playerId]));
 }
 
-export function reactivatePlayer(playerId: string): void {
+export async function reactivatePlayer(playerId: string): Promise<void> {
   const sql = 'UPDATE players SET is_active = 1 WHERE player_id = ?';
-  timedQuery(sql, () => getDb().prepare(sql).run(playerId));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [playerId]));
 }
 
 function buildPlayerWhereClause(opts: QueryPlayersOptions): { where: string; params: (string | number)[] } {
@@ -566,22 +584,22 @@ function buildPlayerWhereClause(opts: QueryPlayersOptions): { where: string; par
   return { where, params };
 }
 
-export function queryPlayers(opts: QueryPlayersOptions): PlayerRow[] {
+export async function queryPlayers(opts: QueryPlayersOptions): Promise<PlayerRow[]> {
   const { where, params } = buildPlayerWhereClause(opts);
   const limit = opts.limit ?? 20;
   const offset = opts.offset ?? 0;
   const sql = `SELECT * FROM players ${where} ORDER BY created_at ASC LIMIT ? OFFSET ?`;
-  return timedQuery(sql, () =>
-    getDb().prepare(sql).all(...params, limit, offset) as PlayerRow[]
+  return timedQueryAsync(sql, () =>
+    getDriver().all<PlayerRow>(sql, [...params, limit, offset])
   );
 }
 
-export function countPlayers(opts: Omit<QueryPlayersOptions, 'limit' | 'offset'>): number {
+export async function countPlayers(opts: Omit<QueryPlayersOptions, 'limit' | 'offset'>): Promise<number> {
   const { where, params } = buildPlayerWhereClause(opts);
   const sql = `SELECT COUNT(*) as count FROM players ${where}`;
-  return timedQuery(sql, () => {
-    const row = getDb().prepare(sql).get(...params) as { count: number };
-    return row.count;
+  return timedQueryAsync(sql, async () => {
+    const row = await getDriver().get<{ count: number | string }>(sql, params);
+    return Number(row?.count ?? 0);
   });
 }
 
@@ -601,11 +619,11 @@ const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
  * Look up a non-expired idempotency key.
  * Returns the stored record, or null when the key is absent or expired.
  */
-export function getIdempotencyRecord(key: string): IdempotencyRecord | null {
+export async function getIdempotencyRecord(key: string): Promise<IdempotencyRecord | null> {
   const sql = 'SELECT * FROM idempotency_keys WHERE key = ? AND expires_at > ?';
   const now = Date.now();
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(key, now) as IdempotencyRecord | undefined) ?? null
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<IdempotencyRecord>(sql, [key, now])) ?? null
   );
 }
 
@@ -615,21 +633,19 @@ export function getIdempotencyRecord(key: string): IdempotencyRecord | null {
  * will both compute a response but only the first one to commit wins; the
  * second one will then be served the stored value by getIdempotencyRecord.
  */
-export function saveIdempotencyRecord(
+export async function saveIdempotencyRecord(
   key: string,
   statusCode: number,
   body: unknown,
-): void {
+): Promise<void> {
   const now = Date.now();
   const sql = `
     INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at)
     VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(key) DO NOTHING
   `;
-  timedQuery(sql, () =>
-    getDb()
-      .prepare(sql)
-      .run(key, statusCode, JSON.stringify(body), now, now + IDEMPOTENCY_TTL_MS)
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [key, statusCode, JSON.stringify(body), now, now + IDEMPOTENCY_TTL_MS])
   );
 }
 
@@ -637,10 +653,10 @@ export function saveIdempotencyRecord(
  * Delete all idempotency records whose TTL has passed.
  * Call this periodically (e.g., from the indexer poll loop) to keep the table small.
  */
-export function purgeExpiredIdempotencyKeys(): number {
+export async function purgeExpiredIdempotencyKeys(): Promise<number> {
   const sql = 'DELETE FROM idempotency_keys WHERE expires_at <= ?';
-  return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(Date.now());
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [Date.now()]);
     return info.changes;
   });
 }
@@ -656,34 +672,34 @@ export interface SubscriptionRow {
   created_at: number;
 }
 
-export function getLatestSubscription(scoutWallet: string): SubscriptionRow | null {
+export async function getLatestSubscription(scoutWallet: string): Promise<SubscriptionRow | null> {
   const sql = `SELECT * FROM subscriptions WHERE scout_wallet = ? AND cancelled_at IS NULL ORDER BY expires_at DESC LIMIT 1`;
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(scoutWallet) as SubscriptionRow | undefined) ?? null
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<SubscriptionRow>(sql, [scoutWallet])) ?? null
   );
 }
 
-export function insertSubscription(p: {
+export async function insertSubscription(p: {
   scout_wallet: string;
   tier: string;
   expires_at: number;
   created_at: number;
-}): number {
-  const sql = `INSERT INTO subscriptions (scout_wallet, tier, expires_at, created_at) VALUES (?, ?, ?, ?)`;
-  return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.scout_wallet, p.tier, p.expires_at, p.created_at);
-    return info.lastInsertRowid as number;
+}): Promise<number> {
+  const sql = `INSERT INTO subscriptions (scout_wallet, tier, expires_at, created_at) VALUES (?, ?, ?, ?) RETURNING id`;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [p.scout_wallet, p.tier, p.expires_at, p.created_at]);
+    return info.lastId;
   });
 }
 
-export function dbRenewSubscription(p: { id: number; tier: string; expires_at: number }): void {
+export async function dbRenewSubscription(p: { id: number; tier: string; expires_at: number }): Promise<void> {
   const sql = `UPDATE subscriptions SET tier = ?, expires_at = ? WHERE id = ?`;
-  timedQuery(sql, () => getDb().prepare(sql).run(p.tier, p.expires_at, p.id));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [p.tier, p.expires_at, p.id]));
 }
 
-export function dbCancelSubscription(p: { id: number; cancelled_at: number }): void {
+export async function dbCancelSubscription(p: { id: number; cancelled_at: number }): Promise<void> {
   const sql = `UPDATE subscriptions SET cancelled_at = ? WHERE id = ?`;
-  timedQuery(sql, () => getDb().prepare(sql).run(p.cancelled_at, p.id));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [p.cancelled_at, p.id]));
 }
 
 // ─── Contact unlock helpers ───────────────────────────────────────────────────
@@ -695,24 +711,24 @@ export interface ContactUnlockRow {
   unlocked_at: number;
 }
 
-export function insertContactUnlock(p: {
+export async function insertContactUnlock(p: {
   scout_wallet: string;
   player_id: string;
   tx_hash: string;
   unlocked_at: number;
-}): void {
+}): Promise<void> {
   const sql = `INSERT INTO contact_unlocks (scout_wallet, player_id, tx_hash, unlocked_at) VALUES (?, ?, ?, ?) ON CONFLICT(scout_wallet, player_id) DO NOTHING`;
-  timedQuery(sql, () => getDb().prepare(sql).run(p.scout_wallet, p.player_id, p.tx_hash, p.unlocked_at));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [p.scout_wallet, p.player_id, p.tx_hash, p.unlocked_at]));
 }
 
-export function getContactUnlocksByScout(scoutWallet: string): ContactUnlockRow[] {
+export async function getContactUnlocksByScout(scoutWallet: string): Promise<ContactUnlockRow[]> {
   const sql = `SELECT * FROM contact_unlocks WHERE scout_wallet = ? ORDER BY unlocked_at DESC`;
-  return timedQuery(sql, () => getDb().prepare(sql).all(scoutWallet) as ContactUnlockRow[]);
+  return timedQueryAsync(sql, () => getDriver().all<ContactUnlockRow>(sql, [scoutWallet]));
 }
 
-export function hasContactUnlock(scoutWallet: string, playerId: string): boolean {
+export async function hasContactUnlock(scoutWallet: string, playerId: string): Promise<boolean> {
   const sql = `SELECT 1 FROM contact_unlocks WHERE scout_wallet = ? AND player_id = ? LIMIT 1`;
-  return timedQuery(sql, () => getDb().prepare(sql).get(scoutWallet, playerId) !== undefined);
+  return timedQueryAsync(sql, async () => (await getDriver().get(sql, [scoutWallet, playerId])) !== undefined);
 }
 
 // ─── Audit log helpers ────────────────────────────────────────────────────────
@@ -738,29 +754,42 @@ export interface AuditLogRow {
 
 /**
  * Inserts a row into audit_log and chains it onto the current end of the
- * hash chain. better-sqlite3 is fully synchronous and this runs inside a
- * single db.transaction(), so the "read the last hash, then insert" sequence
- * below can't race with a concurrent insert.
+ * hash chain. The "read the last hash, then insert" sequence below runs
+ * inside driver.transaction() and takes tx.lockForWrite('audit_log') before
+ * reading, which on both drivers guarantees no concurrent insertAuditLog
+ * call can interleave between the read and the write: SqliteDriver
+ * serializes all transactions on its single connection regardless (the lock
+ * is a no-op there), while PostgresDriver's transactions run on genuinely
+ * concurrent pooled connections — a plain BEGIN/COMMIT alone does NOT
+ * prevent two of them from both reading the same "last row" under READ
+ * COMMITTED, so the advisory lock is load-bearing there. A write that fails
+ * (e.g. a dropped connection) throws here rather than silently vanishing —
+ * callers must not swallow it.
  */
-export function insertAuditLog(p: {
+export async function insertAuditLog(p: {
   action: string;
   adminWallet?: string;
   queryParams?: Record<string, unknown>;
   createdAt: string;
   /** Defaults to 'admin_action' (the pre-existing caller, logAuditEvent). */
   eventSource?: string;
-}): AuditLogRow {
+}): Promise<AuditLogRow> {
   const sql = 'INSERT INTO audit_log (hash-chained)';
-  return timedQuery(sql, () =>
-    getDb().transaction(() => {
-      const db = getDb();
+  return timedQueryAsync(sql, () =>
+    getDriver().transaction(async (tx) => {
       const adminWallet = p.adminWallet ?? '';
       const queryParams = JSON.stringify(p.queryParams ?? {});
       const eventSource = p.eventSource ?? 'admin_action';
 
-      const prevRow = db
-        .prepare('SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1')
-        .get() as { hash: string } | undefined;
+      // See DbTxHandle.lockForWrite: without this, two concurrent
+      // transactions on PostgresDriver's pooled connections can both read
+      // the same "last row" below and both insert, producing two rows that
+      // both chain onto the same prev_hash instead of a linear chain.
+      await tx.lockForWrite('audit_log');
+
+      const prevRow = await tx.get<{ hash: string }>(
+        'SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1'
+      );
       const prevHash = prevRow?.hash ?? GENESIS_HASH;
 
       const hash = computeChainHash(
@@ -768,15 +797,14 @@ export function insertAuditLog(p: {
         prevHash
       );
 
-      const info = db
-        .prepare(
-          `INSERT INTO audit_log (action, admin_wallet, query_params, created_at, prev_hash, hash, event_source)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(p.action, adminWallet, queryParams, p.createdAt, prevHash, hash, eventSource);
+      const info = await tx.run(
+        `INSERT INTO audit_log (action, admin_wallet, query_params, created_at, prev_hash, hash, event_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        [p.action, adminWallet, queryParams, p.createdAt, prevHash, hash, eventSource]
+      );
 
       return {
-        id: Number(info.lastInsertRowid),
+        id: info.lastId,
         action: p.action,
         admin_wallet: adminWallet,
         query_params: queryParams,
@@ -785,11 +813,11 @@ export function insertAuditLog(p: {
         hash,
         event_source: eventSource,
       };
-    })()
+    })
   );
 }
 
-export function getAuditLogs(filters: {
+export async function getAuditLogs(filters: {
   action?: string;
   startDate?: string;
   endDate?: string;
@@ -797,7 +825,7 @@ export function getAuditLogs(filters: {
   actorWallet?: string;
   limit?: number;
   offset?: number;
-}): AuditLogRow[] {
+}): Promise<AuditLogRow[]> {
   const conditions: string[] = [];
   const params: (string | number)[] = [];
   if (filters.action) { conditions.push('action = ?'); params.push(filters.action); }
@@ -809,16 +837,16 @@ export function getAuditLogs(filters: {
   const limit = filters.limit ?? 50;
   const offset = filters.offset ?? 0;
   const sql = `SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
-  return timedQuery(sql, () => getDb().prepare(sql).all(...params, limit, offset) as AuditLogRow[]);
+  return timedQueryAsync(sql, () => getDriver().all<AuditLogRow>(sql, [...params, limit, offset]));
 }
 
-export function getAuditLogsCount(filters: {
+export async function getAuditLogsCount(filters: {
   action?: string;
   startDate?: string;
   endDate?: string;
   eventSource?: string;
   actorWallet?: string;
-}): number {
+}): Promise<number> {
   const conditions: string[] = [];
   const params: (string | number)[] = [];
   if (filters.action) { conditions.push('action = ?'); params.push(filters.action); }
@@ -828,9 +856,9 @@ export function getAuditLogsCount(filters: {
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sql = `SELECT COUNT(*) AS count FROM audit_log ${where}`;
-  return timedQuery(sql, () => {
-    const row = getDb().prepare(sql).get(...params) as { count: number };
-    return row.count;
+  return timedQueryAsync(sql, async () => {
+    const row = await getDriver().get<{ count: number | string }>(sql, params);
+    return Number(row?.count ?? 0);
   });
 }
 
@@ -841,11 +869,11 @@ export function getAuditLogsCount(filters: {
  * chain) and queryAudit() (the old in-memory auditStore had no pagination,
  * so this preserves that "just give me everything" contract).
  */
-export function getAllAuditLogRows(filters: {
+export async function getAllAuditLogRows(filters: {
   eventSource?: string;
   actorWallet?: string;
   action?: string;
-} = {}): AuditLogRow[] {
+} = {}): Promise<AuditLogRow[]> {
   const conditions: string[] = [];
   const params: string[] = [];
   if (filters.action) { conditions.push('action = ?'); params.push(filters.action); }
@@ -853,7 +881,7 @@ export function getAllAuditLogRows(filters: {
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sql = `SELECT * FROM audit_log ${where} ORDER BY id ASC`;
-  return timedQuery(sql, () => getDb().prepare(sql).all(...params) as AuditLogRow[]);
+  return timedQueryAsync(sql, () => getDriver().all<AuditLogRow>(sql, params));
 }
 
 // ─── Trial offer helpers ──────────────────────────────────────────────────────
@@ -870,32 +898,36 @@ export interface TrialOfferRow {
   created_at: number;
 }
 
-export function getTrialOfferById(offerId: string): TrialOfferRow | null {
+export async function getTrialOfferById(offerId: string): Promise<TrialOfferRow | null> {
   const sql = 'SELECT * FROM trial_offers WHERE offer_id = ?';
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(offerId) as TrialOfferRow | undefined) ?? null
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<TrialOfferRow>(sql, [offerId])) ?? null
   );
 }
 
-export function insertTrialOffer(p: {
+export async function insertTrialOffer(p: {
   offer_id: string;
   scout_wallet: string;
   player_id: string;
   details_uri: string;
   created_at: number;
-}): void {
-  const sql = `INSERT OR IGNORE INTO trial_offers (offer_id, scout_wallet, player_id, details_uri, created_at) VALUES (?, ?, ?, ?, ?)`;
-  timedQuery(sql, () => getDb().prepare(sql).run(p.offer_id, p.scout_wallet, p.player_id, p.details_uri, p.created_at));
+}): Promise<void> {
+  const sql = `INSERT INTO trial_offers (offer_id, scout_wallet, player_id, details_uri, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (offer_id) DO NOTHING`;
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [p.offer_id, p.scout_wallet, p.player_id, p.details_uri, p.created_at])
+  );
 }
 
-export function respondToTrialOffer(p: {
+export async function respondToTrialOffer(p: {
   offer_id: string;
   status: string;
   reject_reason?: string;
   responded_at: number;
-}): void {
+}): Promise<void> {
   const sql = `UPDATE trial_offers SET status = ?, reject_reason = ?, responded_at = ? WHERE offer_id = ?`;
-  timedQuery(sql, () => getDb().prepare(sql).run(p.status, p.reject_reason ?? null, p.responded_at, p.offer_id));
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [p.status, p.reject_reason ?? null, p.responded_at, p.offer_id])
+  );
 }
 
 // ─── Pending pin helpers ──────────────────────────────────────────────────────
@@ -909,48 +941,48 @@ export interface PendingPinRow {
   hash?: string | null;
 }
 
-export function insertPendingPin(p: {
+export async function insertPendingPin(p: {
   payload: string;
   created_at: string;
   last_tried: string;
   hash?: string | null;
-}): boolean {
+}): Promise<boolean> {
   if (p.hash) {
-    const sql = `INSERT OR IGNORE INTO pending_pins (payload, hash, created_at, last_tried) VALUES (?, ?, ?, ?)`;
-    return timedQuery(sql, () => {
-      const info = getDb().prepare(sql).run(p.payload, p.hash, p.created_at, p.last_tried);
+    const sql = `INSERT INTO pending_pins (payload, hash, created_at, last_tried) VALUES (?, ?, ?, ?) ON CONFLICT (hash) DO NOTHING`;
+    return timedQueryAsync(sql, async () => {
+      const info = await getDriver().run(sql, [p.payload, p.hash, p.created_at, p.last_tried]);
       return info.changes > 0;
     });
   } else {
     const sql = `INSERT INTO pending_pins (payload, created_at, last_tried) VALUES (?, ?, ?)`;
-    timedQuery(sql, () => getDb().prepare(sql).run(p.payload, p.created_at, p.last_tried));
+    await timedQueryAsync(sql, () => getDriver().run(sql, [p.payload, p.created_at, p.last_tried]));
     return true;
   }
 }
 
-export function getPendingPins(): PendingPinRow[] {
+export async function getPendingPins(): Promise<PendingPinRow[]> {
   const sql = 'SELECT * FROM pending_pins ORDER BY created_at ASC';
-  return timedQuery(sql, () => getDb().prepare(sql).all() as PendingPinRow[]);
+  return timedQueryAsync(sql, () => getDriver().all<PendingPinRow>(sql));
 }
 
-export function deletePendingPin(id: number): void {
+export async function deletePendingPin(id: number): Promise<void> {
   const sql = 'DELETE FROM pending_pins WHERE id = ?';
-  timedQuery(sql, () => getDb().prepare(sql).run(id));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [id]));
 }
 
-export function deletePendingPinByHash(hash: string): void {
+export async function deletePendingPinByHash(hash: string): Promise<void> {
   const sql = 'DELETE FROM pending_pins WHERE hash = ?';
-  timedQuery(sql, () => getDb().prepare(sql).run(hash));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [hash]));
 }
 
-export function isPendingPinByHash(hash: string): boolean {
+export async function isPendingPinByHash(hash: string): Promise<boolean> {
   const sql = 'SELECT 1 FROM pending_pins WHERE hash = ? LIMIT 1';
-  return timedQuery(sql, () => getDb().prepare(sql).get(hash) !== undefined);
+  return timedQueryAsync(sql, async () => (await getDriver().get(sql, [hash])) !== undefined);
 }
 
-export function incrementPendingPinAttempts(id: number): void {
+export async function incrementPendingPinAttempts(id: number): Promise<void> {
   const sql = 'UPDATE pending_pins SET attempts = attempts + 1, last_tried = ? WHERE id = ?';
-  timedQuery(sql, () => getDb().prepare(sql).run(new Date().toISOString(), id));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [new Date().toISOString(), id]));
 }
 
 // ─── Scout player notes helpers (#488) ───────────────────────────────────────
@@ -968,12 +1000,12 @@ export interface ScoutPlayerNoteRow {
  * Uses upsert semantics: calling twice for the same (scout_wallet, player_id)
  * pair overwrites the note rather than creating a duplicate row.
  */
-export function upsertScoutNote(p: {
+export async function upsertScoutNote(p: {
   scout_wallet: string;
   player_id: string;
   note_text: string;
   updated_at: number;
-}): void {
+}): Promise<void> {
   const sql = `
     INSERT INTO scout_player_notes (scout_wallet, player_id, note_text, updated_at)
     VALUES (?, ?, ?, ?)
@@ -981,8 +1013,8 @@ export function upsertScoutNote(p: {
       note_text  = excluded.note_text,
       updated_at = excluded.updated_at
   `;
-  timedQuery(sql, () =>
-    getDb().prepare(sql).run(p.scout_wallet, p.player_id, p.note_text, p.updated_at),
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [p.scout_wallet, p.player_id, p.note_text, p.updated_at]),
   );
 }
 
@@ -990,25 +1022,25 @@ export function upsertScoutNote(p: {
  * Retrieve a single private note by scout wallet + player id.
  * Returns null when no note exists.
  */
-export function getScoutNote(
+export async function getScoutNote(
   scoutWallet: string,
   playerId: string,
-): ScoutPlayerNoteRow | null {
+): Promise<ScoutPlayerNoteRow | null> {
   const sql =
     'SELECT * FROM scout_player_notes WHERE scout_wallet = ? AND player_id = ? LIMIT 1';
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(scoutWallet, playerId) as ScoutPlayerNoteRow | undefined) ?? null,
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<ScoutPlayerNoteRow>(sql, [scoutWallet, playerId])) ?? null,
   );
 }
 
 /**
  * List all private notes authored by a scout, ordered newest-first.
  */
-export function getScoutNotes(scoutWallet: string): ScoutPlayerNoteRow[] {
+export async function getScoutNotes(scoutWallet: string): Promise<ScoutPlayerNoteRow[]> {
   const sql =
     'SELECT * FROM scout_player_notes WHERE scout_wallet = ? ORDER BY updated_at DESC';
-  return timedQuery(sql, () =>
-    getDb().prepare(sql).all(scoutWallet) as ScoutPlayerNoteRow[],
+  return timedQueryAsync(sql, () =>
+    getDriver().all<ScoutPlayerNoteRow>(sql, [scoutWallet]),
   );
 }
 
@@ -1029,33 +1061,34 @@ export interface ApiKeyRow {
  * have already generated the hash before calling this function.
  * Returns the new row id.
  */
-export function insertApiKey(p: {
+export async function insertApiKey(p: {
   key_hash: string;
   scout_wallet: string;
   label: string;
   created_at: number;
-}): number {
+}): Promise<number> {
   const sql = `
     INSERT INTO api_keys (key_hash, scout_wallet, label, created_at)
     VALUES (?, ?, ?, ?)
+    RETURNING id
   `;
-  return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.key_hash, p.scout_wallet, p.label, p.created_at);
-    return info.lastInsertRowid as number;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [p.key_hash, p.scout_wallet, p.label, p.created_at]);
+    return info.lastId;
   });
 }
 
 /**
  * List all non-revoked API keys for a scout wallet.
  */
-export function listApiKeysByWallet(scoutWallet: string): ApiKeyRow[] {
+export async function listApiKeysByWallet(scoutWallet: string): Promise<ApiKeyRow[]> {
   const sql = `
     SELECT * FROM api_keys
     WHERE scout_wallet = ?
     ORDER BY created_at DESC
   `;
-  return timedQuery(sql, () =>
-    getDb().prepare(sql).all(scoutWallet) as ApiKeyRow[],
+  return timedQueryAsync(sql, () =>
+    getDriver().all<ApiKeyRow>(sql, [scoutWallet]),
   );
 }
 
@@ -1064,14 +1097,14 @@ export function listApiKeysByWallet(scoutWallet: string): ApiKeyRow[] {
  * Only revokes keys belonging to the given scout wallet for security.
  * Returns true when a row was updated, false when not found.
  */
-export function revokeApiKeyById(id: number, scoutWallet: string): boolean {
+export async function revokeApiKeyById(id: number, scoutWallet: string): Promise<boolean> {
   const now = Math.floor(Date.now() / 1000);
   const sql = `
     UPDATE api_keys SET revoked_at = ?
     WHERE id = ? AND scout_wallet = ? AND revoked_at IS NULL
   `;
-  return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(now, id, scoutWallet);
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [now, id, scoutWallet]);
     return info.changes > 0;
   });
 }
@@ -1080,10 +1113,10 @@ export function revokeApiKeyById(id: number, scoutWallet: string): boolean {
  * Look up an API key row by its full hash value (including salt prefix).
  * Returns null when not found or already revoked.
  */
-export function getApiKeyByHash(keyHash: string): ApiKeyRow | null {
+export async function getApiKeyByHash(keyHash: string): Promise<ApiKeyRow | null> {
   const sql = `SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1`;
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(keyHash) as ApiKeyRow | undefined) ?? null,
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<ApiKeyRow>(sql, [keyHash])) ?? null,
   );
 }
 
@@ -1091,18 +1124,18 @@ export function getApiKeyByHash(keyHash: string): ApiKeyRow | null {
  * Return all active (non-revoked) API keys across all scouts.
  * Used by auth middleware to verify an incoming X-API-Key header.
  */
-export function getAllActiveApiKeys(): ApiKeyRow[] {
+export async function getAllActiveApiKeys(): Promise<ApiKeyRow[]> {
   const sql = `SELECT * FROM api_keys WHERE revoked_at IS NULL`;
-  return timedQuery(sql, () => getDb().prepare(sql).all() as ApiKeyRow[]);
+  return timedQueryAsync(sql, () => getDriver().all<ApiKeyRow>(sql));
 }
 
 /**
  * Update the last_used_at timestamp for an API key.
  */
-export function touchApiKeyLastUsed(id: number): void {
+export async function touchApiKeyLastUsed(id: number): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
   const sql = `UPDATE api_keys SET last_used_at = ? WHERE id = ?`;
-  timedQuery(sql, () => getDb().prepare(sql).run(now, id));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [now, id]));
 }
 
 // ─── Scout bookmarks helpers (#487) ──────────────────────────────────────────
@@ -1118,17 +1151,18 @@ export interface ScoutBookmarkRow {
  * Insert a bookmark.  Uses INSERT OR IGNORE so re-bookmarking is idempotent.
  * Returns true when a new row was inserted, false when it already existed.
  */
-export function insertBookmark(p: {
+export async function insertBookmark(p: {
   scout_wallet: string;
   player_id: string;
   created_at: number;
-}): boolean {
+}): Promise<boolean> {
   const sql = `
-    INSERT OR IGNORE INTO scout_bookmarks (scout_wallet, player_id, created_at)
+    INSERT INTO scout_bookmarks (scout_wallet, player_id, created_at)
     VALUES (?, ?, ?)
+    ON CONFLICT (scout_wallet, player_id) DO NOTHING
   `;
-  return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.scout_wallet, p.player_id, p.created_at);
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [p.scout_wallet, p.player_id, p.created_at]);
     return info.changes > 0;
   });
 }
@@ -1137,10 +1171,10 @@ export function insertBookmark(p: {
  * Delete a bookmark.
  * Returns true when a row was deleted, false when it did not exist.
  */
-export function deleteBookmark(scoutWallet: string, playerId: string): boolean {
+export async function deleteBookmark(scoutWallet: string, playerId: string): Promise<boolean> {
   const sql = `DELETE FROM scout_bookmarks WHERE scout_wallet = ? AND player_id = ?`;
-  return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(scoutWallet, playerId);
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [scoutWallet, playerId]);
     return info.changes > 0;
   });
 }
@@ -1148,14 +1182,14 @@ export function deleteBookmark(scoutWallet: string, playerId: string): boolean {
 /**
  * List all bookmarks for a scout, ordered by creation time (newest first).
  */
-export function getBookmarksByScout(scoutWallet: string): ScoutBookmarkRow[] {
+export async function getBookmarksByScout(scoutWallet: string): Promise<ScoutBookmarkRow[]> {
   const sql = `
     SELECT * FROM scout_bookmarks
     WHERE scout_wallet = ?
     ORDER BY created_at DESC
   `;
-  return timedQuery(sql, () =>
-    getDb().prepare(sql).all(scoutWallet) as ScoutBookmarkRow[],
+  return timedQueryAsync(sql, () =>
+    getDriver().all<ScoutBookmarkRow>(sql, [scoutWallet]),
   );
 }
 
@@ -1173,33 +1207,34 @@ export interface SavedSearchRow {
  * Insert a new saved search for a scout.
  * Returns the new row id.
  */
-export function insertSavedSearch(p: {
+export async function insertSavedSearch(p: {
   scout_wallet: string;
   name: string;
   filters: string; // pre-serialised JSON
   created_at: number;
-}): number {
+}): Promise<number> {
   const sql = `
     INSERT INTO scout_saved_searches (scout_wallet, name, filters, created_at)
     VALUES (?, ?, ?, ?)
+    RETURNING id
   `;
-  return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(p.scout_wallet, p.name, p.filters, p.created_at);
-    return info.lastInsertRowid as number;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [p.scout_wallet, p.name, p.filters, p.created_at]);
+    return info.lastId;
   });
 }
 
 /**
  * List all saved searches for a scout, ordered newest-first.
  */
-export function getSavedSearchesByScout(scoutWallet: string): SavedSearchRow[] {
+export async function getSavedSearchesByScout(scoutWallet: string): Promise<SavedSearchRow[]> {
   const sql = `
     SELECT * FROM scout_saved_searches
     WHERE scout_wallet = ?
     ORDER BY created_at DESC
   `;
-  return timedQuery(sql, () =>
-    getDb().prepare(sql).all(scoutWallet) as SavedSearchRow[],
+  return timedQueryAsync(sql, () =>
+    getDriver().all<SavedSearchRow>(sql, [scoutWallet]),
   );
 }
 
@@ -1208,10 +1243,10 @@ export function getSavedSearchesByScout(scoutWallet: string): SavedSearchRow[] {
  * Only deletes rows belonging to the given scout wallet for security.
  * Returns true when a row was deleted, false when it did not exist.
  */
-export function deleteSavedSearch(id: number, scoutWallet: string): boolean {
+export async function deleteSavedSearch(id: number, scoutWallet: string): Promise<boolean> {
   const sql = `DELETE FROM scout_saved_searches WHERE id = ? AND scout_wallet = ?`;
-  return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(id, scoutWallet);
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [id, scoutWallet]);
     return info.changes > 0;
   });
 }
@@ -1225,24 +1260,25 @@ export interface FeatureFlagRow {
   updated_by: string;
 }
 
-export function getAllFeatureFlags(): FeatureFlagRow[] {
+export async function getAllFeatureFlags(): Promise<FeatureFlagRow[]> {
   const sql = `SELECT * FROM feature_flags ORDER BY name`;
-  return timedQuery(sql, () => getDb().prepare(sql).all() as FeatureFlagRow[]);
+  return timedQueryAsync(sql, async () => normalizeFeatureFlags(await getDriver().all<FeatureFlagRow>(sql)));
 }
 
-export function getFeatureFlag(name: string): FeatureFlagRow | null {
+export async function getFeatureFlag(name: string): Promise<FeatureFlagRow | null> {
   const sql = `SELECT * FROM feature_flags WHERE name = ?`;
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(name) as FeatureFlagRow | undefined) ?? null,
-  );
+  return timedQueryAsync(sql, async () => {
+    const row = await getDriver().get<FeatureFlagRow>(sql, [name]);
+    return row ? normalizeFeatureFlag(row) : null;
+  });
 }
 
-export function upsertFeatureFlag(p: {
+export async function upsertFeatureFlag(p: {
   name: string;
   enabled: number;
   updated_at: number;
   updated_by: string;
-}): void {
+}): Promise<void> {
   const sql = `
     INSERT INTO feature_flags (name, enabled, updated_at, updated_by)
     VALUES (?, ?, ?, ?)
@@ -1251,9 +1287,23 @@ export function upsertFeatureFlag(p: {
       updated_at = excluded.updated_at,
       updated_by = excluded.updated_by
   `;
-  timedQuery(sql, () => {
-    getDb().prepare(sql).run(p.name, p.enabled, p.updated_at, p.updated_by);
-  });
+  await timedQueryAsync(sql, () => getDriver().run(sql, [p.name, p.enabled, p.updated_at, p.updated_by]));
+}
+
+/**
+ * feature_flags.enabled is INTEGER (0/1) on both drivers (see
+ * db/010_feature_flags_postgres.sql for why it isn't BOOLEAN on Postgres),
+ * but defensively normalise here too in case a row was ever written by
+ * something outside upsertFeatureFlag, so callers (and existing tests) that
+ * compare `enabled === 1` keep working identically on both drivers.
+ */
+function normalizeFeatureFlag(row: FeatureFlagRow): FeatureFlagRow {
+  const raw = row.enabled as unknown;
+  return { ...row, enabled: raw === true || raw === 1 ? 1 : 0 };
+}
+
+function normalizeFeatureFlags(rows: FeatureFlagRow[]): FeatureFlagRow[] {
+  return rows.map(normalizeFeatureFlag);
 }
 
 // ─── Multi-admin action helpers ───────────────────────────────────────────────

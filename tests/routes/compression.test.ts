@@ -18,6 +18,21 @@ jest.mock('../../src/db', () => ({
   getPlayerProfileHistory: jest.fn().mockReturnValue([]),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn().mockReturnValue(1),
+  insertAuditLog: jest.fn().mockResolvedValue({
+    id: 1,
+    action: 'player_search',
+    admin_wallet: '',
+    query_params: '{}',
+    created_at: new Date().toISOString(),
+    prev_hash: null,
+    hash: 'mock-hash',
+    event_source: 'app_event',
+  }),
+  // src/app.ts's /health and /ready probes go through getDriver().
+  getDriver: jest.fn().mockReturnValue({
+    get: jest.fn().mockResolvedValue({ '?column?': 1 }),
+    run: jest.fn().mockResolvedValue({ changes: 1, lastId: 0 }),
+  }),
 }));
 
 jest.mock('../../src/services/indexer', () => ({

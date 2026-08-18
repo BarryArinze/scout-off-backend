@@ -15,7 +15,7 @@ import { logger } from '../utils/logger';
  *
  * Keys expire after 24 hours (controlled by IDEMPOTENCY_TTL_MS in db/index.ts).
  */
-export function idempotency(req: Request, res: Response, next: NextFunction): void {
+export async function idempotency(req: Request, res: Response, next: NextFunction): Promise<void> {
   const key = req.headers['idempotency-key'];
 
   // No key supplied — pass through without any idempotency behaviour.
@@ -28,7 +28,7 @@ export function idempotency(req: Request, res: Response, next: NextFunction): vo
 
   // Check for a cached response.
   try {
-    const record = getIdempotencyRecord(trimmedKey);
+    const record = await getIdempotencyRecord(trimmedKey);
     if (record) {
       logger.info(`[idempotency] cache_hit key=${trimmedKey}`);
       res.status(record.status_code).json(JSON.parse(record.response));
@@ -45,13 +45,14 @@ export function idempotency(req: Request, res: Response, next: NextFunction): vo
   const originalJson = res.json.bind(res);
 
   res.json = function (body: unknown): Response {
-    // Persist the response before sending; ignore errors (best-effort).
-    try {
-      saveIdempotencyRecord(trimmedKey, res.statusCode, body);
-      logger.info(`[idempotency] cache_stored key=${trimmedKey} status=${res.statusCode}`);
-    } catch (err) {
-      logger.warn(`[idempotency] cache_store_error key=${trimmedKey} err=${(err as Error).message}`);
-    }
+    // Persist the response before sending; ignore errors (best-effort). This
+    // stays fire-and-forget rather than awaited: res.json must return
+    // synchronously to preserve Express's response contract.
+    saveIdempotencyRecord(trimmedKey, res.statusCode, body)
+      .then(() => logger.info(`[idempotency] cache_stored key=${trimmedKey} status=${res.statusCode}`))
+      .catch((err: unknown) =>
+        logger.warn(`[idempotency] cache_store_error key=${trimmedKey} err=${(err as Error).message}`),
+      );
     return originalJson(body);
   };
 
