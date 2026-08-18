@@ -63,12 +63,23 @@ pub struct PendingPayout {
 
 #[contracttype]
 #[derive(Clone)]
+pub struct TransferInfo {
+    pub total_fee: u128,
+    pub accumulated: u128,
+}
+
+#[contracttype]
+#[derive(Clone)]
 pub enum DataKey {
     Admin,
     /// TokenMeta for a given player.
     TokenMeta(u64),
     /// A paginated list page of holder addresses for a given player.
     HolderPage(u64, u32),
+    /// Record of a transfer distribution: total fee and accumulated per-page totals.
+    TransferInfo(u64, u128),
+    /// Marker that a given (player, transfer_id, page) has been processed.
+    ProcessedTransferPage(u64, u128, u32),
     /// Legacy monolithic holder list stored in instance storage (used only for migration).
     LegacyHolderList(u64),
     /// Balance entry for a specific (player, holder) pair.
@@ -294,6 +305,7 @@ impl PlayerTokenContract {
         env: Env,
         player_id: u64,
         transfer_fee_xlm: u128,
+        transfer_id: u128,
         page: u32,
     ) -> Result<u32, Error> {
         if !is_initialized(&env) {
@@ -319,6 +331,37 @@ impl PlayerTokenContract {
 
         if meta.sold == 0 {
             return Err(Error::InvalidInput);
+        }
+
+        // Ensure transfer record exists and is consistent across pages.
+        let mut tinfo: TransferInfo = if let Some(t) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, TransferInfo>(&DataKey::TransferInfo(player_id, transfer_id))
+        {
+            if t.total_fee != transfer_fee_xlm {
+                return Err(Error::InvalidInput);
+            }
+            t
+        } else {
+            let ti = TransferInfo {
+                total_fee: transfer_fee_xlm,
+                accumulated: 0u128,
+            };
+            env.storage()
+                .persistent()
+                .set(&DataKey::TransferInfo(player_id, transfer_id), &ti);
+            ti
+        };
+
+        // If this (player, transfer_id, page) has already been processed,
+        // treat it as an explicit no-op and return 0.
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::ProcessedTransferPage(player_id, transfer_id, page))
+        {
+            return Ok(0);
         }
 
         // Read the requested holder page from persistent storage.
@@ -352,9 +395,6 @@ impl PlayerTokenContract {
             }
 
             // pro-rata share = transfer_fee_xlm * tokens / total_sold
-            // Use checked arithmetic; overflow here means the inputs are
-            // pathologically large (fee > u128::MAX / tokens), which the
-            // contract rejects with Error::Overflow.
             let numerator = transfer_fee_xlm
                 .checked_mul(tokens as u128)
                 .ok_or(Error::Overflow)?;
@@ -375,10 +415,27 @@ impl PlayerTokenContract {
                 .set(&DataKey::PendingPayouts(player_id, page), &payouts);
         }
 
-        // Update cumulative distributed amount (best-effort; skip on overflow).
+        // Sum page total and validate against transfer total.
         let page_total: u128 = payouts
             .iter()
             .fold(0u128, |acc, p| acc.saturating_add(p.amount_stroops));
+
+        // Prevent processing pages that would cause accumulated > total_fee.
+        if tinfo.accumulated.checked_add(page_total).unwrap_or(u128::MAX) > tinfo.total_fee {
+            return Err(Error::InvalidInput);
+        }
+
+        // Persist processed-page marker and updated transfer info.
+        env.storage()
+            .persistent()
+            .set(&DataKey::ProcessedTransferPage(player_id, transfer_id, page), &1u32);
+
+        tinfo.accumulated = tinfo.accumulated.saturating_add(page_total);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TransferInfo(player_id, transfer_id), &tinfo);
+
+        // Update cumulative distributed amount (best-effort; skip on overflow).
         let mut updated_meta = meta;
         updated_meta.total_distributed = updated_meta
             .total_distributed
@@ -387,7 +444,7 @@ impl PlayerTokenContract {
             .persistent()
             .set(&DataKey::TokenMeta(player_id), &updated_meta);
         env.events().publish(
-            (Symbol::new(&env, "fee_dist"), player_id, page),
+            (Symbol::new(&env, "fee_dist"), player_id, page, transfer_id),
             (transfer_fee_xlm, queued),
         );
         // No instance bump required — persistent storage used for large data.
@@ -637,8 +694,9 @@ mod tests {
         client.buy_token(&1u64, &30u64, &b2); // 30%
         client.buy_token(&1u64, &20u64, &b3); // 20%
 
-        // Distribute 1_000_000 stroops (1 XLM) across page 0.
-        let queued = client.distribute_fee(&1u64, &1_000_000u128, &0u32);
+        // Distribute 1_000_000 stroops (1 XLM) across page 0 with transfer id 1.
+        let transfer_id = 1u128;
+        let queued = client.distribute_fee(&1u64, &1_000_000u128, &transfer_id, &0u32);
         assert_eq!(queued, 3);
 
         let payouts = client.get_pending_payouts(&1u64, &0u32);
@@ -672,7 +730,8 @@ mod tests {
         client.buy_token(&2u64, &1u64, &b2);
         client.buy_token(&2u64, &1u64, &b3);
 
-        let queued = client.distribute_fee(&2u64, &10u128, &0u32);
+        let transfer_id = 2u128;
+        let queued = client.distribute_fee(&2u64, &10u128, &transfer_id, &0u32);
         assert_eq!(queued, 3);
 
         let payouts = client.get_pending_payouts(&2u64, &0u32);
@@ -691,7 +750,7 @@ mod tests {
         let buyer = Address::generate(&env);
         client.issue_tokens(&3u64, &100u64);
         client.buy_token(&3u64, &1u64, &buyer);
-        assert!(client.try_distribute_fee(&3u64, &0u128, &0u32).is_err());
+        assert!(client.try_distribute_fee(&3u64, &0u128, &1u128, &0u32).is_err());
     }
 
     #[test]
@@ -700,7 +759,7 @@ mod tests {
         let (client, _admin) = setup(&env);
         client.issue_tokens(&4u64, &100u64);
         // No buyers yet — sold = 0.
-        assert!(client.try_distribute_fee(&4u64, &1_000u128, &0u32).is_err());
+        assert!(client.try_distribute_fee(&4u64, &1_000u128, &1u128, &0u32).is_err());
     }
 
     #[test]
@@ -711,7 +770,7 @@ mod tests {
         client.issue_tokens(&5u64, &100u64);
         client.buy_token(&5u64, &1u64, &buyer);
         // Only 1 holder; page 1 should return 0.
-        let queued = client.distribute_fee(&5u64, &1_000u128, &1u32);
+        let queued = client.distribute_fee(&5u64, &1_000u128, &5u128, &1u32);
         assert_eq!(queued, 0);
     }
 
@@ -748,7 +807,8 @@ mod tests {
 
         // Distribute fees across several pages
         for p in 0u32..10u32 {
-            let queued = client.distribute_fee(&player_id, &1_000_000u128, &p);
+            let transfer_id = 1000u128 + (p as u128);
+            let queued = client.distribute_fee(&player_id, &1_000_000u128, &transfer_id, &p);
             assert!(queued <= MAX_HOLDERS_PER_PAGE);
         }
 
@@ -805,6 +865,85 @@ mod tests {
         // TokenMeta holder_pages should reflect the stored pages (45/20 => 3 pages).
         let meta = client.get_token_meta(&player_id);
         assert_eq!(meta.holder_pages, 3);
+    }
+
+    #[test]
+    fn distribute_fee_idempotent_replay_prevented() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+
+        let pid = 3001u64;
+        client.issue_tokens(&pid, &100u64);
+        let b1 = Address::generate(&env);
+        let b2 = Address::generate(&env);
+        let b3 = Address::generate(&env);
+        client.buy_token(&pid, &50u64, &b1);
+        client.buy_token(&pid, &30u64, &b2);
+        client.buy_token(&pid, &20u64, &b3);
+
+        let transfer_id = 4001u128;
+        let queued1 = client.distribute_fee(&pid, &1_000_000u128, &transfer_id, &0u32);
+        assert_eq!(queued1, 3);
+        let meta1 = client.get_token_meta(&pid);
+        let total1 = meta1.total_distributed;
+
+        // Replay same page -> must be no-op
+        let queued2 = client.distribute_fee(&pid, &1_000_000u128, &transfer_id, &0u32);
+        assert_eq!(queued2, 0);
+        let meta2 = client.get_token_meta(&pid);
+        assert_eq!(meta2.total_distributed, total1);
+    }
+
+    #[test]
+    fn distribute_fee_multi_page_same_transfer() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+
+        let pid = 4001u64;
+        client.issue_tokens(&pid, &1_000u64);
+
+        // Create 25 buyers (2 pages)
+        for _ in 0..25 {
+            let a = Address::generate(&env);
+            client.buy_token(&pid, &1u64, &a);
+        }
+
+        let transfer_id = 5001u128;
+        let q0 = client.distribute_fee(&pid, &10_000u128, &transfer_id, &0u32);
+        let q1 = client.distribute_fee(&pid, &10_000u128, &transfer_id, &1u32);
+        assert!(q0 > 0 && q1 > 0);
+
+        let p0 = client.get_pending_payouts(&pid, &0u32);
+        let p1 = client.get_pending_payouts(&pid, &1u32);
+        let page_sum: u128 = p0.iter().map(|p| p.amount_stroops).sum::<u128>()
+            + p1.iter().map(|p| p.amount_stroops).sum::<u128>();
+
+        let meta = client.get_token_meta(&pid);
+        assert_eq!(meta.total_distributed, page_sum);
+
+        // Replaying page 0 is a no-op
+        let q0_again = client.distribute_fee(&pid, &10_000u128, &transfer_id, &0u32);
+        assert_eq!(q0_again, 0);
+        let meta_after = client.get_token_meta(&pid);
+        assert_eq!(meta_after.total_distributed, page_sum);
+    }
+
+    #[test]
+    fn distribute_fee_rejects_mismatched_total_fee() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+
+        let pid = 6001u64;
+        client.issue_tokens(&pid, &100u64);
+        let a = Address::generate(&env);
+        client.buy_token(&pid, &1u64, &a);
+
+        let transfer_id = 7001u128;
+        let ok = client.distribute_fee(&pid, &1_000u128, &transfer_id, &0u32);
+        assert_eq!(ok, 1);
+
+        // Same transfer_id but different total fee should be rejected.
+        assert!(client.try_distribute_fee(&pid, &2_000u128, &transfer_id, &0u32).is_err());
     }
 
     #[test]
