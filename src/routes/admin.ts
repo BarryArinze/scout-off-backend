@@ -48,7 +48,7 @@ router.route('/stats')
  *
  * @response 200 { success: true, data: AdminEvent[] }
  * @response 400 { success: false, error: string } - Invalid date range
- * @auth Bearer (any authenticated user)
+ * @auth Bearer (admin role required)
  */
 router.route('/events')
   .get(requireRole('admin'), getAllEvents)

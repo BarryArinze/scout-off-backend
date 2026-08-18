@@ -11,7 +11,9 @@ servers:
   - url: /api
     description: Stable API (version-less alias)
   - url: /api/v1
-    description: Versioned API
+    description: API v1
+  - url: /api/v2
+    description: API v2 (includes SSE stream endpoint)
 
 tags:
   - name: auth

@@ -11,19 +11,19 @@ describe('FeatureFlags Controller - Cache Consistency (#677)', () => {
     const flagName = 'saved_searches';
     const updatedBy = 'test_user';
 
-    jest.spyOn(db, 'upsertFeatureFlag').mockImplementation(() => {});
-    jest.spyOn(db, 'getFeatureFlag').mockReturnValue({
+    jest.spyOn(db, 'upsertFeatureFlag').mockResolvedValue(undefined);
+    jest.spyOn(db, 'getFeatureFlag').mockResolvedValue({
       name: flagName,
       enabled: 1,
       updated_at: Date.now(),
       updated_by: updatedBy,
     });
 
-    setFeatureFlag(flagName, true, updatedBy);
+    await setFeatureFlag(flagName, true, updatedBy);
 
-    expect(isFeatureEnabled(flagName)).toBe(true);
+    expect(await isFeatureEnabled(flagName)).toBe(true);
 
-    jest.spyOn(db, 'getAllFeatureFlags').mockReturnValue([
+    jest.spyOn(db, 'getAllFeatureFlags').mockResolvedValue([
       {
         name: flagName,
         enabled: 0,
@@ -54,13 +54,13 @@ describe('FeatureFlags Controller - Cache Consistency (#677)', () => {
 
     clearFeatureFlagCache();
 
-    jest.spyOn(db, 'getFeatureFlag').mockReturnValue({
+    jest.spyOn(db, 'getFeatureFlag').mockResolvedValue({
       name: flagName,
       enabled: 0,
       updated_at: Date.now(),
       updated_by: 'external_migration',
     });
 
-    expect(isFeatureEnabled(flagName)).toBe(false);
+    expect(await isFeatureEnabled(flagName)).toBe(false);
   });
 });

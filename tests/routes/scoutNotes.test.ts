@@ -43,7 +43,7 @@ jest.mock('../../src/db', () => ({
   listApiKeysByWallet: jest.fn().mockReturnValue([]),
   revokeApiKeyById: jest.fn(),
   getApiKeyByHash: jest.fn().mockReturnValue(null),
-  touchApiKeyLastUsed: jest.fn(),
+  touchApiKeyLastUsed: jest.fn().mockResolvedValue(undefined),
   // bookmarks helpers (needed by scout router import)
   insertBookmark: jest.fn(),
   deleteBookmark: jest.fn(),

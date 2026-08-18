@@ -15,7 +15,11 @@
     },
     {
       "url": "/api/v1",
-      "description": "Versioned API"
+      "description": "API v1"
+    },
+    {
+      "url": "/api/v2",
+      "description": "API v2 (includes SSE stream endpoint)"
     }
   ],
   "tags": [
@@ -1458,8 +1462,10 @@
         "tags": [
           "scouts"
         ],
-        "summary": "Submit a trial offer to a player",
+        "summary": "Submit a trial offer to a player (deprecated alias)",
+        "description": "Deprecated alias of POST /scouts/{wallet}/trial-offers. It runs the same handler, so validation, persistence, tier promotion, SSE broadcast, response body and error codes are identical. Migrate to the plural path.",
         "operationId": "submitTrialOffer",
+        "deprecated": true,
         "security": [
           {
             "bearerAuth": []
@@ -1594,7 +1600,8 @@
         "tags": [
           "scouts"
         ],
-        "summary": "Create a trial offer (on-chain event log variant)",
+        "summary": "Submit a trial offer to a player",
+        "description": "Canonical trial-offer submission. Validates the body, submits the offer on-chain, indexes it into trial_offer_events, persists it to trial_offers as pending, promotes the player to Elite Tier and broadcasts the trial_offer_logged and milestone_approved SSE events.",
         "operationId": "createTrialOffer",
         "security": [
           {

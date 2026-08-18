@@ -114,10 +114,10 @@ describe('timedQuery slow query detection with a deliberately slow operation', (
     expect(logged.duration_ms).toBeGreaterThanOrEqual(50);
   });
 
-  it('triggers a warning when a real SQLite query on a migrated in-memory DB is slow', () => {
+  it('triggers a warning when a real SQLite query on a migrated in-memory DB is slow', async () => {
     // Build a real in-memory SQLite DB and run migrations so we have real tables.
     const db = new Database(':memory:');
-    runMigrations(new SqliteDriver(db));
+    await runMigrations(new SqliteDriver(db));
 
     process.env.SLOW_QUERY_THRESHOLD_MS = '50';
 

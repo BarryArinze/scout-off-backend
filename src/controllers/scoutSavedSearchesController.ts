@@ -99,7 +99,7 @@ export async function createSavedSearch(
     const wallet = req.params.wallet;
 
     // Enforce 20 saved searches limit
-    const currentCount = countSavedSearchesByScout(wallet);
+    const currentCount = await countSavedSearchesByScout(wallet);
     if (currentCount >= 20) {
       res.status(422).json({
         success: false,
@@ -111,7 +111,7 @@ export async function createSavedSearch(
     const now = Math.floor(Date.now() / 1000);
     const filtersJson = JSON.stringify(filters);
 
-    const id = insertSavedSearch({
+    const id = await insertSavedSearch({
       scout_wallet: wallet,
       name,
       filters: filtersJson,
@@ -152,7 +152,7 @@ export async function listSavedSearches(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const rows = getSavedSearchesByScout(req.params.wallet);
+    const rows = await getSavedSearchesByScout(req.params.wallet);
 
     const data = rows.map((row) => ({
       id:           row.id,
@@ -194,7 +194,7 @@ export async function deleteSavedSearchHandler(
       return;
     }
 
-    const removed = deleteSavedSearch(id, req.params.wallet);
+    const removed = await deleteSavedSearch(id, req.params.wallet);
     if (!removed) {
       res.status(404).json({ success: false, error: 'Saved search not found' });
       return;
@@ -255,14 +255,14 @@ export async function updateSavedSearchHandler(
       updates.filters = JSON.stringify(filters);
     }
 
-    const updated = updateSavedSearch(id, wallet, updates);
+    const updated = await updateSavedSearch(id, wallet, updates);
     if (!updated) {
       res.status(404).json({ success: false, error: 'Saved search not found' });
       return;
     }
 
     // Fetch the updated row to return
-    const row = getSavedSearchById(id, wallet);
+    const row = await getSavedSearchById(id, wallet);
     if (!row) {
       res.status(404).json({ success: false, error: 'Saved search not found' });
       return;
@@ -312,7 +312,7 @@ export async function runSavedSearch(
     }
 
     const wallet = req.params.wallet;
-    const row = getSavedSearchById(id, wallet);
+    const row = await getSavedSearchById(id, wallet);
     if (!row) {
       res.status(404).json({ success: false, error: 'Saved search not found' });
       return;
@@ -327,7 +327,7 @@ export async function runSavedSearch(
     const offset = (page - 1) * pageSize;
 
     // Query players with the saved filters
-    const players = queryPlayers({
+    const players = await queryPlayers({
       region: filters.region,
       position: filters.position,
       minTier: filters.minTier,
@@ -336,7 +336,7 @@ export async function runSavedSearch(
     });
 
     // Get total count for pagination
-    const total = countPlayers({
+    const total = await countPlayers({
       region: filters.region,
       position: filters.position,
       minTier: filters.minTier,

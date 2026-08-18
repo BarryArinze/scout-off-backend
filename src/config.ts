@@ -267,6 +267,13 @@ const config = {
     if (raw === 'no-verify') return 'no-verify' as const;
     return false as const;
   })(),
+  /**
+   * Max concurrent connections in the PostgreSQL connection pool. Each
+   * connection can run one query at a time, so this is effectively the
+   * PostgresDriver's concurrency ceiling — requests beyond this queue for a
+   * free connection rather than failing. Ignored when DB_DRIVER=sqlite.
+   */
+  databasePoolSize: parseInt(process.env.DATABASE_POOL_SIZE ?? '10', 10),
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),

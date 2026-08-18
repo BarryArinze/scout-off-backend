@@ -18,4 +18,8 @@ pub enum Error {
     Unauthorized = 9,
     ContractPaused = 10,
     Overflow = 11,
+    /// Not enough unsold tokens remain to fulfil the requested purchase.
+    /// Used by `player_token::buy_token` when `amount` exceeds the player's
+    /// remaining supply (`total_supply - sold`).
+    InsufficientSupply = 12,
 }

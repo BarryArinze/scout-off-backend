@@ -131,7 +131,7 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
   const graceThreshold = now - gracePeriodSeconds();
 
   // 2. Local subscriptions table (authoritative for renewal/cancellation state)
-  const localSub = getLatestSubscription(scoutWallet);
+  const localSub = await getLatestSubscription(scoutWallet);
   if (localSub && localSub.expires_at > graceThreshold) return true;
 
   // 3. Indexed scout_subscribed events (fallback for pre-table records)
@@ -143,7 +143,7 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
   }
 
   // 4. Dedicated contact_unlocks table
-  return hasContactUnlock(scoutWallet, playerId);
+  return await hasContactUnlock(scoutWallet, playerId);
 }
 
 // ─── GET /api/scouts/:wallet/subscription ─────────────────────────────────────
@@ -173,7 +173,7 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
     }
 
     // Check local subscriptions table first
-    const localSub = getLatestSubscription(wallet);
+    const localSub = await getLatestSubscription(wallet);
     if (localSub) {
       const active = localSub.expires_at > now;
       const gracePeriodActive = !active && localSub.expires_at > now - graceSeconds;
@@ -243,7 +243,7 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
     const result = await purchaseSubscription(wallet, tier, duration);
 
     // Persist locally — grace period is applied at query time, not stored
-    insertSubscription({
+    await insertSubscription({
       scout_wallet: wallet,
       tier,
       expires_at: result.expiresAt,
@@ -302,13 +302,13 @@ export async function renewSubscription(req: Request, res: Response, next: NextF
     }
     const { tier, duration } = parsed.data;
 
-    const existingSub = getLatestSubscription(wallet);
+    const existingSub = await getLatestSubscription(wallet);
 
     if (existingSub) {
       // Renewal path — extend existing subscription
       const result = await stellarRenewSubscription(wallet, tier, duration, existingSub.expires_at);
 
-      dbRenewSubscription({
+      await dbRenewSubscription({
         id: existingSub.id,
         tier,
         expires_at: result.expiresAt,
@@ -320,7 +320,7 @@ export async function renewSubscription(req: Request, res: Response, next: NextF
       // No subscription exists — create a new one (same as POST)
       const result = await purchaseSubscription(wallet, tier, duration);
 
-      insertSubscription({
+      await insertSubscription({
         scout_wallet: wallet,
         tier,
         expires_at: result.expiresAt,
@@ -351,7 +351,7 @@ export async function cancelSubscription(req: Request, res: Response, next: Next
   try {
     const { wallet } = req.params;
 
-    const existingSub = getLatestSubscription(wallet);
+    const existingSub = await getLatestSubscription(wallet);
     if (!existingSub) {
       res.status(404).json({ success: false, error: 'No active subscription found' });
       return;
@@ -363,7 +363,7 @@ export async function cancelSubscription(req: Request, res: Response, next: Next
     const onChainResult = await cancelSubscriptionOnChain(wallet);
 
     const now = Math.floor(Date.now() / 1000);
-    dbCancelSubscription({ id: existingSub.id, cancelled_at: now });
+    await dbCancelSubscription({ id: existingSub.id, cancelled_at: now });
 
     logger.info(`[scout] action=cancel_subscription scout=${wallet} subId=${existingSub.id} txId=${onChainResult.transactionId}`);
 
@@ -397,7 +397,7 @@ export async function getUnlockedContacts(req: Request, res: Response, next: Nex
     const { wallet } = req.params;
     const { playerId } = req.query as { playerId?: string };
 
-    let contacts = getContactUnlocksByScout(wallet);
+    let contacts = await getContactUnlocksByScout(wallet);
 
     if (playerId) {
       contacts = contacts.filter((c) => c.player_id === playerId);
@@ -436,7 +436,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
     }
 
     // Validate the requested player before any payment is considered.
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
       return;
@@ -455,7 +455,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
 
     // Idempotent: a player already unlocked by this scout must not be charged again.
     // Return the cached contact details so the client can use them immediately.
-    if (hasContactUnlock(wallet, playerId)) {
+    if (await hasContactUnlock(wallet, playerId)) {
       logger.info(`[scout] action=unlock_contact_already_unlocked scout=${wallet} playerId=${playerId}`);
       res.json({
         success: true,
@@ -473,7 +473,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
     // Soroban RPC reports a SUCCESSFUL getTransaction for the submitted tx, so
     // the unlock row below is never written for an unconfirmed payment.
     const result = await submitContactPayment(wallet, playerId);
-    insertContactUnlock({
+    await insertContactUnlock({
       scout_wallet: wallet,
       player_id: playerId,
       tx_hash: result.transactionId,
@@ -521,7 +521,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
 export async function listTrialOffers(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    res.json({ success: true, data: getTrialOffers(wallet) });
+    res.json({ success: true, data: await getTrialOffers(wallet) });
   } catch (err) {
     next(err);
   }
@@ -531,8 +531,8 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
  * POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally.
  *
  * This is the **canonical** implementation of "a scout submits a trial offer for a player".
- * The legacy `POST /api/scouts/:wallet/trial-offer` route (`submitTrialOffer` below)
- * delegates here, so both routes share one code path — validation, on-chain submission,
+ * The legacy `POST /api/scouts/:wallet/trial-offer` route wires to this same handler,
+ * so both routes share one code path — validation, on-chain submission,
  * `trial_offer_events` + `trial_offers` persistence, Elite Tier promotion and SSE broadcast.
  */
 export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -572,10 +572,10 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
     const offerId = `offer-${createdAt}-${playerId}`;
 
     // Persist to trial_offer_events (indexer event log, deduped by tx_hash)
-    insertTrialOffer(wallet, playerId, detailsUri, result.transactionId, createdAt);
+    await insertTrialOffer(wallet, playerId, detailsUri, result.transactionId, createdAt);
 
     // Persist to trial_offers (offer/response workflow table)
-    insertTrialOfferRow({
+    await insertTrialOfferRow({
       offer_id: offerId,
       scout_wallet: wallet,
       player_id: playerId,
@@ -584,7 +584,7 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
     });
 
     // Promote player to Elite Tier (Level 3)
-    updatePlayerProgress(playerId, 3);
+    await updatePlayerProgress(playerId, 3);
 
     // Emit SSE: trial offer logged
     broadcaster.broadcast({
@@ -623,55 +623,6 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
         newTier: 3,
       },
     });
-  } catch (err) {
-    if (err instanceof PaymentError) {
-      res.status(402).json({ success: false, error: err.message, code: err.code });
-      return;
-    }
-    next(err);
-  }
-}
-
-// ─── POST /api/scouts/:wallet/trial-offer (deprecated alias) ──────────────────
-
-/**
- * POST /api/scouts/:wallet/trial-offer — **deprecated** alias of
- * `POST /api/scouts/:wallet/trial-offers` (`createTrialOffer`).
- *
- * Both paths describe the same business operation, so this handler owns no logic
- * of its own: it delegates to the canonical implementation, which means it now
- * performs the full flow (Zod validation, player/access checks, on-chain submission,
- * `trial_offer_events` + `trial_offers` persistence, Elite Tier promotion and SSE
- * broadcast) instead of the partial one it used to run.
- *
- * Kept reachable because it is published in `openapi.json` and covered by the
- * `write:trial_offers` API-key scope; clients should migrate to the plural path.
- */
-export async function submitTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
-    const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
-
-    const playerExists = queryEvents('player_registered').some((e) => e.payload.player_id === playerId);
-    if (!playerExists) {
-      res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
-      return;
-    }
-
-    const hasAccess = await scoutHasPlayerAccess(wallet, playerId);
-    if (!hasAccess) {
-      res.status(402).json({
-        success: false,
-        error: 'Scout must be subscribed or have paid the contact fee for this player',
-        code: ErrorCode.SUBSCRIPTION_REQUIRED,
-      });
-      return;
-    }
-
-    logger.info(`[scout] action=log_trial_offer_attempt scout=${wallet} playerId=${playerId}`);
-
-    const result = await stellarLogTrialOffer(wallet, playerId, detailsUri);
-    res.status(201).json({ success: true, data: result });
   } catch (err) {
     if (err instanceof PaymentError) {
       res.status(402).json({ success: false, error: err.message, code: err.code });
@@ -740,7 +691,7 @@ export async function getPaymentHistory(req: Request, res: Response, next: NextF
 
     // Contact unlock payments
     if (!type || type === 'contact_unlock') {
-      const unlocks = getContactUnlocksByScout ? getContactUnlocksByScout(wallet) : [];
+      const unlocks = await getContactUnlocksByScout(wallet);
       for (const u of unlocks) {
         const ts = new Date(u.unlocked_at * 1000).toISOString();
         if (fromDate && new Date(ts) < fromDate) continue;
@@ -804,7 +755,7 @@ export async function getPaymentHistory(req: Request, res: Response, next: NextF
 
     // Subscription payments
     if (!type || type === 'subscription') {
-      const subs = getSubscriptionsByScout ? getSubscriptionsByScout(wallet) : [];
+      const subs = await getSubscriptionsByScout(wallet);
       for (const s of subs) {
         const ts = new Date(s.created_at * 1000).toISOString();
         if (fromDate && new Date(ts) < fromDate) continue;
@@ -868,13 +819,13 @@ export async function getContactDetails(req: Request, res: Response, next: NextF
   try {
     const { wallet, playerId } = req.params;
 
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({ success: false, error: 'Player not found' });
       return;
     }
 
-    const hasUnlocked = hasContactUnlock(wallet, playerId);
+    const hasUnlocked = await hasContactUnlock(wallet, playerId);
 
     if (!hasUnlocked) {
       res.status(403).json({ success: false, error: 'Contact not unlocked' });

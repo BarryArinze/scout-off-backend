@@ -79,8 +79,8 @@ function rowToSnapshot(metadataUri: string): Record<string, unknown> {
  * with the profile's actual player_id (e.g. from an events/audit listing).
  * Try both so either caller's identifier resolves to the same profile.
  */
-function findPlayerByIdOrWallet(playerId: string) {
-  return getPlayerById(playerId) ?? getPlayerByWallet(playerId);
+async function findPlayerByIdOrWallet(playerId: string) {
+  return (await getPlayerById(playerId)) ?? (await getPlayerByWallet(playerId));
 }
 
 // ─── Controllers ──────────────────────────────────────────────────────────────
@@ -94,11 +94,11 @@ function findPlayerByIdOrWallet(playerId: string) {
  * @response 200 { success: true, data: PlayerProfileHistoryItem[] }
  * @response 404 player not found
  */
-export function getPlayerHistory(
+export async function getPlayerHistory(
   req: Request,
   res: Response,
   next: NextFunction,
-): void {
+): Promise<void> {
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {
@@ -112,7 +112,7 @@ export function getPlayerHistory(
 
     const playerId = sanitizeInput(req.params.playerId);
 
-    const player = findPlayerByIdOrWallet(playerId);
+    const player = await findPlayerByIdOrWallet(playerId);
     if (!player) {
       res.status(404).json({
         success: false,
@@ -123,7 +123,7 @@ export function getPlayerHistory(
     }
 
     // Newest-first for list view (DESC by changed_at)
-    const rows = getPlayerProfileHistory(playerId);
+    const rows = await getPlayerProfileHistory(playerId);
 
     // Build version numbers: version = total - index (so oldest = v1, newest = vN)
     const total = rows.length;
@@ -151,11 +151,11 @@ export function getPlayerHistory(
  * @response 400 invalid version param
  * @response 404 player not found or version out of range
  */
-export function getPlayerHistoryVersion(
+export async function getPlayerHistoryVersion(
   req: Request,
   res: Response,
   next: NextFunction,
-): void {
+): Promise<void> {
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {
@@ -180,7 +180,7 @@ export function getPlayerHistoryVersion(
     const playerId = sanitizeInput(req.params.playerId);
     const version = versionResult.data;
 
-    const player = findPlayerByIdOrWallet(playerId);
+    const player = await findPlayerByIdOrWallet(playerId);
     if (!player) {
       res.status(404).json({
         success: false,
@@ -191,7 +191,7 @@ export function getPlayerHistoryVersion(
     }
 
     // Fetch oldest-first so index 0 = version 1
-    const rows = getPlayerProfileHistoryVersioned(playerId);
+    const rows = await getPlayerProfileHistoryVersioned(playerId);
     const row = rows[version - 1];
 
     if (!row) {
@@ -228,11 +228,11 @@ export function getPlayerHistoryVersion(
  * @response 400 invalid params
  * @response 404 player not found or version out of range
  */
-export function getPlayerHistoryDiff(
+export async function getPlayerHistoryDiff(
   req: Request,
   res: Response,
   next: NextFunction,
-): void {
+): Promise<void> {
   try {
     const idResult = playerIdSchema.safeParse(req.params.playerId);
     if (!idResult.success) {
@@ -257,7 +257,7 @@ export function getPlayerHistoryDiff(
     const playerId = sanitizeInput(req.params.playerId);
     const version = versionResult.data;
 
-    const player = findPlayerByIdOrWallet(playerId);
+    const player = await findPlayerByIdOrWallet(playerId);
     if (!player) {
       res.status(404).json({
         success: false,
@@ -268,7 +268,7 @@ export function getPlayerHistoryDiff(
     }
 
     // Fetch oldest-first so index 0 = version 1
-    const rows = getPlayerProfileHistoryVersioned(playerId);
+    const rows = await getPlayerProfileHistoryVersioned(playerId);
     const currRow = rows[version - 1];
 
     if (!currRow) {

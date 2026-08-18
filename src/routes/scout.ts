@@ -8,7 +8,6 @@ import {
   subscribe,
   renewSubscription,
   cancelSubscription,
-  submitTrialOffer,
   listTrialOffers,
   createTrialOffer,
   trialOfferSchema,
@@ -167,7 +166,7 @@ router.route('/:wallet/trial-offer')
     walletRateLimit(),
     idempotency,
     validateBody(trialOfferSchema),
-    submitTrialOffer,
+    createTrialOffer,
   )
   .all(methodNotAllowed(['POST']));
 
