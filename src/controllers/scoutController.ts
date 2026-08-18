@@ -412,6 +412,9 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
       tx_hash: result.transactionId,
       unlocked_at: Math.floor(Date.now() / 1000),
     });
+    // Player state changed (contact_unlocked) — invalidate player-list caches
+    // after the persistence succeeded so subsequent list queries stay fresh.
+    await invalidatePlayerCache();
     res.json({ success: true, data: result });
   } catch (err) {
     if (err instanceof PaymentError) {

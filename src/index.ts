@@ -10,6 +10,11 @@ import { checkHealth, retryPendingPins } from "./services/ipfs";
 import { indexEvents } from "./services/indexer";
 import { fetchLastIndexedLedger, persistLastIndexedLedger } from "./db";
 import { initBlocklist } from "./services/tokenBlocklist";
+import {
+  initCacheInvalidationSubscriber,
+  closeCacheInvalidationSubscriber,
+} from "./services/cache";
+import { closeRedisClients } from "./services/redis";
 
 // Database initialization is now async - must be awaited
 async function start() {
@@ -23,6 +28,10 @@ async function start() {
   // Initialise the token revocation blocklist (prune expired rows, schedule
   // background pruning, and kick off a non-blocking Redis warm-up sync).
   initBlocklist();
+
+  // Listen for cross-instance player-list cache invalidations on the Redis
+  // pub/sub channel `invalidate:players` (no-op when REDIS_URL is unset).
+  await initCacheInvalidationSubscriber();
 
   // If INDEXER_BACKFILL_FROM_LEDGER is set and is less than the stored last_ledger,
   // reset last_ledger so the next poll replays from that point.
@@ -127,6 +136,14 @@ async function startServer() {
         logger.info("Database connection closed");
       } catch (dbErr) {
         logger.error("Error closing database:", dbErr);
+      }
+
+      try {
+        await closeCacheInvalidationSubscriber();
+        await closeRedisClients();
+        logger.info("Redis connections closed");
+      } catch (redisErr) {
+        logger.error("Error closing Redis connections:", redisErr);
       }
 
       try {
