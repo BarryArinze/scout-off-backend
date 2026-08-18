@@ -55,15 +55,42 @@ spec:
             - configMapRef:
                 name: {{ include "scout-off-backend.fullname" . }}-config
           # ── Environment: sensitive values from Secret ────────────────────────
-          # CONTRACT_ID and JWT_SECRET are never stored in the ConfigMap.
+          # Per-contract IDs and JWT_SECRET are never stored in the ConfigMap.
           # They are injected directly from the Kubernetes Secret so they do
           # not appear in ConfigMap data, audit logs, or helm templates.
+          # CONTRACT_ID is kept for backward compatibility with single-contract
+          # deployments; new deployments should set the per-contract IDs.
           env:
             - name: CONTRACT_ID
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secretName }}
                   key: CONTRACT_ID
+                  optional: true
+            - name: REGISTER_CONTRACT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: REGISTER_CONTRACT_ID
+                  optional: true
+            - name: PROGRESS_CONTRACT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: PROGRESS_CONTRACT_ID
+                  optional: true
+            - name: SUBSCRIPTION_CONTRACT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: SUBSCRIPTION_CONTRACT_ID
+                  optional: true
+            - name: CONNECTION_CONTRACT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secretName }}
+                  key: CONNECTION_CONTRACT_ID
+                  optional: true
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef:

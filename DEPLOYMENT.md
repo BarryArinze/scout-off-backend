@@ -9,7 +9,11 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 
 | Variable | Required | Notes |
 |---|---|---|
-| `CONTRACT_ID` | ✅ | Deployed Soroban contract address |
+| `CONTRACT_ID` | — | Legacy single-contract address (backward compat). Falls back as default for each per-contract var below. |
+| `REGISTER_CONTRACT_ID` | ✅ | Deployed `register` Soroban contract address |
+| `PROGRESS_CONTRACT_ID` | ✅ | Deployed `progress` Soroban contract address |
+| `SUBSCRIPTION_CONTRACT_ID` | ✅ | Deployed `subscription` Soroban contract address |
+| `CONNECTION_CONTRACT_ID` | ✅ | Deployed `connection` Soroban contract address |
 | `JWT_SECRET` | ✅ | Min 32 chars; rotate via dual-key window (see below) |
 | `JWT_SECRET_PREVIOUS` | — | Previous signing secret during rotation grace window |
 | `JWT_SECRET_PREVIOUS_UNTIL` | — | Absolute grace-window end (Unix seconds or ISO-8601). After this time previous tokens are rejected even if `JWT_SECRET_PREVIOUS` is still set |
@@ -35,10 +39,141 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS allowed origins (defaults per env: `*` in dev, `https://staging.scoutoff.io` in staging, `https://app.scoutoff.io,https://scoutoff.io` in prod) |
 | `ADMIN_IP_ALLOWLIST` | — | Comma-separated list of **IPv4** addresses/CIDR ranges allowed to reach admin endpoints (e.g. `192.168.1.0/24,10.0.0.1`). Unset/empty disables the check. IPv6 is not supported yet — any IPv6 client IP is rejected with 403 regardless of this setting (fail closed). |
 
+---
+
+## Multi-Contract Architecture
+
+ScoutOff deploys five separate Soroban contracts, each with its own on-chain address:
+
+| Contract | Env var | Purpose |
+|---|---|---|
+| `register` | `REGISTER_CONTRACT_ID` | Player profiles, progress levels |
+| `progress` | `PROGRESS_CONTRACT_ID` | Milestone submission and approval |
+| `subscription` | `SUBSCRIPTION_CONTRACT_ID` | Scout subscriptions, contact fees, fee balance |
+| `connection` | `CONNECTION_CONTRACT_ID` | Scout-player connections, trial offers |
+| `player_token` | _(not yet wired)_ | Player token contract (future) |
+
+### Deploying the contracts
+
+Deploy each crate to testnet (or mainnet), noting the resulting contract ID:
+
+```bash
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/register.wasm \
+  --source deployer --network testnet
+# → REGISTER_CONTRACT_ID=CABC...
+
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/progress.wasm \
+  --source deployer --network testnet
+# → PROGRESS_CONTRACT_ID=CDEF...
+
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/subscription.wasm \
+  --source deployer --network testnet
+# → SUBSCRIPTION_CONTRACT_ID=CGHI...
+
+stellar contract deploy --wasm target/wasm32-unknown-unknown/release/connection.wasm \
+  --source deployer --network testnet
+# → CONNECTION_CONTRACT_ID=CJKL...
+```
+
+### Initializing each contract
+
+```bash
+# register
+stellar contract invoke --id $REGISTER_CONTRACT_ID --source admin --network testnet \
+  -- initialize --admin $ADMIN_ADDR --token $TOKEN_ADDR --platform_fee_bps 500
+
+# progress (needs register address so it can cross-call update_progress_level)
+stellar contract invoke --id $PROGRESS_CONTRACT_ID --source admin --network testnet \
+  -- initialize --admin $ADMIN_ADDR --register_contract $REGISTER_CONTRACT_ID
+
+# subscription
+stellar contract invoke --id $SUBSCRIPTION_CONTRACT_ID --source admin --network testnet \
+  -- initialize --admin $ADMIN_ADDR --token $TOKEN_ADDR --platform_fee_bps 500
+
+# connection (needs register + subscription addresses)
+stellar contract invoke --id $CONNECTION_CONTRACT_ID --source admin --network testnet \
+  -- initialize --admin $ADMIN_ADDR \
+     --register_contract $REGISTER_CONTRACT_ID \
+     --subscription_contract $SUBSCRIPTION_CONTRACT_ID
+```
+
+### Registering authorized updaters
+
+Both `progress` and `connection` need permission to call `update_progress_level`
+on the `register` contract. Register each using the new `add_authorized_updater`
+entrypoint:
+
+```bash
+# Allow the progress contract to update player progress
+stellar contract invoke --id $REGISTER_CONTRACT_ID --source admin --network testnet \
+  -- add_authorized_updater --updater $PROGRESS_CONTRACT_ID
+
+# Allow the connection contract to update player progress (for trial offers)
+stellar contract invoke --id $REGISTER_CONTRACT_ID --source admin --network testnet \
+  -- add_authorized_updater --updater $CONNECTION_CONTRACT_ID
+```
+
+Both addresses will coexist in the allowlist — adding the second does not evict
+the first. Verify with:
+
+```bash
+stellar contract invoke --id $REGISTER_CONTRACT_ID --source any --network testnet \
+  -- get_authorized_updaters
+# → ["CDEF...", "CJKL..."]
+```
+
+### Pausing and unpausing
+
+Each contract (`register`, `subscription`, `connection`) exposes `pause(admin)`
+and `unpause(admin)` entrypoints that the backend routes to via the
+`pauseContractOnChain` / `unpauseContractOnChain` helpers in `stellar.ts`.
+The backend currently routes pause/unpause calls to the **subscription** contract.
+To pause all user-facing operations, call `pause` on each contract individually
+if needed.
+
+```bash
+stellar contract invoke --id $SUBSCRIPTION_CONTRACT_ID --source admin --network testnet \
+  -- pause --admin $ADMIN_ADDR
+```
+
+### Backward compatibility
+
+Single-contract deployments that set only `CONTRACT_ID` continue to work without
+changes. Each per-contract env var falls back to `CONTRACT_ID` when unset,
+preserving backward compatibility during staged migrations.
+
+
 ## Kubernetes / Helm Deployment
 
 The `helm/scout-off-backend/` directory contains a production-grade Helm 3 chart
 (API version `v2`) for deploying the backend to Kubernetes.
+
+### Default topology: single-replica SQLite
+
+The chart's defaults deploy a **single replica backed by SQLite**:
+`replicaCount: 1`, `hpa.enabled: false`, `pdb.enabled: false`, and
+`env.DB_DRIVER: sqlite`. This is the only topology that is internally
+consistent out of the box — SQLite is a single-process, single-file database
+with no support for concurrent access from multiple processes, so scaling to
+multiple pods while on SQLite would give every pod its own unshared, ephemeral
+database file (writes invisible across pods, data lost on restart).
+
+To scale horizontally you **must** switch to PostgreSQL first:
+
+```bash
+helm upgrade --install scout-off-backend ./helm/scout-off-backend \
+  --set env.DB_DRIVER=postgres \
+  --set env.DATABASE_URL=postgresql://user:pass@host:5432/db \
+  --set replicaCount=3 \
+  --set hpa.enabled=true
+```
+
+See [docs/postgres-migration.md](docs/postgres-migration.md) for the migration
+procedure. If you override the defaults into the broken combination
+(SQLite + more than one replica, or SQLite + HPA enabled), the chart prints a
+loud warning in its NOTES.txt output instead of silently deploying it; the
+`scripts/validate-helm-chart.sh` CI check enforces this invariant on every
+push.
 
 ### Prerequisites
 
@@ -151,10 +286,12 @@ Common overrides:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `image.tag` | chart appVersion | Docker image tag to deploy |
-| `replicaCount` | `2` | Minimum pod count (HPA floor) |
-| `hpa.maxReplicas` | `10` | Maximum pods under autoscaling |
+| `replicaCount` | `1` | Pod count. Keep at `1` while `env.DB_DRIVER=sqlite` (SQLite is single-process); raise it only after switching to PostgreSQL |
+| `hpa.enabled` | `false` | Enable autoscaling. Requires `env.DB_DRIVER=postgres` + `env.DATABASE_URL` |
+| `hpa.maxReplicas` | `10` | Maximum pods under autoscaling (only when `hpa.enabled=true`) |
 | `hpa.targetCPUUtilizationPercentage` | `70` | CPU threshold to trigger scale-up |
 | `hpa.targetMemoryUtilizationPercentage` | `80` | Memory threshold to trigger scale-up |
+| `pdb.enabled` | `false` | Enable a PodDisruptionBudget. Enable for multi-replica (PostgreSQL-backed) deployments |
 | `ingress.enabled` | `false` | Expose the service via an Ingress |
 | `ingress.hosts[0].host` | `api.scoutoff.io` | Public hostname |
 | `ingress.tls[0].secretName` | `scout-off-tls` | TLS certificate Secret name |
@@ -179,8 +316,9 @@ helm template scout-off-backend ./helm/scout-off-backend \
   --set image.tag=local-test
 ```
 
-This produces a Deployment, HPA, PodDisruptionBudget, Service, ConfigMap, and
-(when `ingress.enabled=true`) an Ingress resource.
+This produces a Deployment, Service, ConfigMap, and (when `ingress.enabled=true`)
+an Ingress resource. The HPA and PodDisruptionBudget are only rendered when
+`hpa.enabled=true` / `pdb.enabled=true` respectively.
 
 ### 7. Uninstall
 

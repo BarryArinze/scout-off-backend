@@ -346,3 +346,194 @@ mod subscription_invariants {
         }
     }
 }
+
+// ── S7 / S8 / S9: cancel_subscription, pause/unpause, get_fee_balance ────────
+
+#[cfg(test)]
+mod subscription_lifecycle_invariants {
+    use proptest::prelude::*;
+    use subscription::{SubscriptionContract, SubscriptionContractClient};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        token::StellarAssetClient,
+        Address, Env,
+    };
+
+    const LEDGERS_PER_DAY: u32 = 17_280;
+    const SCOUT_FUNDING: i128 = 1_000_000_000_000_000i128;
+
+    fn proptest_cases() -> u32 {
+        std::env::var("PROPTEST_CASES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000)
+    }
+
+    fn setup(env: &Env) -> (SubscriptionContractClient<'_>, Address, Address) {
+        env.mock_all_auths();
+        let id = env.register_contract(None, SubscriptionContract);
+        let client = SubscriptionContractClient::new(env, &id);
+        let admin = Address::generate(env);
+        let token = env.register_stellar_asset_contract_v2(admin.clone()).address();
+        client.initialize(&admin, &token, &500u32);
+        (client, admin, token)
+    }
+
+    fn fund_scout(env: &Env, token: &Address, scout: &Address) {
+        StellarAssetClient::new(env, token).mint(scout, &SCOUT_FUNDING);
+    }
+
+    // ── S7: cancel_subscription is a one-shot, monotone operation ─────────────
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
+
+        /// After cancel_subscription succeeds, is_subscribed must be false and a
+        /// second cancel call must return NotSubscribed (not panic or succeed silently).
+        #[test]
+        fn prop_cancel_subscription_is_one_shot(duration in 1u32..=30u32) {
+            let env = Env::default();
+            let (client, _, token) = setup(&env);
+            let scout = Address::generate(&env);
+            fund_scout(&env, &token, &scout);
+
+            // Subscribe and immediately cancel.
+            client.subscribe(&scout, &1u32, &duration);
+            prop_assert!(client.is_subscribed(&scout));
+
+            let first_cancel = client.try_cancel_subscription(&scout);
+            prop_assert!(first_cancel.is_ok(), "first cancel must succeed");
+            prop_assert!(!client.is_subscribed(&scout), "must be inactive after cancel");
+
+            // Second cancel must fail (NotSubscribed or already-expired logic).
+            let second_cancel = client.try_cancel_subscription(&scout);
+            prop_assert!(
+                second_cancel.is_err(),
+                "second cancel on an already-cancelled sub must fail"
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
+
+        /// Cancelling a subscription that expired naturally must also return an error.
+        #[test]
+        fn prop_cancel_expired_subscription_fails(duration in 1u32..=5u32) {
+            let env = Env::default();
+            let (client, _, token) = setup(&env);
+            let scout = Address::generate(&env);
+            fund_scout(&env, &token, &scout);
+
+            client.subscribe(&scout, &1u32, &duration);
+
+            // Advance past expiry.
+            let advance = duration * LEDGERS_PER_DAY + 1;
+            env.ledger().with_mut(|li| li.sequence_number += advance);
+
+            prop_assert!(!client.is_subscribed(&scout), "subscription should have expired");
+            let result = client.try_cancel_subscription(&scout);
+            prop_assert!(result.is_err(), "cancel on expired subscription must fail");
+        }
+    }
+
+    // ── S8: pause/unpause is a reversible admin-only toggle ───────────────────
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
+
+        /// Any number of pause→unpause cycles must leave the contract fully operational.
+        #[test]
+        fn prop_pause_unpause_cycles_leave_contract_operational(cycles in 1u32..=5u32) {
+            let env = Env::default();
+            let (client, admin, token) = setup(&env);
+            let scout = Address::generate(&env);
+            fund_scout(&env, &token, &scout);
+
+            for _ in 0..cycles {
+                client.pause(&admin);
+                // subscribe must fail while paused.
+                let r = client.try_subscribe(&scout, &1u32, &1u32);
+                prop_assert!(r.is_err(), "subscribe must fail while paused");
+
+                client.unpause(&admin);
+            }
+
+            // After the last unpause the contract must be operational.
+            let r = client.try_subscribe(&scout, &1u32, &1u32);
+            prop_assert!(r.is_ok(), "subscribe must succeed after final unpause");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
+
+        /// Non-admin addresses must never be able to pause or unpause.
+        #[test]
+        fn prop_only_admin_can_pause_unpause(_seed in 0u64..u64::MAX) {
+            let env = Env::default();
+            let (client, _admin, _token) = setup(&env);
+            let non_admin = Address::generate(&env);
+
+            prop_assert!(
+                client.try_pause(&non_admin).is_err(),
+                "non-admin must not pause"
+            );
+            prop_assert!(
+                client.try_unpause(&non_admin).is_err(),
+                "non-admin must not unpause"
+            );
+        }
+    }
+
+    // ── S9: get_fee_balance tracks accumulated fees exactly ───────────────────
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
+
+        /// After n subscriptions the fee balance must be positive,
+        /// and after withdraw_fees it resets to exactly 0.
+        #[test]
+        fn prop_fee_balance_accumulates_and_resets(n in 1usize..=5) {
+            let env = Env::default();
+            let (client, admin, token) = setup(&env);
+
+            for _ in 0..n {
+                let scout = Address::generate(&env);
+                fund_scout(&env, &token, &scout);
+                client.subscribe(&scout, &1u32, &1u32);
+            }
+
+            let balance = client.get_fee_balance();
+            prop_assert!(balance > 0, "fee balance must be positive after {n} subscriptions");
+
+            client.withdraw_fees(&admin, &balance);
+            prop_assert_eq!(
+                client.get_fee_balance(), 0i128,
+                "fee balance must be 0 after withdraw_fees"
+            );
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(proptest_cases()))]
+
+        /// get_fee_balance is read-only: calling it multiple times returns the same value.
+        #[test]
+        fn prop_get_fee_balance_is_idempotent(n in 1usize..=3) {
+            let env = Env::default();
+            let (client, _admin, token) = setup(&env);
+            let scout = Address::generate(&env);
+            fund_scout(&env, &token, &scout);
+            client.subscribe(&scout, &1u32, &1u32);
+
+            let first = client.get_fee_balance();
+            for _ in 0..n {
+                prop_assert_eq!(
+                    client.get_fee_balance(), first,
+                    "repeated get_fee_balance calls must return the same value"
+                );
+            }
+        }
+    }
+}

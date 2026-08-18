@@ -11,6 +11,10 @@ pub enum Error {
     InvalidInput = 5,
     AlreadyVerified = 6,
     InsufficientFee = 7,
+    /// Scout has no active subscription (or the subscription has already been
+    /// cancelled).  Used by `cancel_subscription` and any access-guard that
+    /// requires a live subscription.
+    NotSubscribed = 8,
     Unauthorized = 9,
     ContractPaused = 10,
     Overflow = 11,
