@@ -159,16 +159,16 @@ afterAll(() => {
 // ─── Propose action ──────────────────────────────────────────────────────────
 
 describe('proposeAction()', () => {
-  it('returns a proposed result with actionId when threshold > 1', () => {
-    const result = proposeAction('pause_contract', {}, ADMIN_1);
+  it('returns a proposed result with actionId when threshold > 1', async () => {
+    const result = await proposeAction('pause_contract', {}, ADMIN_1);
 
     expect(result.status).toBe('proposed');
     expect(result.actionId).toBeDefined();
     expect(typeof result.actionId).toBe('string');
   });
 
-  it('persists an action with the correct properties', () => {
-    const result = proposeAction('withdraw_fees', { recipient: 'G...' }, ADMIN_1);
+  it('persists an action with the correct properties', async () => {
+    const result = await proposeAction('withdraw_fees', { recipient: 'G...' }, ADMIN_1);
 
     const action = store.pending_admin_actions[0];
     expect(action).toBeDefined();
@@ -180,15 +180,15 @@ describe('proposeAction()', () => {
     expect(action.status).toBe('pending');
   });
 
-  it('records the proposer as the first signature', () => {
-    proposeAction('pause_contract', {}, ADMIN_1);
+  it('records the proposer as the first signature', async () => {
+    await proposeAction('pause_contract', {}, ADMIN_1);
 
     expect(store.admin_action_signatures).toHaveLength(1);
     expect(store.admin_action_signatures[0].signer).toBe(ADMIN_1);
   });
 
-  it('logs an audit event on proposal', () => {
-    proposeAction('pause_contract', {}, ADMIN_1);
+  it('logs an audit event on proposal', async () => {
+    await proposeAction('pause_contract', {}, ADMIN_1);
 
     expect(mockLogAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -198,9 +198,9 @@ describe('proposeAction()', () => {
     );
   });
 
-  it('sets an expiry timestamp in the future', () => {
+  it('sets an expiry timestamp in the future', async () => {
     const before = Date.now();
-    proposeAction('pause_contract', {}, ADMIN_1);
+    await proposeAction('pause_contract', {}, ADMIN_1);
 
     expect(store.pending_admin_actions[0].expires_at as number).toBeGreaterThanOrEqual(before);
   });
@@ -211,13 +211,13 @@ describe('proposeAction()', () => {
 describe('approveAction()', () => {
   let actionId: string;
 
-  beforeEach(() => {
-    actionId = proposeAction('pause_contract', {}, ADMIN_1).actionId;
+  beforeEach(async () => {
+    actionId = (await proposeAction('pause_contract', {}, ADMIN_1)).actionId;
     jest.clearAllMocks();
   });
 
-  it('records a co-signature and returns pending when below threshold', () => {
-    const result = approveAction(actionId, ADMIN_2);
+  it('records a co-signature and returns pending when below threshold', async () => {
+    const result = await approveAction(actionId, ADMIN_2);
 
     expect(result.status).toBe('pending');
     expect(result.collected).toBe(2);
@@ -226,8 +226,8 @@ describe('approveAction()', () => {
     expect(store.admin_action_signatures).toHaveLength(2);
   });
 
-  it('rejects a duplicate signature from the same wallet', () => {
-    const result = approveAction(actionId, ADMIN_1);
+  it('rejects a duplicate signature from the same wallet', async () => {
+    const result = await approveAction(actionId, ADMIN_1);
 
     expect(result.status).toBe('duplicate');
     expect(result.collected).toBe(1);
@@ -235,48 +235,48 @@ describe('approveAction()', () => {
     expect(store.admin_action_signatures).toHaveLength(1);
   });
 
-  it('throws when the signer is not in adminWallets', () => {
-    expect(() => approveAction(actionId, OUTSIDER)).toThrow('Insufficient permissions');
+  it('throws when the signer is not in adminWallets', async () => {
+    await expect(approveAction(actionId, OUTSIDER)).rejects.toThrow('Insufficient permissions');
   });
 
-  it('returns approved status when threshold is reached', () => {
-    approveAction(actionId, ADMIN_2);
-    const result = approveAction(actionId, ADMIN_3);
+  it('returns approved status when threshold is reached', async () => {
+    await approveAction(actionId, ADMIN_2);
+    const result = await approveAction(actionId, ADMIN_3);
 
     expect(result.status).toBe('approved');
     expect(result.collected).toBe(3);
     expect(result.required).toBe(3);
   });
 
-  it('marks the action as executed when threshold is reached', () => {
-    approveAction(actionId, ADMIN_2);
-    approveAction(actionId, ADMIN_3);
+  it('marks the action as executed when threshold is reached', async () => {
+    await approveAction(actionId, ADMIN_2);
+    await approveAction(actionId, ADMIN_3);
 
     const a = store.pending_admin_actions[0];
     expect(a.status).toBe('executed');
   });
 
-  it('throws when trying to approve an already executed action', () => {
-    approveAction(actionId, ADMIN_2);
-    approveAction(actionId, ADMIN_3);
+  it('throws when trying to approve an already executed action', async () => {
+    await approveAction(actionId, ADMIN_2);
+    await approveAction(actionId, ADMIN_3);
 
-    expect(() => approveAction(actionId, ADMIN_1)).toThrow('already been executed');
+    await expect(approveAction(actionId, ADMIN_1)).rejects.toThrow('already been executed');
   });
 
-  it('throws for a non-existent action', () => {
-    expect(() => approveAction('nonexistent', ADMIN_1)).toThrow('Pending action not found');
+  it('throws for a non-existent action', async () => {
+    await expect(approveAction('nonexistent', ADMIN_1)).rejects.toThrow('Pending action not found');
   });
 
-  it('rejects expired actions', () => {
+  it('rejects expired actions', async () => {
     const a = store.pending_admin_actions[0];
     a.expires_at = Date.now() - 1000;
 
-    expect(() => approveAction(actionId, ADMIN_2)).toThrow('expired');
+    await expect(approveAction(actionId, ADMIN_2)).rejects.toThrow('expired');
     expect(store.pending_admin_actions[0].status).toBe('expired');
   });
 
-  it('logs an audit event on each approval', () => {
-    approveAction(actionId, ADMIN_2);
+  it('logs an audit event on each approval', async () => {
+    await approveAction(actionId, ADMIN_2);
 
     expect(mockLogAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -286,11 +286,11 @@ describe('approveAction()', () => {
     );
   });
 
-  it('logs threshold_met when threshold is reached', () => {
-    approveAction(actionId, ADMIN_2);
+  it('logs threshold_met when threshold is reached', async () => {
+    await approveAction(actionId, ADMIN_2);
     jest.clearAllMocks();
 
-    approveAction(actionId, ADMIN_3);
+    await approveAction(actionId, ADMIN_3);
 
     expect(mockLogAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -303,25 +303,25 @@ describe('approveAction()', () => {
 // ─── List pending actions ────────────────────────────────────────────────────
 
 describe('listPendingActions()', () => {
-  it('returns empty array when no pending actions exist', () => {
-    const result = listPendingActions();
+  it('returns empty array when no pending actions exist', async () => {
+    const result = await listPendingActions();
     expect(result).toEqual([]);
   });
 
-  it('returns only pending actions', () => {
-    proposeAction('pause_contract', {}, ADMIN_1);
+  it('returns only pending actions', async () => {
+    await proposeAction('pause_contract', {}, ADMIN_1);
 
-    const pending = listPendingActions();
+    const pending = await listPendingActions();
     expect(pending).toHaveLength(1);
     expect(pending[0].status).toBe('pending');
   });
 
-  it('does not return expired actions', () => {
-    proposeAction('pause_contract', {}, ADMIN_1);
+  it('does not return expired actions', async () => {
+    await proposeAction('pause_contract', {}, ADMIN_1);
     const a = store.pending_admin_actions[0];
     a.expires_at = Date.now() - 1000;
 
-    const pending = listPendingActions();
+    const pending = await listPendingActions();
     expect(pending).toHaveLength(0);
     expect(store.pending_admin_actions[0].status).toBe('expired');
   });
@@ -330,15 +330,15 @@ describe('listPendingActions()', () => {
 // ─── Get action details ──────────────────────────────────────────────────────
 
 describe('getActionDetails()', () => {
-  it('returns null for non-existent action', () => {
-    expect(getActionDetails('nonexistent')).toBeNull();
+  it('returns null for non-existent action', async () => {
+    expect(await getActionDetails('nonexistent')).toBeNull();
   });
 
-  it('returns action with signatures', () => {
-    const id = proposeAction('pause_contract', {}, ADMIN_1).actionId;
-    approveAction(id, ADMIN_2);
+  it('returns action with signatures', async () => {
+    const id = (await proposeAction('pause_contract', {}, ADMIN_1)).actionId;
+    await approveAction(id, ADMIN_2);
 
-    const details = getActionDetails(id);
+    const details = await getActionDetails(id);
     expect(details).not.toBeNull();
     expect(details!.action.id).toBe(id);
     expect(details!.signatures).toHaveLength(2);
@@ -351,16 +351,16 @@ describe('getActionDetails()', () => {
 // ─── Happy path: 3-of-3 full flow ────────────────────────────────────────────
 
 describe('Full flow: 3-of-3 threshold', () => {
-  it('propose -> co-sign -> co-sign -> executed', () => {
-    const result1 = proposeAction('withdraw_fees', { recipient: 'G...' }, ADMIN_1);
+  it('propose -> co-sign -> co-sign -> executed', async () => {
+    const result1 = await proposeAction('withdraw_fees', { recipient: 'G...' }, ADMIN_1);
     expect(result1.status).toBe('proposed');
     const actionId = result1.actionId;
 
-    const result2 = approveAction(actionId, ADMIN_2);
+    const result2 = await approveAction(actionId, ADMIN_2);
     expect(result2.status).toBe('pending');
     expect(result2.collected).toBe(2);
 
-    const result3 = approveAction(actionId, ADMIN_3);
+    const result3 = await approveAction(actionId, ADMIN_3);
     expect(result3.status).toBe('approved');
     expect(result3.collected).toBe(3);
 
@@ -373,15 +373,15 @@ describe('Full flow: 3-of-3 threshold', () => {
 // ─── Edge: only 2 of 3 signatures collected (below threshold) ────────────────
 
 describe('Below-threshold: 2 of 3 signatures', () => {
-  it('remains pending after 2 signatures', () => {
-    const actionId = proposeAction('pause_contract', {}, ADMIN_1).actionId;
+  it('remains pending after 2 signatures', async () => {
+    const actionId = (await proposeAction('pause_contract', {}, ADMIN_1)).actionId;
 
-    approveAction(actionId, ADMIN_2);
-    const detail = listPendingActions();
+    await approveAction(actionId, ADMIN_2);
+    const detail = await listPendingActions();
     expect(detail).toHaveLength(1);
     expect(detail[0].status).toBe('pending');
 
-    const result = approveAction(actionId, ADMIN_3);
+    const result = await approveAction(actionId, ADMIN_3);
     expect(result.status).toBe('approved');
   });
 });

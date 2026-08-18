@@ -33,6 +33,7 @@ jest.mock('../../src/db', () => ({
   getPlayerProfileHistory: jest.fn().mockReturnValue([]),
   getLatestSubscription: jest.fn().mockReturnValue(null),
   insertSubscription: jest.fn().mockReturnValue(1),
+  countTrialOffersByPlayer: jest.fn().mockReturnValue(0),
 }));
 
 jest.mock('../../src/services/indexer', () => ({

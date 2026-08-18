@@ -1,4 +1,5 @@
 import { server } from './stellar';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import {
   getDb,
@@ -7,12 +8,24 @@ import {
   persistLastIndexedLedger,
   insertOrUpdatePlayer,
   updatePlayerProgress,
-  queryEvents,
+  getEvents,
   insertPendingMilestone,
+  queryEvents,
+  rollbackEventsFromLedger,
 } from '../db';
 import { dispatchEventWebhook } from './webhooks';
 import { logger } from '../utils/logger';
 import { tierForApprovedMilestones } from './tierPromotion';
+
+const tracer = trace.getTracer('scout-off-backend');
+
+// Lazy import cache service to avoid circular dependency
+function getCache() {
+  return require('./cache');
+}
+
+// Track approved milestones for webhook dispatch
+const approvedMilestones: Array<{ type: string; payload: unknown }> = [];
 
 /** Current indexer lag in ledgers (latestChainLedger - lastIndexedLedger). Reset after each poll. */
 export let indexerLedgerLag = 0;
@@ -20,6 +33,11 @@ export let indexerLedgerLag = 0;
 /** Threshold in ledgers above which a warning is logged. Configurable via INDEXER_LAG_WARN_THRESHOLD. */
 function getLagWarnThreshold(): number {
   return parseInt(process.env.INDEXER_LAG_WARN_THRESHOLD ?? '100', 10);
+}
+
+/** Configurable finality margin delays treating the most recent N ledgers as immutable. */
+function getFinalityMargin(): number {
+  return parseInt(process.env.INDEXER_FINALITY_MARGIN ?? '10', 10);
 }
 
 // ─── Payload normalisation ────────────────────────────────────────────────────
@@ -73,19 +91,26 @@ function onAfterInsert(_eventId: string): void { /* hook */ }
 // ─── Indexer ──────────────────────────────────────────────────────────────────
 
 export async function indexEvents(): Promise<void> {
+  return tracer.startActiveSpan('indexer.poll', async (span) => {
+  try {
   const db = getDb();
   const insert = db.prepare(
-    'INSERT OR IGNORE INTO events (type, ledger, tx_hash, payload, created_at) VALUES (?, ?, ?, ?, ?)'
+    'INSERT OR IGNORE INTO events (type, ledger, ledger_hash, tx_hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
   );
 
-  const fromLedger = fetchLastIndexedLedger();
+  const lastIndexed = fetchLastIndexedLedger();
+  const margin = getFinalityMargin();
+  const fromLedger = Math.max(0, lastIndexed > margin ? lastIndexed - margin : 0);
+  span.setAttribute('indexer.ledger_start', fromLedger);
 
-  const response = await server.queryEvents({
+  const response = await server.getEvents({
     startLedger: fromLedger || undefined,
     filters: [{ type: 'contract', contractIds: [config.contractId] }],
   });
+  span.setAttribute('indexer.ledger_end', response.latestLedger);
+  span.setAttribute('indexer.events_processed', response.events.length);
 
-  const lagAfterPoll = Math.max(0, response.latestLedger - (fromLedger > 0 ? fromLedger - 1 : response.latestLedger));
+  const lagAfterPoll = Math.max(0, response.latestLedger - (lastIndexed > 0 ? lastIndexed - 1 : response.latestLedger));
   indexerLedgerLag = lagAfterPoll;
   const threshold = getLagWarnThreshold();
   if (lagAfterPoll > threshold) {
@@ -96,41 +121,75 @@ export async function indexEvents(): Promise<void> {
 
   const webhookEvents: Array<{ type: string; payload: unknown }> = [];
 
-  // NOTE: this used to be a single synchronous db.transaction() wrapping the
-  // whole batch. insertOrUpdatePlayer/insertPendingMilestone/updatePlayerProgress
-  // now go through the async DbDriver (required to support DB_DRIVER=postgres),
-  // so they can no longer run inside a synchronous better-sqlite3 transaction
-  // callback. The events table insert itself (the piece owned by the
-  // event-indexing subsystem) still goes through the raw synchronous getDb()
-  // handle unchanged. Losing whole-batch atomicity here is safe: every insert
+  // NOTE: this used to be (and, on main, still is) a single synchronous
+  // db.transaction() wrapping the whole batch, including reorg detection.
+  // insertOrUpdatePlayer/insertPendingMilestone/updatePlayerProgress now go
+  // through the async DbDriver (required to support DB_DRIVER=postgres), so
+  // they can no longer run inside a synchronous better-sqlite3 transaction
+  // callback — reorg detection and the events-table insert itself (both
+  // owned by the event-indexing subsystem) still go through the raw
+  // synchronous getDb() handle unchanged, but player/milestone upserts run
+  // as a separate async loop below rather than inside one atomic
+  // transaction. Losing whole-batch atomicity here is safe: every insert
   // below is idempotent (events dedup on tx_hash via INSERT OR IGNORE,
   // player/milestone upserts are keyed and re-appliable), so a mid-batch
   // failure just gets safely reprocessed on the next poll from the same
   // fromLedger.
+
+  // 1. Reorg detection
+  const overlappingEvents = db.prepare('SELECT ledger, ledger_hash FROM events WHERE ledger >= ?').all(fromLedger) as { ledger: number, ledger_hash: string | null }[];
+  const existingHashes = new Map<number, string>();
+  for (const row of overlappingEvents) {
+    if (row.ledger_hash) existingHashes.set(row.ledger, row.ledger_hash);
+  }
+
+  let reorgLedger: number | null = null;
+  for (const raw of response.events) {
+    const existingHash = existingHashes.get(raw.ledger);
+    const incomingHash = (raw as any).ledgerHash ?? (raw as any).pagingToken ?? raw.txHash;
+    if (existingHash && incomingHash && existingHash !== incomingHash) {
+      reorgLedger = raw.ledger;
+      break;
+    }
+  }
+
+  if (reorgLedger !== null) {
+    logger.warn(`[indexer] Reorg detected at ledger ${reorgLedger}! Rolling back...`);
+    rollbackEventsFromLedger(reorgLedger);
+  }
+
+  // 2. Insert events, then upsert players/milestones (async, not
+  // transactionally atomic with the events insert — see note above).
   const insertMany = async (events: typeof response.events) => {
     for (const raw of events) {
       const type = raw.topic[0]?.value() as string;
       const payload = normalizePayload((raw.value?.value() as unknown as Record<string, unknown>) ?? {});
       const eventId = normalizeEventId(config.contractId, raw.ledger, raw.txHash);
-      // Use ledger close time when available (seconds → ms), otherwise index time.
-      const createdAt = raw.ledgerClosedAt
-        ? new Date(raw.ledgerClosedAt).getTime()
-        : Date.now();
+      const createdAt = raw.ledgerClosedAt ? new Date(raw.ledgerClosedAt).getTime() : Date.now();
+      const ledgerHash = (raw as any).ledgerHash ?? (raw as any).pagingToken ?? raw.txHash;
+
       onBeforeInsert(eventId);
-      insert.run(type, raw.ledger, raw.txHash, JSON.stringify(payload), createdAt);
+      insert.run(type, raw.ledger, ledgerHash, raw.txHash, JSON.stringify(payload), createdAt);
       onAfterInsert(eventId);
 
       if (type === 'player_registered') {
+        const playerId = payload.player_id as string;
+        const registeredAt = raw.ledgerClosedAt
+          ? new Date(raw.ledgerClosedAt).getTime()
+          : Date.now();
         await insertOrUpdatePlayer({
-          player_id: payload.player_id as string,
+          player_id: playerId,
           wallet: payload.wallet as string,
           position: payload.position as string | undefined,
           region: payload.region as string | undefined,
           metadata_uri: payload.metadata_uri as string | undefined,
-          created_at: raw.ledger,
+          created_at: registeredAt,
+          registered_at: registeredAt,
         });
+        // Invalidate cache after player registration
+        const cache = getCache();
+        cache.invalidatePlayerCache(playerId);
       } else if (type === 'milestone_submitted') {
-        // Insert into pending_milestones
         const milestoneId = payload.milestone_id as string;
         const playerId = payload.player_id as string;
         const validatorWallet = payload.validator as string;
@@ -153,6 +212,9 @@ export async function indexEvents(): Promise<void> {
             (e) => e.payload.player_id === playerId,
           ).length;
           await updatePlayerProgress(playerId, tierForApprovedMilestones(approvedMilestoneCount));
+          // Invalidate cache after player progress update
+          const cache = getCache();
+          cache.invalidatePlayerCache(playerId);
         }
         webhookEvents.push({ type, payload });
       }
@@ -161,15 +223,26 @@ export async function indexEvents(): Promise<void> {
 
   await insertMany(response.events);
 
+  const latest = response.events.at(-1)!;
+
+  // 3. Update last indexed ledger once the batch above has been applied.
+  persistLastIndexedLedger(latest.ledger + 1);
+
   for (const { type, payload } of webhookEvents) {
     dispatchEventWebhook(type, payload).catch((err: unknown) => {
       logger.warn(`[indexer] webhook dispatch failed for ${type}: ${err instanceof Error ? err.message : String(err)}`);
     });
   }
 
-  const latest = response.events.at(-1)!;
-  persistLastIndexedLedger(latest.ledger + 1);
   indexerLedgerLag = Math.max(0, response.latestLedger - latest.ledger);
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+  }
+  });
 }
 
 // ─── Trial offer event log (#285) ──────────────────────────────────────────────

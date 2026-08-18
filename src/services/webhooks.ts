@@ -6,6 +6,21 @@ import {
   WebhookSubscription,
 } from '../db';
 import { logger } from '../utils/logger';
+import { recordWebhookDelivery } from '../middleware/metrics';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
+
+/**
+ * Generate a unique, stable delivery identifier for a webhook event.
+ * The ID is a UUID v4, generated once per logical delivery (first dispatch)
+ * and carried through to every dead-letter replay so subscribers can
+ * deduplicate.  The ID is included in the signed payload body, so swapping
+ * it invalidates the HMAC.
+ */
+export function generateDeliveryId(): string {
+  return crypto.randomUUID();
+}
+
+const tracer = trace.getTracer('scout-off-backend');
 
 type WebhookRetryOptions = {
   retries?: number;
@@ -43,6 +58,8 @@ export async function postWebhookWithRetry(
   payload: unknown,
   options: WebhookRetryOptions = {}
 ): Promise<void> {
+  const span = tracer.startSpan('webhooks.postWithRetry', { attributes: { 'webhook.url': url } });
+  try {
   const retries = options.retries ?? 3;
   const baseDelayMs = options.baseDelayMs ?? 500;
   const maxDelayMs = options.maxDelayMs ?? 5000;
@@ -56,6 +73,7 @@ export async function postWebhookWithRetry(
   }
 
   for (let attempt = 1; attempt <= retries; attempt += 1) {
+    span.setAttribute('webhook.attempt', attempt);
     try {
       const response = await fetch(url, {
         method: 'POST',
@@ -64,8 +82,10 @@ export async function postWebhookWithRetry(
       });
 
       if (!response.ok) {
+        span.setAttribute('webhook.status', response.status);
         throw new Error(`Webhook dispatch failed with status ${response.status}`);
       }
+      span.setAttribute('webhook.status', response.status);
       return;
     } catch (err) {
       lastError = err;
@@ -78,6 +98,13 @@ export async function postWebhookWithRetry(
   }
 
   throw lastError;
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+  }
 }
 
 const RETRY_OPTIONS = { retries: 3, baseDelayMs: 500, maxDelayMs: 5000 };
@@ -93,11 +120,15 @@ export async function dispatchEventWebhook(eventType: string, payload: unknown):
   const subscriptions = listWebhookSubscriptions();
   if (subscriptions.length === 0) return;
 
-  const body = { eventType, payload };
+  // Generate a stable delivery ID once for this logical event.
+  // All subscribers receive the same ID for the same event, but dead-letter
+  // replays reuse the ID from the original delivery (stored in the payload).
+  const deliveryId = generateDeliveryId();
+  const body = { deliveryId, eventType, payload };
 
   await Promise.all(
     subscriptions.map((subscription: WebhookSubscription) =>
-      deliverToSubscription(subscription, eventType, body)
+      deliverToSubscription(subscription, eventType, body, deliveryId)
     )
   );
 }
@@ -105,25 +136,29 @@ export async function dispatchEventWebhook(eventType: string, payload: unknown):
 async function deliverToSubscription(
   subscription: WebhookSubscription,
   eventType: string,
-  body: unknown
+  body: unknown,
+  deliveryId: string,
 ): Promise<void> {
   try {
     await postWebhookWithRetry(subscription.url, body, {
       ...RETRY_OPTIONS,
       secret: subscription.secret,
     });
+    recordWebhookDelivery('success');
   } catch (err) {
     const failureReason = err instanceof Error ? err.message : String(err);
     logger.warn(
-      `[webhooks] delivery exhausted retries — subscriptionId=${subscription.id} url=${subscription.url} eventType=${eventType} reason=${failureReason}`
+      `[webhooks] delivery exhausted retries — subscriptionId=${subscription.id} url=${subscription.url} eventType=${eventType} reason=${failureReason} delivery_id=${deliveryId}`
     );
     insertWebhookDeadLetter({
       subscriptionId: subscription.id,
       url: subscription.url,
       eventType,
       payload: JSON.stringify(body),
+      deliveryId,
       failureReason,
       attempts: RETRY_OPTIONS.retries,
     });
+    recordWebhookDelivery('dead_letter');
   }
 }

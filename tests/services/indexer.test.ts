@@ -1,4 +1,4 @@
-import { getDb, queryEvents, fetchLastIndexedLedger, persistLastIndexedLedger, insertOrUpdatePlayer, updatePlayerProgress, getPlayerById, queryPlayers } from '../../src/db';
+import { getDb, queryEvents, fetchLastIndexedLedger, persistLastIndexedLedger, insertOrUpdatePlayer, updatePlayerProgress, getPlayerById, queryPlayers, rollbackEventsFromLedger } from '../../src/db';
 import { normalizeEventId, normalizePayload } from '../../src/services/indexer';
 
 describe('indexer', () => {
@@ -98,15 +98,15 @@ describe('idempotent re-indexing', () => {
   it('INSERT OR IGNORE deduplicates events with the same tx_hash', () => {
     const db = getDb();
     const insert = db.prepare(
-      'INSERT OR IGNORE INTO events (type, ledger, tx_hash, payload) VALUES (?, ?, ?, ?)'
+      'INSERT OR IGNORE INTO events (type, ledger, ledger_hash, tx_hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
     );
 
     // Insert once
-    insert.run('player_registered', 100, TX_HASH, '{}');
+    insert.run('player_registered', 100, 'hash', TX_HASH, '{}', Date.now());
     const countAfterFirst = queryEvents('player_registered').length;
 
     // Replay — same tx_hash must be silently ignored
-    insert.run('player_registered', 100, TX_HASH, '{}');
+    insert.run('player_registered', 100, 'hash', TX_HASH, '{}', Date.now());
     const countAfterReplay = queryEvents('player_registered').length;
 
     expect(countAfterReplay).toBe(countAfterFirst);
@@ -135,5 +135,22 @@ describe('idempotent re-indexing', () => {
     const after = queryEvents().length;
 
     expect(after).toBe(before + 2);
+  });
+});
+
+describe('rollbackEventsFromLedger', () => {
+  it('deletes events from the specified ledger forwards', () => {
+    const db = getDb();
+    const insert = db.prepare(
+      'INSERT OR IGNORE INTO events (type, ledger, ledger_hash, tx_hash, payload, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+    );
+    insert.run('type_A', 300, 'h300', 'tx-300', '{}', Date.now());
+    insert.run('type_A', 301, 'h301', 'tx-301', '{}', Date.now());
+    insert.run('type_A', 302, 'h302', 'tx-302', '{}', Date.now());
+
+    rollbackEventsFromLedger(301);
+
+    const remaining = db.prepare('SELECT ledger FROM events WHERE ledger >= 300').all() as {ledger: number}[];
+    expect(remaining.map(r => r.ledger)).toEqual([300]);
   });
 });

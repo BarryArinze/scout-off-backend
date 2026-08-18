@@ -10,17 +10,38 @@
  *  - CSV and JSON input formats both work
  *  - Auth guards (401 / 403) are enforced
  */
+// import_validator registers/revokes validators through processBatch(), which
+// signs a real Soroban transaction via src/utils/signer.ts's getPlatformKeypair().
+// That module derives a Keypair from config.platformSecretKey ONCE, at
+// signer.ts's first import, and throws if it isn't a valid Stellar secret key
+// (strkey with a correct checksum).
+//
+// config.platformSecretKey is itself computed once, at src/config.ts's first
+// import — which already happens during tests/setup.ts's initDb() call
+// (setupFiles run before this file's own top-level code), using whatever
+// PLATFORM_SECRET_KEY was set at that point (unset, by default). So merely
+// assigning process.env.PLATFORM_SECRET_KEY here is too late: the module
+// registry already holds a config.ts instance with platformSecretKey frozen
+// to ''. jest.resetModules() + re-initialising src/db from scratch forces a
+// fresh config.ts (and everything built on it, including app/adminController
+// below) that picks up the real value.
+process.env.PLATFORM_SECRET_KEY = 'SDAT3WOW2WIVH5VRHJDRKXZ7I5IAOGFK7CDPT4GKJKW2LDQ3YMJ56QJQ';
+jest.resetModules();
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+require('../../src/db').initDb();
+
 import request from 'supertest';
 import { Keypair, Transaction, Networks } from '@stellar/stellar-sdk';
 
 // This suite exercises the real indexer/DB layer end-to-end (including a
-// register -> revoke -> re-import round trip), but revoke_validator now
-// performs a real Soroban RPC call in production. Mock only that one
-// function (keeping everything else in the module real via
+// register -> revoke -> re-import round trip), but register_validator/
+// revoke_validator now perform a real Soroban RPC call in production. Mock
+// only those two functions (keeping everything else in the module real via
 // jest.requireActual) so this stays deterministic and offline — same
 // approach as tests/routes/admin.test.ts.
 jest.mock('../../src/services/stellar', () => ({
   ...jest.requireActual('../../src/services/stellar'),
+  registerValidatorOnChain: jest.fn().mockResolvedValue({ transactionId: 'e2e-import-register-txid' }),
   revokeValidatorOnChain: jest.fn().mockResolvedValue({ transactionId: 'e2e-import-revoke-txid' }),
 }));
 

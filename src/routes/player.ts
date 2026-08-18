@@ -11,17 +11,20 @@ import {
   filterPlayers,
   getPlayerMilestones,
   updatePlayer,
+  getPlayerAnalytics,
   registerSchema,
   filterSchema,
   updatePlayerSchema,
   deactivatePlayerEndpoint,
   reactivatePlayerEndpoint,
 } from "../controllers/playerController";
-import { getPlayerHistory } from "../controllers/playerHistoryController";
+import { getPlayerHistory, getPlayerHistoryVersion, getPlayerHistoryDiff } from "../controllers/playerHistoryController";
+import { anonymizePlayer } from "../controllers/playerAnonymizationController";
 import { acceptTrialOffer, rejectTrialOffer, rejectOfferSchema } from "../controllers/trialOfferController";
+import { getPlayerTokenHolders, buyPlayerToken } from "../controllers/playerTokenController";
 
 import { validateBody, validateQuery } from "../middleware/validate";
-import { requireRole, optionalAuth } from "../middleware/auth";
+import { requireRole, optionalAuth, requireApiKeyScope } from "../middleware/auth";
 import { requireOwner } from "../middleware/requireOwner";
 import { methodNotAllowed } from "../middleware/methodNotAllowed";
 
@@ -73,6 +76,14 @@ router.route("/:playerId/reactivate")
   )
   .all(methodNotAllowed(['POST']));
 
+router.route("/:playerId/anonymize")
+  .post(
+    requireRole("player"),
+    requireOwner,
+    anonymizePlayer,
+  )
+  .all(methodNotAllowed(['POST']));
+
 /**
  * GET /api/players/:playerId/history
  * Admin or profile owner only.
@@ -81,11 +92,54 @@ router.route("/:playerId/history")
   .get(
     optionalAuth,
     (req: Request, res: Response, next: NextFunction) => {
-      if (req.role === "admin") {
-        return getPlayerHistory(req, res, next);
-      }
+      if (req.role === "admin") return next();
       return requireRole("player")(req, res, () => requireOwner(req, res, next));
     },
+    getPlayerHistory,
+  )
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * GET /api/players/:playerId/history/:version
+ * Returns the full profile snapshot at the given version number.
+ * Admin or profile owner only.
+ */
+router.route("/:playerId/history/:version")
+  .get(
+    optionalAuth,
+    (req: Request, res: Response, next: NextFunction) => {
+      if (req.role === "admin") return next();
+      return requireRole("player")(req, res, () => requireOwner(req, res, next));
+    },
+    getPlayerHistoryVersion,
+  )
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * GET /api/players/:playerId/history/:version/diff
+ * Returns a field-level diff between version N and N-1.
+ * Admin or profile owner only.
+ */
+router.route("/:playerId/history/:version/diff")
+  .get(
+    optionalAuth,
+    (req: Request, res: Response, next: NextFunction) => {
+      if (req.role === "admin") return next();
+      return requireRole("player")(req, res, () => requireOwner(req, res, next));
+    },
+    getPlayerHistoryDiff,
+  )
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * GET /api/players/:playerId/analytics
+ * Return profile view and contact unlock analytics (owner-only).
+ */
+router.route("/:playerId/analytics")
+  .get(
+    requireRole("player"),
+    requireOwner,
+    getPlayerAnalytics,
   )
   .all(methodNotAllowed(['GET', 'HEAD']));
 
@@ -126,6 +180,38 @@ router.route("/:playerId/trial-offers/:offerId/reject")
     validateBody(rejectOfferSchema),
     rejectTrialOffer,
   )
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * GET /api/players/:playerId/tokens
+ *
+ * Return the list of token holders and their balances for the given player.
+ * Gated by the `player_tokens` feature flag — returns 404 when disabled.
+ *
+ * @param playerId {string} - The player's on-chain identifier
+ * @response 200 { success: true, data: { playerId, holders: [{ holder, tokens }], meta } }
+ * @response 404 { success: false, error: string } - Feature flag disabled
+ * @auth Bearer (optional — public read)
+ */
+router.route("/:playerId/tokens")
+  .get(optionalAuth, getPlayerTokenHolders)
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * POST /api/players/:playerId/tokens/buy
+ *
+ * Purchase Player Tokens for the given player (stub — no real XLM transfer).
+ * Gated by the `player_tokens` feature flag — returns 404 when disabled.
+ *
+ * @param playerId {string} - The player's on-chain identifier
+ * @body { amount: number, buyerWallet: string }
+ * @response 200 { success: true, data: { playerId, buyerWallet, amount, newBalance } }
+ * @response 400 { success: false, error: string } - Invalid amount
+ * @response 404 { success: false, error: string } - Feature flag disabled or player not found
+ * @auth Bearer (scout or player role required)
+ */
+router.route("/:playerId/tokens/buy")
+  .post(requireRole("scout"), requireApiKeyScope("write:player_tokens"), buyPlayerToken)
   .all(methodNotAllowed(['POST']));
 
 export default router;

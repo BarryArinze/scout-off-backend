@@ -35,6 +35,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `cache: npm` caches ~/.npm keyed on Node.js version + package-lock.json
+      # hash, so `npm ci` below is fast on a cache hit and self-invalidates
+      # whenever dependencies change.
       - uses: actions/setup-node@v4
         with:
           node-version-file: '.nvmrc'
@@ -76,11 +79,19 @@ jobs:
 
       - name: Package release
         run: |
-          tar czf release.tar.gz \
+          # Write the archive outside the directory being archived. Even with
+          # --exclude=release.tar.gz, tar still stats the containing directory
+          # (`.`) as it walks it — creating the output file inside that same
+          # directory changes its mtime mid-walk and tar unconditionally exits
+          # 1 for "file changed as we read it" (--warning=KEYWORD only
+          # silences the message, it doesn't stop the exit). Writing to
+          # RUNNER_TEMP sidesteps the self-reference entirely.
+          tar -czf "$RUNNER_TEMP/release.tar.gz" \
             --exclude=node_modules \
             --exclude=.git \
             --exclude=coverage \
             .
+          mv "$RUNNER_TEMP/release.tar.gz" release.tar.gz
 
       - uses: actions/upload-artifact@v4
         with:
@@ -95,8 +106,15 @@ jobs:
     timeout-minutes: 15
     environment:
       name: staging
-      url: ${{ secrets.STAGING_URL }}
+      # environment.url does not support the secrets context directly, so
+      # resolve it through a step output instead (steps.<id>.outputs.* is
+      # allowed here).
+      url: ${{ steps.set-url.outputs.url }}
     steps:
+      - name: Resolve staging URL
+        id: set-url
+        run: echo "url=${{ secrets.STAGING_URL }}" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v4
         with:
           name: staging-release
@@ -151,6 +169,21 @@ jobs:
           done
           echo "Smoke test failed: GET /health did not return status ok"
           exit 1
+
+      - name: Rollback on failure
+        if: failure()
+        uses: appleboy/ssh-action@v1.2.0
+        env:
+          DEPLOY_PATH: ${{ secrets.STAGING_DEPLOY_PATH }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_PRIVATE_KEY }}
+          envs: DEPLOY_PATH
+          script: |
+            set -euo pipefail
+            cd "$DEPLOY_PATH"
+            bash scripts/deploy-staging.sh "$DEPLOY_PATH" rollback
 
   notify-failure:
     name: Notify on failure

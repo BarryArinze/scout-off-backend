@@ -1,8 +1,8 @@
 # ScoutOff
 
-![Backend CI](https://github.com/scout-off/scout-off-backend/actions/workflows/ci.yml/badge.svg)
-
-![codecov](https://codecov.io/gh/scout-off/scout-off-backend/graph/badge.svg)
+[![Backend CI](https://github.com/scout-off/scout-off-backend/actions/workflows/ci.yml/badge.svg)](https://github.com/scout-off/scout-off-backend/actions/workflows/ci.yml)
+[![Contract CI](https://github.com/scout-off/scout-off-backend/actions/workflows/contract-ci.yml/badge.svg)](https://github.com/scout-off/scout-off-backend/actions/workflows/contract-ci.yml)
+[![codecov](https://codecov.io/gh/scout-off/scout-off-backend/graph/badge.svg)](https://codecov.io/gh/scout-off/scout-off-backend)
 
 Decentralized football scouting platform on Stellar — tamper-proof player profiles, on-chain progress verification, and direct scout-to-player connections powered by Soroban smart contracts.
 
@@ -279,7 +279,10 @@ sequenceDiagram
 
 ### 1. Install Dependencies
 
+This project pins its Node.js version in [`.nvmrc`](.nvmrc). If you use [nvm](https://github.com/nvm-sh/nvm), run `nvm use` before installing to avoid version-mismatch errors:
+
 ```bash
+nvm use
 npm install
 ```
 
@@ -430,7 +433,7 @@ docker run --rm \
   scout-off-backend
 ```
 
-### Customise the port
+### Customize the port
 
 Set `PORT` in `docker-compose.yml` or prefix the command:
 
@@ -446,12 +449,13 @@ This section covers everything you need to get the backend running locally.
 
 ### Prerequisites
 
-- Node.js ≥ 18
+- Node.js ≥ 18 (the exact version this project targets is pinned in [`.nvmrc`](.nvmrc); run `nvm use` if you use [nvm](https://github.com/nvm-sh/nvm))
 - npm ≥ 9
 
 ### Install Dependencies
 
 ```bash
+nvm use   # switches to the Node version pinned in .nvmrc
 npm install
 ```
 
@@ -480,6 +484,7 @@ Optional but commonly set:
 | `PINATA_API_KEY` / `PINATA_SECRET` | —               | IPFS upload credentials                         |
 | `DB_PATH`                          | `scout-off.db`  | SQLite database file path                       |
 | `LOG_LEVEL`                        | `info`          | Log verbosity: `debug`, `info`, `warn`, `error` |
+| `SLOW_QUERY_THRESHOLD_MS`          | `50`            | Log a warning for DB queries slower than this (ms) |
 
 See [.env.example](.env.example) for the full list of supported variables.
 
@@ -505,7 +510,7 @@ Compiles TypeScript to `dist/`. Run the compiled output with `npm start`.
 npm test
 ```
 
-Runs the full backend test suite with Jest. Tests are located in the `tests/` directory, organised by layer:
+Runs the full backend test suite with Jest. Tests are located in the `tests/` directory, organized by layer:
 
 - `tests/middleware/` — middleware unit tests (auth, correlationId, errorHandler, etc.)
 - `tests/routes/` — route integration tests (health, scout, admin, etc.)
@@ -523,6 +528,31 @@ npx ts-node --project tsconfig.scripts.json scripts/seed.ts
 ```
 
 The seed script is **idempotent** — running it multiple times is safe; existing rows are skipped.
+
+#### Seeding Individual Data Types with `--only`
+
+When developing a specific feature you can seed only the data types you need instead of inserting everything:
+
+```bash
+# Seed only players
+npm run seed -- --only players
+
+# Seed only subscriptions
+npm run seed -- --only subscriptions
+
+# Seed players and subscriptions together (comma-separated, no spaces)
+npm run seed -- --only players,subscriptions
+
+# Seed milestone events only
+npm run seed -- --only milestones
+
+# Seed contact-unlock events only
+npm run seed -- --only contacts
+```
+
+Supported types: `players`, `events`, `milestones`, `subscriptions`, `contacts`.  
+Unknown type names are logged as a warning and skipped; the rest of the seed continues normally.  
+When `--only` is omitted all types are seeded (original behaviour).
 
 **What gets seeded:**
 
@@ -726,51 +756,53 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
 
 > **Note:** For complete configuration details and advanced options, see [DEPLOYMENT.md](DEPLOYMENT.md).
 
-| Variable                   | Description                                                                                                           |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `CONTRACT_ID`              | Deployed ScoutOff contract address (**required**)                                                                     |
-| `JWT_SECRET`               | Secret used to sign SEP-10 JWT tokens (**required**)                                                                  |
-| `HORIZON_URL`              | Stellar Horizon endpoint                                                                                              |
-| `SOROBAN_RPC_URL`          | Soroban RPC endpoint                                                                                                  |
-| `NETWORK`                  | `testnet` or `mainnet`                                                                                                |
-| `NETWORK_PASSPHRASE`       | Stellar network passphrase (auto-set by `NETWORK`)                                                                    |
-| `PINATA_API_KEY`           | Pinata API key for IPFS uploads                                                                                       |
-| `PINATA_SECRET`            | Pinata secret                                                                                                         |
-| `PINATA_GATEWAY`           | IPFS gateway used to resolve pinned content (default: `https://gateway.pinata.cloud`)                                 |
-| `PLATFORM_FEE_BPS`         | Platform fee in basis points (default: 500)                                                                           |
-| `PORT`                     | Backend API port (default: 4000)                                                                                      |
-| `DB_DRIVER`                | Database driver to use: `sqlite` (default) or `postgres`                                                              |
-| `DB_PATH`                  | SQLite database file path (default: `scout-off.db`)                                                                   |
-| `DATABASE_URL`             | PostgreSQL connection URL (required when `DB_DRIVER=postgres`)                                                        |
-| `DATABASE_SSL`             | PostgreSQL SSL mode: `true`, `no-verify`, or `false` (default: `false`)                                               |
-| `LOG_LEVEL`                | Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)                                                     |
-| `LOG_SKIP_PATHS`           | Comma-separated paths to skip in request logging (default: health and metrics probes)                                 |
-| `LOG_SAMPLE_RATE`          | Sample rate for non-skipped paths (default: `1` = log all)                                                            |
-| `ADMIN_WALLET`             | Single admin Stellar address (for backward compatibility)                                                             |
-| `ADMIN_WALLETS`            | Comma-separated list of admin Stellar addresses                                                                       |
-| `ADMIN_THRESHOLD`          | Number of admin signatures required for high-value operations (default: `1`)                                          |
-| `STELLAR_HEALTH_CHECK`     | Set to `false` to disable Stellar RPC check in `/health` (default: `true`)                                            |
-| `JSON_PAYLOAD_LIMIT`       | Maximum JSON request body size (default: `1mb`); requests exceeding limit return HTTP 413                             |
-| `RATE_LIMIT_ENABLED`       | Set to `false` to disable rate limiting (default: `true`)                                                             |
-| `RATE_LIMIT_WINDOW_MS`     | Rate limit window in milliseconds (default: `60000`)                                                                  |
-| `RATE_LIMIT_MAX`           | Max requests per window (default: `60`)                                                                               |
-| `AUTH_RATE_LIMIT_WINDOW_MS`| Auth rate limit window in milliseconds (default: `60000`)                                                             |
-| `AUTH_RATE_LIMIT_MAX`      | Max auth requests per window (default: `5`)                                                                           |
-| `CORS_ALLOWED_ORIGINS`     | Comma-separated list of allowed origins (environment-specific defaults)                                               |
-| `TRUSTED_PROXY_COUNT`      | Number of trusted reverse-proxy hops (default: `1`)                                                                   |
-| `WEBHOOK_ENABLED`          | Set to `true` to enable event webhooks (default: `false`)                                                             |
-| `WEBHOOK_URL`              | Endpoint to POST contract events to when `WEBHOOK_ENABLED=true`                                                       |
-| `WEBHOOK_SECRET`           | HMAC secret for the legacy `WEBHOOK_URL` subscription (see `docs/webhooks.md`); a random secret is generated if unset |
-| `REDIS_URL`                | Redis connection URL for distributed caching (falls back to in-memory if unset)                                       |
-| `PLAYER_CACHE_TTL_MS`      | TTL for player list cache entries in milliseconds (default: `60000`)                                                 |
-| `PLAYER_IMPORT_MAX_BATCH`  | Maximum rows per bulk player import request (default: `500`)                                                          |
-| `PIN_JSON_CACHE_TTL_MS`    | TTL for pinJson deduplication cache entries in milliseconds (default: `300000` = 5 min)                              |
-| `ADMIN_ACTION_TTL_MS`      | TTL for pending admin multi-sig actions in milliseconds (default: `3600000` = 1 hour)                                |
+| Variable                          | Description                                                                                                           |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `CONTRACT_ID`                     | Deployed ScoutOff contract address (**required**)                                                                     |
+| `JWT_SECRET`                      | Secret used to sign SEP-10 JWT tokens (**required**)                                                                  |
+| `HORIZON_URL`                     | Stellar Horizon endpoint                                                                                              |
+| `SOROBAN_RPC_URL`                 | Soroban RPC endpoint                                                                                                  |
+| `NETWORK`                         | `testnet` or `mainnet`                                                                                                |
+| `NETWORK_PASSPHRASE`              | Stellar network passphrase (auto-set by `NETWORK`)                                                                    |
+| `PINATA_API_KEY`                  | Pinata API key for IPFS uploads                                                                                       |
+| `PINATA_SECRET`                   | Pinata secret                                                                                                         |
+| `PINATA_GATEWAY`                  | IPFS gateway used to resolve pinned content (default: `https://gateway.pinata.cloud`)                                 |
+| `PLATFORM_FEE_BPS`                | Platform fee in basis points (default: 500)                                                                           |
+| `PORT`                            | Backend API port (default: 4000)                                                                                      |
+| `DB_DRIVER`                       | Database driver to use: `sqlite` (default) or `postgres`                                                              |
+| `DB_PATH`                         | SQLite database file path (default: `scout-off.db`)                                                                   |
+| `DATABASE_URL`                    | PostgreSQL connection URL (required when `DB_DRIVER=postgres`)                                                        |
+| `DATABASE_SSL`                    | PostgreSQL SSL mode: `true`, `no-verify`, or `false` (default: `false`)                                               |
+| `LOG_LEVEL`                       | Log verbosity: `debug`, `info`, `warn`, `error` (default: `info`)                                                     |
+| `LOG_SKIP_PATHS`                  | Comma-separated paths to skip in request logging (default: health and metrics probes)                                 |
+| `LOG_SAMPLE_RATE`                 | Sample rate for non-skipped paths (default: `1` = log all)                                                            |
+| `ADMIN_WALLET`                    | Single admin Stellar address (for backward compatibility)                                                             |
+| `ADMIN_WALLETS`                   | Comma-separated list of admin Stellar addresses                                                                       |
+| `ADMIN_THRESHOLD`                 | Number of admin signatures required for high-value operations (default: `1`)                                          |
+| `STELLAR_HEALTH_CHECK`            | Set to `false` to disable Stellar RPC check in `/health` (default: `true`)                                            |
+| `JSON_PAYLOAD_LIMIT`              | Maximum JSON request body size (default: `1mb`); requests exceeding limit return HTTP 413                             |
+| `UPLOAD_PAYLOAD_LIMIT`            | Max JSON body for upload endpoints — player registration and milestone evidence (default: `10mb`)                     |
+| `RATE_LIMIT_ENABLED`              | Set to `false` to disable rate limiting (default: `true`)                                                             |
+| `RATE_LIMIT_WINDOW_MS`            | Rate limit window in milliseconds (default: `60000`)                                                                  |
+| `RATE_LIMIT_MAX`                  | Max requests per window (default: `60`)                                                                               |
+| `AUTH_RATE_LIMIT_WINDOW_MS`       | Auth rate limit window in milliseconds (default: `60000`)                                                             |
+| `AUTH_RATE_LIMIT_MAX`             | Max auth requests per window (default: `5`)                                                                           |
+| `CORS_ALLOWED_ORIGINS`            | Comma-separated list of allowed origins (environment-specific defaults)                                               |
+| `TRUSTED_PROXY_COUNT`             | Number of trusted reverse-proxy hops (default: `1`)                                                                   |
+| `WEBHOOK_ENABLED`                 | Set to `true` to enable event webhooks (default: `false`)                                                             |
+| `WEBHOOK_URL`                     | Endpoint to POST contract events to when `WEBHOOK_ENABLED=true`                                                       |
+| `WEBHOOK_SECRET`                  | HMAC secret for the legacy `WEBHOOK_URL` subscription (see `docs/webhooks.md`); a random secret is generated if unset |
+| `REDIS_URL`                       | Redis connection URL for distributed caching (falls back to in-memory if unset)                                       |
+| `PLAYER_CACHE_TTL_MS`             | TTL for player list cache entries in milliseconds (default: `60000`)                                                  |
+| `PLAYER_IMPORT_MAX_BATCH`         | Maximum rows per bulk player import request (default: `500`)                                                          |
+| `PIN_JSON_CACHE_TTL_MS`           | TTL for pinJson deduplication cache entries in milliseconds (default: `300000` = 5 min)                               |
+| `ADMIN_ACTION_TTL_MS`             | TTL for pending admin multi-sig actions in milliseconds (default: `3600000` = 1 hour)                                 |
 | `SUBSCRIPTION_GRACE_PERIOD_HOURS` | Grace period after subscription expiry during which access is still granted (default: `24`)                           |
-| `REQUEST_TIMEOUT_MS`       | Global request timeout in milliseconds before responding with 503 (default: `30000`)                                  |
-| `ADMIN_IP_ALLOWLIST`       | Comma-separated list of IPv4 addresses/CIDRs allowed on admin routes (unset = allow all)                              |
-| `SSE_KEEPALIVE_INTERVAL_MS`| Interval in milliseconds to send SSE keep-alive comments (default: `15000` = 15 seconds)                              |
-| `SSE_MAX_CONNECTIONS`      | Maximum number of concurrent SSE connections (default: `0` = unlimited)                                                |
+| `REQUEST_TIMEOUT_MS`              | Global request timeout in milliseconds before responding with 503 (default: `30000`)                                  |
+| `ADMIN_IP_ALLOWLIST`              | Comma-separated list of IPv4 addresses/CIDRs allowed on admin routes (unset = allow all)                              |
+| `SLOW_QUERY_THRESHOLD_MS`         | Log a structured warning for DB queries slower than this, in milliseconds (default: `50`)                             |
+| `SSE_KEEPALIVE_INTERVAL_MS`       | Interval in milliseconds to send SSE keep-alive comments (default: `15000` = 15 seconds)                              |
+| `SSE_MAX_CONNECTIONS`             | Maximum number of concurrent SSE connections (default: `0` = unlimited)                                               |
 
 ## Testing
 

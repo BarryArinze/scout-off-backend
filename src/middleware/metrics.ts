@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ipReputationCounters, resetIpReputationCounters } from '../services/ipReputation';
 
 export interface RouteMetric {
   count: number;
@@ -107,6 +108,125 @@ export function getLatencyHistogram(): LatencyHistogram {
   };
 }
 
+// ─── Seconds histogram buckets (0.01 / 0.05 / 0.1 / 0.5 / 1 / 5 seconds) ─────
+//
+// Used by ipfs_operation_duration_seconds, db_query_duration_seconds, and
+// soroban_rpc_duration_seconds.  The set covers 10 ms, 50 ms, 100 ms, 500 ms,
+// 1 s and 5 s as required by the acceptance criteria (IPFS must include 100 ms,
+// 500 ms, 1 s, 5 s).
+const SECONDS_HISTOGRAM_BUCKETS: ReadonlyArray<number> = [0.01, 0.05, 0.1, 0.5, 1, 5];
+
+/** A labelled cumulative histogram with seconds buckets. */
+interface LabelledHistogram {
+  bucketCounts: Record<string, number[]>;
+  sum: Record<string, number>;
+  count: Record<string, number>;
+}
+
+function createLabelledHistogram(): LabelledHistogram {
+  return { bucketCounts: {}, sum: {}, count: {} };
+}
+
+function observeLabelledSeconds(hist: LabelledHistogram, label: string, seconds: number): void {
+  if (!hist.bucketCounts[label]) {
+    hist.bucketCounts[label] = SECONDS_HISTOGRAM_BUCKETS.map(() => 0);
+    hist.sum[label] = 0;
+    hist.count[label] = 0;
+  }
+  for (let i = 0; i < SECONDS_HISTOGRAM_BUCKETS.length; i++) {
+    if (seconds <= SECONDS_HISTOGRAM_BUCKETS[i]) hist.bucketCounts[label][i] += 1;
+  }
+  hist.sum[label] += seconds;
+  hist.count[label] += 1;
+}
+
+// ─── IPFS latency histogram ───────────────────────────────────────────────────
+
+const ipfsHistogram: LabelledHistogram = createLabelledHistogram();
+
+export type IpfsOperation = 'pinJson' | 'pinFile' | 'checkHealth';
+
+export function observeIpfsLatency(operation: IpfsOperation, durationMs: number): void {
+  observeLabelledSeconds(ipfsHistogram, operation, durationMs / 1000);
+}
+
+// ─── DB query duration histogram ──────────────────────────────────────────────
+
+const dbQueryHistogram: LabelledHistogram = createLabelledHistogram();
+
+export function observeDbQueryDuration(queryName: string, durationMs: number): void {
+  observeLabelledSeconds(dbQueryHistogram, queryName, durationMs / 1000);
+}
+
+// ─── Soroban RPC latency histogram ────────────────────────────────────────────
+
+const sorobanRpcHistogram: LabelledHistogram = createLabelledHistogram();
+
+export type SorobanRpcOperation =
+  | 'getLatestLedger'
+  | 'queryEvents'
+  | 'getAccount'
+  | 'simulateTransaction'
+  | 'sendTransaction'
+  | 'getTransaction'
+  | 'isSubscribed'
+  | 'submitContactPayment'
+  | 'logTrialOffer'
+  | 'withdrawFees'
+  | 'purchaseSubscription'
+  | 'renewSubscription'
+  | 'cancelSubscriptionOnChain'
+  | 'unpauseContractOnChain'
+  | 'pauseContractOnChain'
+  | 'registerValidatorOnChain'
+  | 'revokeValidatorOnChain'
+  | 'updateProfile'
+  | 'getOnChainMilestones'
+  | 'stellarHealth';
+
+export function observeSorobanRpcLatency(operation: SorobanRpcOperation, durationMs: number): void {
+  observeLabelledSeconds(sorobanRpcHistogram, operation, durationMs / 1000);
+}
+
+// ─── Webhook delivery counters ────────────────────────────────────────────────
+
+export type WebhookDeliveryStatus = 'success' | 'failure' | 'dead_letter';
+
+const webhookDeliveryStore: Record<WebhookDeliveryStatus, number> = {
+  success: 0,
+  failure: 0,
+  dead_letter: 0,
+};
+
+export function recordWebhookDelivery(status: WebhookDeliveryStatus): void {
+  webhookDeliveryStore[status] += 1;
+}
+
+export function getWebhookDeliveryMetrics(): Record<WebhookDeliveryStatus, number> {
+  return { ...webhookDeliveryStore };
+}
+
+// ─── SSE active connections gauge ─────────────────────────────────────────────
+
+/** In-memory gauge for currently open SSE connections. */
+let sseConnectionsActive = 0;
+
+export function setSseConnectionsActive(count: number): void {
+  sseConnectionsActive = Math.max(0, count);
+}
+
+export function incrementSseConnections(): void {
+  sseConnectionsActive += 1;
+}
+
+export function decrementSseConnections(): void {
+  sseConnectionsActive = Math.max(0, sseConnectionsActive - 1);
+}
+
+export function getSseConnectionsActive(): number {
+  return sseConnectionsActive;
+}
+
 /** Resets every metric store. Intended for test isolation. */
 export function resetMetrics(): void {
   Object.keys(metricsStore).forEach((k) => delete metricsStore[k]);
@@ -118,6 +238,8 @@ export function resetMetrics(): void {
   cacheCountsStore.hits = 0;
   cacheCountsStore.misses = 0;
   cacheCountsStore.evictions = 0;
+  cacheInvalidationStore.total = 0;
+  resetIpReputationCounters();
 }
 
 // ─── Cache hit / miss / eviction counters ─────────────────────────────────────
@@ -156,6 +278,63 @@ export function getCacheMetrics(): CacheCounts {
   return { ...cacheCountsStore };
 }
 
+// ─── Cache invalidation counter ────────────────────────────────────────────────
+//
+// `cache_invalidation_total` counts every player-list cache invalidation
+// performed by this process:
+//   - one increment per `invalidatePlayerCache()` operation (local calls, e.g.
+//     from the indexer after a player state change), and
+//   - one increment per `invalidate:players` pub/sub message received from a
+//     sibling instance that clears the local player-list cache.
+//
+// So across a multi-instance deployment each logical invalidation produces one
+// increment on the originating instance and one on every instance that applies
+// it locally — the metric reflects actual invalidation activity per process.
+
+export interface CacheInvalidationCounts {
+  total: number;
+}
+
+/** In-memory cache invalidation counter. */
+export const cacheInvalidationStore: CacheInvalidationCounts = { total: 0 };
+
+/** Record one player-list cache invalidation operation (local or received). */
+export function recordCacheInvalidation(): void {
+  cacheInvalidationStore.total += 1;
+}
+
+/** Returns the current cache invalidation counter. */
+export function getCacheInvalidationTotal(): number {
+  return cacheInvalidationStore.total;
+}
+
+// ─── Webhook dead-letter counters ─────────────────────────────────────────────
+
+export interface WebhookCounters {
+  deadLettersTotal: number;
+  retrySuccessTotal: number;
+}
+
+export const webhookCountersStore: WebhookCounters = {
+  deadLettersTotal: 0,
+  retrySuccessTotal: 0,
+};
+
+/** Increment webhook_dead_letters_total counter. */
+export function incrementWebhookDeadLettersTotal(): void {
+  webhookCountersStore.deadLettersTotal += 1;
+}
+
+/** Increment webhook_retry_success_total counter. */
+export function incrementWebhookRetrySuccessTotal(): void {
+  webhookCountersStore.retrySuccessTotal += 1;
+}
+
+/** Returns a snapshot of webhook counters. */
+export function getWebhookCounters(): WebhookCounters {
+  return { ...webhookCountersStore };
+}
+
 // ─── Prometheus exposition ──────────────────────────────────────────────────────
 
 /** Content-Type for the Prometheus text exposition format (v0.0.4). */
@@ -169,19 +348,22 @@ function escapeLabelValue(value: string): string {
 export interface SerializeMetricsExtras {
   /** Optional indexer_ledger_lag gauge value, injected by the caller. */
   indexerLedgerLag?: number;
+  /** Optional sse_connections_active gauge value, injected by the caller. */
+  sseConnectionsActive?: number;
 }
 
 /**
- * Serialises all collected metrics into Prometheus text exposition format.
- * Takes external gauges (e.g. indexer lag) as parameters so this stays free of
- * any dependency on the indexer or the rest of the app — it is pure and unit
- * testable on its own.
- */
+  * Serialises all collected metrics into Prometheus text exposition format.
+  * Takes external gauges (e.g. indexer lag) as parameters so this stays free of
+  * any dependency on the indexer or the rest of the app — it is pure and unit
+  * testable on its own.
+  */
 export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   const routes = getMetrics();
   const errors = getErrorMetrics();
   const hist = getLatencyHistogram();
   const cache = getCacheMetrics();
+  const webhook = getWebhookCounters();
   const lines: string[] = [];
 
   // Request count (counter) — one series per route.
@@ -218,6 +400,62 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   lines.push('# TYPE cache_evictions_total counter');
   lines.push(`cache_evictions_total ${cache.evictions}`);
 
+  // Cache invalidation counter.
+  lines.push('# HELP cache_invalidation_total Total number of player-list cache invalidations performed (local operations and received invalidate:players messages)');
+  lines.push('# TYPE cache_invalidation_total counter');
+  lines.push(`cache_invalidation_total ${cacheInvalidationStore.total}`);
+
+  // IPFS operation duration histogram.
+  lines.push('# HELP ipfs_operation_duration_seconds IPFS operation latency in seconds');
+  lines.push('# TYPE ipfs_operation_duration_seconds histogram');
+  for (const [operation, counts] of Object.entries(ipfsHistogram.bucketCounts)) {
+    for (let i = 0; i < SECONDS_HISTOGRAM_BUCKETS.length; i++) {
+      lines.push(`ipfs_operation_duration_seconds_bucket{operation="${escapeLabelValue(operation)}",le="${SECONDS_HISTOGRAM_BUCKETS[i]}"} ${counts[i]}`);
+    }
+    lines.push(`ipfs_operation_duration_seconds_bucket{operation="${escapeLabelValue(operation)}",le="+Inf"} ${ipfsHistogram.count[operation]}`);
+    lines.push(`ipfs_operation_duration_seconds_sum{operation="${escapeLabelValue(operation)}"} ${ipfsHistogram.sum[operation]}`);
+    lines.push(`ipfs_operation_duration_seconds_count{operation="${escapeLabelValue(operation)}"} ${ipfsHistogram.count[operation]}`);
+  }
+
+  // DB query duration histogram.
+  lines.push('# HELP db_query_duration_seconds Database query latency in seconds');
+  lines.push('# TYPE db_query_duration_seconds histogram');
+  for (const [queryName, counts] of Object.entries(dbQueryHistogram.bucketCounts)) {
+    for (let i = 0; i < SECONDS_HISTOGRAM_BUCKETS.length; i++) {
+      lines.push(`db_query_duration_seconds_bucket{query_name="${escapeLabelValue(queryName)}",le="${SECONDS_HISTOGRAM_BUCKETS[i]}"} ${counts[i]}`);
+    }
+    lines.push(`db_query_duration_seconds_bucket{query_name="${escapeLabelValue(queryName)}",le="+Inf"} ${dbQueryHistogram.count[queryName]}`);
+    lines.push(`db_query_duration_seconds_sum{query_name="${escapeLabelValue(queryName)}"} ${dbQueryHistogram.sum[queryName]}`);
+    lines.push(`db_query_duration_seconds_count{query_name="${escapeLabelValue(queryName)}"} ${dbQueryHistogram.count[queryName]}`);
+  }
+
+  // Soroban RPC latency histogram.
+  lines.push('# HELP soroban_rpc_duration_seconds Soroban RPC operation latency in seconds');
+  lines.push('# TYPE soroban_rpc_duration_seconds histogram');
+  for (const [operation, counts] of Object.entries(sorobanRpcHistogram.bucketCounts)) {
+    for (let i = 0; i < SECONDS_HISTOGRAM_BUCKETS.length; i++) {
+      lines.push(`soroban_rpc_duration_seconds_bucket{operation="${escapeLabelValue(operation)}",le="${SECONDS_HISTOGRAM_BUCKETS[i]}"} ${counts[i]}`);
+    }
+    lines.push(`soroban_rpc_duration_seconds_bucket{operation="${escapeLabelValue(operation)}",le="+Inf"} ${sorobanRpcHistogram.count[operation]}`);
+    lines.push(`soroban_rpc_duration_seconds_sum{operation="${escapeLabelValue(operation)}"} ${sorobanRpcHistogram.sum[operation]}`);
+    lines.push(`soroban_rpc_duration_seconds_count{operation="${escapeLabelValue(operation)}"} ${sorobanRpcHistogram.count[operation]}`);
+  }
+
+  // Webhook delivery counters.
+  const webhookDelivery = getWebhookDeliveryMetrics();
+  lines.push('# HELP webhook_delivery_total Total number of webhook deliveries by status');
+  lines.push('# TYPE webhook_delivery_total counter');
+  lines.push(`webhook_delivery_total{status="success"} ${webhookDelivery.success}`);
+  lines.push(`webhook_delivery_total{status="failure"} ${webhookDelivery.failure}`);
+  lines.push(`webhook_delivery_total{status="dead_letter"} ${webhookDelivery.dead_letter}`);
+
+  // SSE active connections gauge.
+  if (extras.sseConnectionsActive !== undefined) {
+    lines.push('# HELP sse_connections_active Current number of open SSE connections');
+    lines.push('# TYPE sse_connections_active gauge');
+    lines.push(`sse_connections_active ${extras.sseConnectionsActive}`);
+  }
+
   // Indexer lag (gauge) — optional, injected by the caller.
   if (extras.indexerLedgerLag !== undefined) {
     lines.push('# HELP indexer_ledger_lag Ledgers behind the chain tip after the last poll');
@@ -225,16 +463,24 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
     lines.push(`indexer_ledger_lag ${extras.indexerLedgerLag}`);
   }
 
+  // IP reputation counters.
+  lines.push('# HELP ip_reputation_blocked_total Total number of requests blocked by IP reputation scoring');
+  lines.push('# TYPE ip_reputation_blocked_total counter');
+  lines.push(`ip_reputation_blocked_total ${ipReputationCounters.blocked}`);
+  lines.push('# HELP ip_reputation_penalised_total Total number of requests that received a reputation penalty (delay or rate restriction)');
+  lines.push('# TYPE ip_reputation_penalised_total counter');
+  lines.push(`ip_reputation_penalised_total ${ipReputationCounters.penalised}`);
+
   return lines.join('\n') + '\n';
 }
 
 /**
- * Builds the GET /metrics Express handler. The indexer-lag getter is injected so
- * this module never imports the indexer.
- */
-export function createMetricsHandler(getIndexerLedgerLag: () => number = () => 0) {
+  * Builds the GET /metrics Express handler. The indexer-lag getter is injected so
+  * this module never imports the indexer.
+  */
+export function createMetricsHandler(getIndexerLedgerLag: () => number = () => 0, getSseConnectionsActive: () => number = () => 0) {
   return (_req: Request, res: Response): void => {
     res.set('Content-Type', PROMETHEUS_CONTENT_TYPE);
-    res.send(serializeMetrics({ indexerLedgerLag: getIndexerLedgerLag() }));
+    res.send(serializeMetrics({ indexerLedgerLag: getIndexerLedgerLag(), sseConnectionsActive: getSseConnectionsActive() }));
   };
 }

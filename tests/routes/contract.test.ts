@@ -19,6 +19,11 @@ jest.mock('../../src/db', () => ({
   queryEvents: jest.fn().mockReturnValue([]),
   queryPlayers: jest.fn().mockReturnValue([]),
   countPlayers: jest.fn().mockReturnValue(0),
+  searchPlayers: jest.fn().mockReturnValue({ data: [], nextCursor: null }),
+  countEventsFiltered: jest.fn().mockReturnValue(0),
+  getEventsPage: jest.fn().mockReturnValue([]),
+  getSavedSearchesByScout: jest.fn().mockReturnValue([]),
+  getBookmarksByScout: jest.fn().mockReturnValue([]),
   getPlayerById: jest.fn().mockReturnValue(null),
   getEventsCount: jest.fn().mockReturnValue(0),
   fetchLastIndexedLedger: jest.fn().mockReturnValue(0),
@@ -31,6 +36,7 @@ jest.mock('../../src/db', () => ({
   hasContactUnlock: jest.fn().mockReturnValue(true),
   insertContactUnlock: jest.fn(),
   getLatestSubscription: jest.fn().mockReturnValue(null),
+  getSubscriptionsByScout: jest.fn().mockReturnValue([]),
   insertSubscription: jest.fn(),
   dbRenewSubscription: jest.fn(),
   dbCancelSubscription: jest.fn(),
@@ -50,12 +56,12 @@ jest.mock('../../src/db', () => ({
   // services/audit's logAuditEvent below.
   insertAuditLog: jest.fn().mockResolvedValue({
     id: 1,
-    action: 'mock',
+    action: 'player_search',
     admin_wallet: '',
     query_params: '{}',
     created_at: new Date().toISOString(),
-    prev_hash: null,
-    hash: 'mock-hash',
+    prev_hash: '0'.repeat(64),
+    hash: 'mock-hash-1',
     event_source: 'app_event',
   }),
   // src/app.ts's /health and /ready probes go through getDriver().
@@ -324,7 +330,7 @@ describe('POST /api/validators/milestone — envelope shape', () => {
     const res = await request(app)
       .post('/api/validators/milestone')
       .set('Authorization', `Bearer ${validatorToken}`)
-      .send({ playerId: 'player-1', milestoneType: 'identity', evidenceUri: 'ipfs://QmTest' });
+      .send({ playerId: 'player-1', milestoneType: 'identity', evidenceUri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG' });
     expect(res.status).toBe(201);
     assertSuccessEnvelope(res.body);
   });
@@ -717,9 +723,14 @@ describe('POST /api/admin/indexer/reindex — envelope shape', () => {
 // ─── Error shape — 404 for unknown routes ─────────────────────────────────────
 
 describe('404 for unknown routes — envelope shape', () => {
-  it('error: { success: false, error: string } for unknown path', async () => {
+  // The catch-all 404 handler intentionally departs from the
+  // { success: false, error } envelope used elsewhere: #861 changed it to
+  // { error, path } so API clients can see which route was unmatched
+  // without parsing an HTML error page. See src/app.ts's final app.use().
+  it('error: { error: string, path: string } for unknown path', async () => {
     const res = await request(app).get('/api/does-not-exist');
     expect(res.status).toBe(404);
-    assertErrorEnvelope(res.body);
+    expect(res.body).toHaveProperty('error', 'Not Found');
+    expect(res.body).toHaveProperty('path', '/api/does-not-exist');
   });
 });

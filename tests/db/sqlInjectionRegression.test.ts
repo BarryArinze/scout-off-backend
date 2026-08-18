@@ -9,7 +9,7 @@ import {
   getIdempotencyRecord, saveIdempotencyRecord, purgeExpiredIdempotencyKeys,
   getLatestSubscription, insertSubscription, dbRenewSubscription, dbCancelSubscription,
   insertContactUnlock, getContactUnlocksByScout, hasContactUnlock,
-  insertAuditLog, getAuditLogs, getAuditLogsCount,
+  insertAuditLog, getAuditLogs, getAuditLogsCount, getAllAuditLogRows,
   getTrialOfferById, insertTrialOffer, respondToTrialOffer,
   insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts,
   upsertScoutNote, getScoutNote, getScoutNotes,
@@ -209,6 +209,11 @@ describe('getAuditLogs - SQL injection resistance', () => {
     it(`getAuditLogsCount treats injection date range as literal: ${payload.slice(0, 40)}...`, async () => {
       const count = await getAuditLogsCount({ startDate: payload, endDate: payload });
       expect(typeof count).toBe('number');
+    });
+
+    it(`getAllAuditLogRows treats injection action as literal: ${payload.slice(0, 40)}...`, async () => {
+      const rows = await getAllAuditLogRows({ action: payload });
+      expect(Array.isArray(rows)).toBe(true);
     });
   });
 });
@@ -437,47 +442,47 @@ describe('all DB functions - SQL injection resistance (comprehensive)', () => {
     await upsertFeatureFlag({ name: inj, enabled: 0, updated_at: 0, updated_by: inj });
   });
 
-  it('insertPendingAdminAction with injection payloads', () => {
-    insertPendingAdminAction({ id: 'test-' + inj, action_type: inj, proposer: inj, payload: inj, required_signatures: 1, expires_at: 0, created_at: 0 });
+  it('insertPendingAdminAction with injection payloads', async () => {
+    await insertPendingAdminAction({ id: 'test-' + inj, action_type: inj, proposer: inj, payload: inj, required_signatures: 1, expires_at: 0, created_at: 0 });
   });
 
-  it('getPendingAdminActionById with injection payload', () => {
-    const action = getPendingAdminActionById(inj);
+  it('getPendingAdminActionById with injection payload', async () => {
+    const action = await getPendingAdminActionById(inj);
     expect(action === null || typeof action === 'object').toBe(true);
   });
 
-  it('getPendingAdminActionsByStatus with injection payload', () => {
-    const actions = getPendingAdminActionsByStatus(inj);
+  it('getPendingAdminActionsByStatus with injection payload', async () => {
+    const actions = await getPendingAdminActionsByStatus(inj);
     expect(Array.isArray(actions)).toBe(true);
   });
 
-  it('updatePendingAdminActionStatus with injection payloads', () => {
-    updatePendingAdminActionStatus(inj, inj);
+  it('updatePendingAdminActionStatus with injection payloads', async () => {
+    await updatePendingAdminActionStatus(inj, inj);
   });
 
-  it('incrementActionSignatures with injection payload', () => {
-    incrementActionSignatures(inj);
+  it('incrementActionSignatures with injection payload', async () => {
+    await incrementActionSignatures(inj);
   });
 
-  it('expireStalePendingAdminActions is safe', () => {
-    expect(typeof expireStalePendingAdminActions()).toBe('number');
+  it('expireStalePendingAdminActions is safe', async () => {
+    expect(typeof (await expireStalePendingAdminActions())).toBe('number');
   });
 
-  it('insertAdminActionSignature with injection payload', () => {
+  it('insertAdminActionSignature with injection payload', async () => {
     // Must insert a parent row first to satisfy the FK constraint
     const aid = 'test-action-sig-' + Date.now();
-    insertPendingAdminAction({ id: aid, action_type: 'test', proposer: 'admin', payload: '{}', required_signatures: 2, expires_at: 9999999999999, created_at: 0 });
-    const inserted = insertAdminActionSignature({ action_id: aid, signer: inj, signed_at: 0 });
+    await insertPendingAdminAction({ id: aid, action_type: 'test', proposer: 'admin', payload: '{}', required_signatures: 2, expires_at: 9999999999999, created_at: 0 });
+    const inserted = await insertAdminActionSignature({ action_id: aid, signer: inj, signed_at: 0 });
     expect(typeof inserted).toBe('boolean');
   });
 
-  it('getAdminActionSignature with injection payloads', () => {
-    const sig = getAdminActionSignature(inj, inj);
+  it('getAdminActionSignature with injection payloads', async () => {
+    const sig = await getAdminActionSignature(inj, inj);
     expect(sig === null || typeof sig === 'object').toBe(true);
   });
 
-  it('getAdminActionSignatures with injection payload', () => {
-    const sigs = getAdminActionSignatures(inj);
+  it('getAdminActionSignatures with injection payload', async () => {
+    const sigs = await getAdminActionSignatures(inj);
     expect(Array.isArray(sigs)).toBe(true);
   });
 

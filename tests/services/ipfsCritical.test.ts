@@ -23,9 +23,11 @@ jest.mock('../../src/db', () => ({
   deletePendingPinByHash: jest.fn(),
   isPendingPinByHash: jest.fn().mockReturnValue(false),
   incrementPendingPinAttempts: jest.fn(),
+  setPendingPinResolvedCid: jest.fn(),
+  getResolvedCidByHash: jest.fn().mockReturnValue(null),
 }));
 
-import { insertPendingPin, deletePendingPinByHash } from '../../src/db';
+import { insertPendingPin, deletePendingPinByHash, getPendingPins, deletePendingPin, incrementPendingPinAttempts } from '../../src/db';
 
 // Mock logger to capture critical calls
 const mockCritical = jest.fn();
@@ -108,5 +110,56 @@ describe('pinJson dedup caching', () => {
     expect(cid1).toBe('QmBefore');
     expect(cid2).toBe('QmAfter');
     jest.useRealTimers();
+  });
+});
+
+import { retryPendingPins } from '../../src/services/ipfs';
+
+describe('retryPendingPins background worker', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('retries successfully and removes row', async () => {
+    const fakeNow = Date.now();
+    (getPendingPins as jest.Mock).mockReturnValue([
+      { id: 1, payload: JSON.stringify({ wallet: 'G1' }), attempts: 0, last_tried: new Date(fakeNow - 100000).toISOString() },
+    ]);
+    mockedPost.mockResolvedValue({ data: { IpfsHash: 'QmRetried' } });
+
+    await retryPendingPins();
+
+    expect(mockedPost).toHaveBeenCalledTimes(1);
+    expect(deletePendingPin).toHaveBeenCalledWith(1);
+    expect(incrementPendingPinAttempts).not.toHaveBeenCalled();
+  });
+
+  it('applies exponential backoff for failed pins', async () => {
+    const fakeNow = Date.now();
+    (getPendingPins as jest.Mock).mockReturnValue([
+      // attempt 1, backed off 2 * 60s = 120s. last tried 60s ago -> skip
+      { id: 1, payload: JSON.stringify({ wallet: 'G1' }), attempts: 1, last_tried: new Date(fakeNow - 60000).toISOString() },
+      // attempt 1, backed off 120s. last tried 130s ago -> retry
+      { id: 2, payload: JSON.stringify({ wallet: 'G2' }), attempts: 1, last_tried: new Date(fakeNow - 130000).toISOString() },
+    ]);
+    mockedPost.mockRejectedValue(new Error('Still down'));
+
+    await retryPendingPins();
+
+    expect(mockedPost).toHaveBeenCalledTimes(1); // only id 2
+    expect(incrementPendingPinAttempts).toHaveBeenCalledWith(2);
+  });
+
+  it('skips rows that have permanently failed (attempts >= 5)', async () => {
+    const fakeNow = Date.now();
+    (getPendingPins as jest.Mock).mockReturnValue([
+      { id: 1, payload: JSON.stringify({ wallet: 'G1' }), attempts: 5, last_tried: new Date(fakeNow - 9999999).toISOString() },
+    ]);
+    
+    await retryPendingPins();
+
+    expect(mockedPost).not.toHaveBeenCalled();
+    expect(deletePendingPin).not.toHaveBeenCalled();
+    expect(incrementPendingPinAttempts).not.toHaveBeenCalled();
   });
 });

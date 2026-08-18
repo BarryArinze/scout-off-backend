@@ -3,7 +3,7 @@
  *   - isSubscribed()              — view-only simulation call
  *   - queryMilestones()           — view-only simulation call
  *   - cancelSubscriptionOnChain() — real Soroban invocation
- *   - pauseContractOnChain()      — real Soroban invocation
+ *   - pauseContractOnChain(WALLET)      — real Soroban invocation
  *   - withdrawFees()              — real Soroban invocation
  *   - updateProfile()             — real Soroban invocation
  *
@@ -22,6 +22,9 @@ const mockSendTransaction = jest.fn();
 const mockGetTransaction  = jest.fn();
 const mockAssembleBuild   = jest.fn().mockReturnValue({ sign: jest.fn() });
 const mockAssemble        = jest.fn().mockReturnValue({ build: mockAssembleBuild });
+// Shared across every Contract instance so tests can assert on the Soroban
+// function name + arguments the service passes to the contract.
+const mockContractCall    = jest.fn().mockReturnValue({ type: 'invokeHostFunction' });
 
 jest.mock('@stellar/stellar-sdk', () => ({
   SorobanRpc: {
@@ -47,7 +50,7 @@ jest.mock('@stellar/stellar-sdk', () => ({
     PUBLIC:  'Public Global Stellar Network ; September 2015',
   },
   Contract: jest.fn().mockImplementation(() => ({
-    call: jest.fn().mockReturnValue({ type: 'invokeHostFunction' }),
+    call: mockContractCall,
   })),
   TransactionBuilder: jest.fn().mockImplementation(() => ({
     addOperation: jest.fn().mockReturnThis(),
@@ -85,15 +88,41 @@ import {
   registerValidatorOnChain,
   renewSubscription,
   submitContactPayment,
+  withdrawFees,
   PaymentError,
   FeeWithdrawalError,
   ValidatorActionError,
+  updateProfile,
 } from '../../src/services/stellar';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires, @typescript-eslint/no-explicit-any
 const sdk = require('@stellar/stellar-sdk') as any;
 
 const WALLET = 'G' + 'A'.repeat(55);
+
+/**
+ * Every `server.*` RPC call in src/services/stellar.ts is wrapped by
+ * `stellarBreaker` (src/utils/circuitBreaker.ts), which retries a rejected
+ * call up to 3 times with real exponential backoff (~7s total) before
+ * giving up and letting the error propagate. Tests that mock an RPC method
+ * to reject exercise that retry path, so we fake timers around the call and
+ * fast-forward through the backoff instead of burning real wall-clock time
+ * and blowing past Jest's default 5000ms per-test timeout.
+ */
+async function expectRejectionAfterRetries<T>(
+  promiseFactory: () => Promise<T>,
+  assert: (promise: Promise<T>) => Promise<void>,
+): Promise<void> {
+  jest.useFakeTimers();
+  const promise = promiseFactory();
+  const assertion = assert(promise);
+  try {
+    await jest.runAllTimersAsync();
+    await assertion;
+  } finally {
+    jest.useRealTimers();
+  }
+}
 
 // ─── Shared setup ─────────────────────────────────────────────────────────────
 
@@ -147,7 +176,10 @@ describe('isSubscribed', () => {
 
   it('throws PaymentError NETWORK_ERROR when simulateTransaction rejects', async () => {
     mockSimulate.mockRejectedValue(new Error('connection timeout'));
-    await expect(isSubscribed(WALLET)).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
+    await expectRejectionAfterRetries(
+      () => isSubscribed(WALLET),
+      (p) => expect(p).rejects.toMatchObject({ code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError for empty wallet without calling the RPC', async () => {
@@ -269,10 +301,10 @@ describe('queryMilestones', () => {
   it('throws PaymentError NETWORK_ERROR when simulateTransaction rejects', async () => {
     mockSimulate.mockRejectedValue(new Error('connection timeout'));
 
-    await expect(queryMilestones(PLAYER_ID)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => queryMilestones(PLAYER_ID),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 });
 
@@ -414,7 +446,10 @@ describe('cancelSubscriptionOnChain', () => {
   it('propagates errors from getAccount (RPC unreachable)', async () => {
     mockGetAccount.mockRejectedValue(new Error('network unreachable'));
 
-    await expect(cancelSubscriptionOnChain(WALLET)).rejects.toThrow('network unreachable');
+    await expectRejectionAfterRetries(
+      () => cancelSubscriptionOnChain(WALLET),
+      (p) => expect(p).rejects.toThrow('network unreachable'),
+    );
   });
 });
 
@@ -425,7 +460,7 @@ describe('pauseContractOnChain', () => {
     mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'real-pause-tx-hash-001' });
     mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' });
 
-    const result = await pauseContractOnChain();
+    const result = await pauseContractOnChain(WALLET);
 
     expect(result.transactionId).toBe('real-pause-tx-hash-001');
     expect(mockGetAccount).toHaveBeenCalled();
@@ -443,7 +478,7 @@ describe('pauseContractOnChain', () => {
       .mockResolvedValueOnce({ status: 'SUCCESS' });
 
     jest.useFakeTimers();
-    const promise = pauseContractOnChain();
+    const promise = pauseContractOnChain(WALLET);
     await jest.runAllTimersAsync();
     const result = await promise;
     jest.useRealTimers();
@@ -456,7 +491,7 @@ describe('pauseContractOnChain', () => {
     sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'ContractPaused' });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'CONTRACT_ALREADY_PAUSED',
     });
@@ -468,7 +503,7 @@ describe('pauseContractOnChain', () => {
     sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #10' });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'CONTRACT_ALREADY_PAUSED',
     });
@@ -478,7 +513,7 @@ describe('pauseContractOnChain', () => {
     sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Something went wrong' });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'NETWORK_ERROR',
     });
@@ -491,7 +526,7 @@ describe('pauseContractOnChain', () => {
       hash: 'pause-err-hash',
     });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'NETWORK_ERROR',
     });
@@ -503,7 +538,7 @@ describe('pauseContractOnChain', () => {
     mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'pause-fail-hash' });
     mockGetTransaction.mockResolvedValue({ status: 'FAILED' });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'NETWORK_ERROR',
     });
@@ -512,7 +547,10 @@ describe('pauseContractOnChain', () => {
   it('propagates errors from getAccount (RPC unreachable)', async () => {
     mockGetAccount.mockRejectedValue(new Error('network unreachable'));
 
-    await expect(pauseContractOnChain()).rejects.toThrow('network unreachable');
+    await expectRejectionAfterRetries(
+      () => pauseContractOnChain(WALLET),
+      (p) => expect(p).rejects.toThrow('network unreachable'),
+    );
   });
 });
 
@@ -630,7 +668,10 @@ describe('registerValidatorOnChain', () => {
   it('propagates errors from getAccount (RPC unreachable)', async () => {
     mockGetAccount.mockRejectedValue(new Error('network unreachable'));
 
-    await expect(registerValidatorOnChain(WALLET)).rejects.toThrow('network unreachable');
+    await expectRejectionAfterRetries(
+      () => registerValidatorOnChain(WALLET),
+      (p) => expect(p).rejects.toThrow('network unreachable'),
+    );
   });
 });
 
@@ -720,19 +761,19 @@ describe('updateProfile', () => {
   it('throws PaymentError NETWORK_ERROR when getAccount fails', async () => {
     mockGetAccount.mockRejectedValue(new Error('rpc unreachable'));
 
-    await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => updateProfile(PLAYER_ID, METADATA_URI),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR when simulateTransaction rejects', async () => {
     mockSimulate.mockRejectedValue(new Error('connection timeout'));
 
-    await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => updateProfile(PLAYER_ID, METADATA_URI),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR when sendTransaction returns ERROR status', async () => {
@@ -857,10 +898,10 @@ describe('logTrialOffer', () => {
   it('throws PaymentError NETWORK_ERROR when getAccount fails', async () => {
     mockGetAccount.mockRejectedValue(new Error('rpc unreachable'));
 
-    await expect(logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR on simulation error response', async () => {
@@ -877,10 +918,10 @@ describe('logTrialOffer', () => {
   it('throws PaymentError NETWORK_ERROR when simulateTransaction rejects', async () => {
     mockSimulate.mockRejectedValue(new Error('connection timeout'));
 
-    await expect(logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR when sendTransaction returns ERROR status', async () => {
@@ -900,10 +941,10 @@ describe('logTrialOffer', () => {
   it('throws PaymentError NETWORK_ERROR when sendTransaction rejects', async () => {
     mockSendTransaction.mockRejectedValue(new Error('submit unreachable'));
 
-    await expect(logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR when the confirmed transaction has FAILED status', async () => {
@@ -920,10 +961,10 @@ describe('logTrialOffer', () => {
     mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'poll-fail-hash' });
     mockGetTransaction.mockRejectedValue(new Error('poll unreachable'));
 
-    await expect(logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 });
 
@@ -1086,38 +1127,38 @@ describe('renewSubscription', () => {
   it('throws PaymentError NETWORK_ERROR when getAccount fails (RPC unreachable) — distinct from an on-chain rejection', async () => {
     mockGetAccount.mockRejectedValue(new Error('network unreachable'));
 
-    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR when simulateTransaction rejects — distinct from an on-chain rejection', async () => {
     mockSimulate.mockRejectedValue(new Error('connection timeout'));
 
-    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR when sendTransaction rejects — distinct from an on-chain rejection', async () => {
     mockSendTransaction.mockRejectedValue(new Error('submit unreachable'));
 
-    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR when getTransaction polling rejects — distinct from an on-chain rejection', async () => {
     mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'renew-poll-fail' });
     mockGetTransaction.mockRejectedValue(new Error('poll unreachable'));
 
-    await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 });
 
@@ -1218,29 +1259,214 @@ describe('submitContactPayment', () => {
   it('throws PaymentError NETWORK_ERROR when getAccount rejects', async () => {
     mockGetAccount.mockRejectedValue(new Error('account unreachable'));
 
-    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => submitContactPayment(WALLET, PLAYER_ID),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR when sendTransaction rejects', async () => {
     mockSendTransaction.mockRejectedValue(new Error('submit unreachable'));
 
-    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
-      name: 'PaymentError',
-      code: 'NETWORK_ERROR',
-    });
+    await expectRejectionAfterRetries(
+      () => submitContactPayment(WALLET, PLAYER_ID),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
   });
 
   it('throws PaymentError NETWORK_ERROR when getTransaction polling rejects', async () => {
     mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'unlock-poll-fail' });
     mockGetTransaction.mockRejectedValue(new Error('poll unreachable'));
 
-    await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
-      name: 'PaymentError',
+    await expectRejectionAfterRetries(
+      () => submitContactPayment(WALLET, PLAYER_ID),
+      (p) => expect(p).rejects.toMatchObject({ name: 'PaymentError', code: 'NETWORK_ERROR' }),
+    );
+  });
+});
+
+// ─── withdrawFees ─────────────────────────────────────────────────────────────
+// The contract's withdraw_fees(admin, amount) now takes an explicit amount and
+// enforces it on-chain; these tests verify the service encodes the requested
+// amount (i128) into the Soroban call and parses the actually-withdrawn amount
+// from the confirmed transaction result.
+
+describe('withdrawFees', () => {
+  it('submits a real Soroban transaction and returns the confirmed withdrawal amount', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-tx-001' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: {} });
+    sdk.scValToNative.mockReturnValue(250n);
+
+    const result = await withdrawFees(WALLET, '250');
+
+    expect(result.transactionId).toBe('fee-tx-001');
+    expect(result.recipient).toBe(WALLET);
+    expect(result.amount).toBe('250');
+    expect(result.token).toBe('XLM');
+    expect(mockGetAccount).toHaveBeenCalled();
+    expect(mockSimulate).toHaveBeenCalled();
+    expect(mockAssemble).toHaveBeenCalled();
+    expect(mockSendTransaction).toHaveBeenCalled();
+    expect(mockGetTransaction).toHaveBeenCalledWith('fee-tx-001');
+  });
+
+  it('encodes the requested amount as an i128 argument in the withdraw_fees call', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-tx-amount' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: {} });
+    sdk.scValToNative.mockReturnValue(250n);
+
+    await withdrawFees(WALLET, '250');
+
+    // The amount must reach the contract call — never silently discarded.
+    expect(sdk.nativeToScVal).toHaveBeenCalledWith(250n, { type: 'i128' });
+    expect(sdk.Address.fromString).toHaveBeenCalledWith(WALLET);
+    expect(mockContractCall).toHaveBeenCalledWith(
+      'withdraw_fees',
+      expect.anything(),
+      expect.anything(),
+    );
+    // The third argument is the nativeToScVal-produced i128 scval.
+    expect(mockContractCall.mock.calls[0][2]).toBe(sdk.nativeToScVal.mock.results.at(-1).value);
+  });
+
+  it('omitting the amount fetches the full balance and withdraws it (legacy behaviour)', async () => {
+    // getFeeBalance() performs its own simulateTransaction first, then the
+    // withdrawal simulates again — two simulation calls in total.
+    mockSimulate
+      .mockResolvedValueOnce({ result: { retval: {} } })
+      .mockResolvedValueOnce({ result: { retval: {} } });
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-tx-full' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: {} });
+    // First scValToNative → the live balance (500n); second → tx return value (250n).
+    sdk.scValToNative.mockReturnValueOnce(500n).mockReturnValue(250n);
+
+    const result = await withdrawFees(WALLET);
+
+    expect(result.amount).toBe('250');
+    // The full balance was encoded as the withdrawal amount.
+    expect(sdk.nativeToScVal).toHaveBeenCalledWith(500n, { type: 'i128' });
+  });
+
+  it('throws NO_FEES without touching the RPC when the resolved balance is zero', async () => {
+    mockSimulate.mockResolvedValue({ result: { retval: {} } });
+    sdk.scValToNative.mockReturnValue(0n);
+
+    await expect(withdrawFees(WALLET)).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'NO_FEES',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws NO_FEES for an explicit non-positive amount without touching the RPC', async () => {
+    await expect(withdrawFees(WALLET, '0')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'NO_FEES',
+    });
+    expect(mockGetAccount).not.toHaveBeenCalled();
+  });
+
+  it('throws INVALID_RECIPIENT for an empty recipient without touching the RPC', async () => {
+    await expect(withdrawFees('', '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'INVALID_RECIPIENT',
+    });
+    expect(mockGetAccount).not.toHaveBeenCalled();
+  });
+
+  it('throws NO_FEES when the confirmed transaction return value is zero', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-tx-zero' });
+    mockGetTransaction.mockResolvedValue({ status: 'SUCCESS', returnValue: {} });
+    sdk.scValToNative.mockReturnValue(0n);
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'NO_FEES',
+    });
+  });
+
+  it('throws INSUFFICIENT_FEES when the simulation reports contract error #7 (amount > balance)', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Contract error: #7' });
+
+    await expect(withdrawFees(WALLET, '999999')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'INSUFFICIENT_FEES',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws CONTRACT_PAUSED when the simulation reports contract error #10', async () => {
+    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    mockSimulate.mockResolvedValue({ error: 'Contract error: #10' });
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'CONTRACT_PAUSED',
+    });
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws INSUFFICIENT_FEES when sendTransaction reports contract error #7', async () => {
+    mockSendTransaction.mockResolvedValue({
+      status: 'ERROR',
+      errorResult: 'Contract error: #7',
+      hash: 'fee-err-hash',
+    });
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'INSUFFICIENT_FEES',
+    });
+    expect(mockGetTransaction).not.toHaveBeenCalled();
+  });
+
+  it('throws INSUFFICIENT_FEES when the confirmed tx XDR reports contract error #7', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-fail-fee' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'error-payload-#7-encoded' });
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
+      code: 'INSUFFICIENT_FEES',
+    });
+  });
+
+  it('throws NETWORK_ERROR when the confirmed transaction FAILED for an unrecognized reason', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-fail-generic' });
+    mockGetTransaction.mockResolvedValue({ status: 'FAILED', resultMetaXdr: 'some other error' });
+
+    await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({
+      name: 'FeeWithdrawalError',
       code: 'NETWORK_ERROR',
     });
+  });
+
+  it('throws NETWORK_ERROR when getAccount rejects (RPC unreachable)', async () => {
+    mockGetAccount.mockRejectedValue(new Error('network unreachable'));
+
+    await expectRejectionAfterRetries(
+      () => withdrawFees(WALLET, '100'),
+      (p) => expect(p).rejects.toMatchObject({ name: 'FeeWithdrawalError', code: 'NETWORK_ERROR' }),
+    );
+  });
+
+  it('polls getTransaction until status is no longer NOT_FOUND', async () => {
+    mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'fee-poll-hash' });
+    mockGetTransaction
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'NOT_FOUND' })
+      .mockResolvedValueOnce({ status: 'SUCCESS', returnValue: {} });
+    sdk.scValToNative.mockReturnValue(100n);
+
+    jest.useFakeTimers();
+    const promise = withdrawFees(WALLET, '100');
+    await jest.runAllTimersAsync();
+    const result = await promise;
+    jest.useRealTimers();
+
+    expect(result.transactionId).toBe('fee-poll-hash');
+    expect(result.amount).toBe('100');
+    expect(mockGetTransaction).toHaveBeenCalledTimes(3);
   });
 });
 

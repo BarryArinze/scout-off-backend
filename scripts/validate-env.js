@@ -51,6 +51,21 @@ function validateRuntimeEnv(env = process.env) {
     }
   }
 
+  // Validate PINATA_GATEWAY if specified — must be a valid HTTPS URL, since
+  // IPFS content resolution over plain HTTP is both insecure and, on most
+  // gateways, unsupported.
+  if (env.PINATA_GATEWAY !== undefined && env.PINATA_GATEWAY.trim() !== '') {
+    let isValidHttpsUrl = false;
+    try {
+      isValidHttpsUrl = new URL(env.PINATA_GATEWAY).protocol === 'https:';
+    } catch {
+      isValidHttpsUrl = false;
+    }
+    if (!isValidHttpsUrl) {
+      errors.push(`PINATA_GATEWAY="${env.PINATA_GATEWAY}" is invalid. Must be a valid HTTPS URL.`);
+    }
+  }
+
   // Validate CORS_ALLOWED_ORIGINS if specified
   const corsOriginsVal = env.CORS_ALLOWED_ORIGINS ?? env.ALLOWED_ORIGINS;
   if (corsOriginsVal !== undefined) {
@@ -99,7 +114,7 @@ function findStaleExampleKeys(examplePath, srcFiles) {
       .split('\n')
       .map((line) => line.replace(/\/\/.*$/, ''))
       .join('\n');
-    const matches = [...codeOnly.matchAll(/process\.env\.([A-Z_]+)/g)];
+    const matches = [...codeOnly.matchAll(/process\.env\.([A-Z_][A-Z0-9_]*)/g)];
     for (const [, key] of matches) {
       referencedKeys.add(key);
     }
@@ -147,7 +162,7 @@ if (require.main === module) {
       .split('\n')
       .map((line) => line.replace(/\/\/.*$/, ''))
       .join('\n');
-    const matches = [...codeOnly.matchAll(/process\.env\.([A-Z_]+)/g)];
+    const matches = [...codeOnly.matchAll(/process\.env\.([A-Z_][A-Z0-9_]*)/g)];
     for (const [, key] of matches) {
       if (!exampleKeys.has(key)) undocumented.push({ key, file });
     }

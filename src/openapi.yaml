@@ -1,0 +1,1973 @@
+openapi: "3.0.3"
+info:
+  title: ScoutOff API
+  description: >
+    Backend API for ScoutOff — a decentralised football scouting platform
+    built on the Stellar blockchain (Soroban smart contracts).
+  version: "1.0.0"
+  contact:
+    name: ScoutOff Engineering
+servers:
+  - url: /api
+    description: Stable API (version-less alias)
+  - url: /api/v1
+    description: Versioned API
+
+tags:
+  - name: auth
+    description: Authentication (SEP-10 challenge / JWT exchange)
+  - name: players
+    description: Player profile management and discovery
+  - name: scouts
+    description: Scout subscriptions, contacts, trial offers, and tools
+  - name: validators
+    description: Milestone evidence submission and review
+  - name: admin
+    description: Platform administration (admin role required)
+
+# ─── Reusable components ──────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: >-
+        Long-lived scout API key (alternative to a Bearer JWT). Restricted keys
+        may only perform operations covered by their granted scopes (#1019).
+        Legacy keys without a scope list are unrestricted.
+
+  parameters:
+    playerId:
+      name: playerId
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Player's unique identifier (cuid2)
+    walletParam:
+      name: wallet
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 56
+        maxLength: 56
+      description: Stellar public key (G…)
+
+  schemas:
+    # ── Envelope ──────────────────────────────────────────────────────────────
+    SuccessEnvelope:
+      type: object
+      required: [success]
+      properties:
+        success:
+          type: boolean
+          enum: [true]
+
+    ErrorEnvelope:
+      type: object
+      required: [success, error]
+      properties:
+        success:
+          type: boolean
+          enum: [false]
+        error:
+          type: string
+        code:
+          type: string
+
+    # ── Player ────────────────────────────────────────────────────────────────
+    PlayerSummary:
+      type: object
+      required: [player_id, wallet]
+      properties:
+        player_id:
+          type: string
+        wallet:
+          type: string
+        position:
+          type: string
+          nullable: true
+        region:
+          type: string
+          nullable: true
+        metadataUri:
+          type: string
+          nullable: true
+        progress_level:
+          type: integer
+          minimum: 0
+          maximum: 3
+        created_at:
+          type: integer
+          description: Unix timestamp (seconds)
+        progress_tier_name:
+          type: string
+          enum: [Unverified, "Verified Identity", "Performance Milestones", "Elite Tier"]
+        tierName:
+          type: string
+        tierDescription:
+          type: string
+        is_active:
+          type: integer
+          enum: [0, 1]
+
+    PlayerDetail:
+      allOf:
+        - $ref: "#/components/schemas/PlayerSummary"
+        - type: object
+          required: [offerCount]
+          properties:
+            offerCount:
+              type: integer
+              minimum: 0
+              description: Number of trial offers submitted for this player
+
+    PlayerList:
+      allOf:
+        - $ref: "#/components/schemas/SuccessEnvelope"
+        - type: object
+          required: [data, total, page, pageSize, pages]
+          properties:
+            data:
+              type: array
+              items:
+                $ref: "#/components/schemas/PlayerSummary"
+            total:
+              type: integer
+            page:
+              type: integer
+            pageSize:
+              type: integer
+            pages:
+              type: integer
+
+    # ── Subscription ──────────────────────────────────────────────────────────
+    SubscriptionStatus:
+      type: object
+      required: [active]
+      properties:
+        active:
+          type: boolean
+        tier:
+          type: string
+          nullable: true
+        expiresAt:
+          type: integer
+          nullable: true
+        remainingDays:
+          type: integer
+          nullable: true
+        gracePeriodActive:
+          type: boolean
+
+    # ── Trial offer ───────────────────────────────────────────────────────────
+    TrialOffer:
+      type: object
+      required: [offer_id, scout_wallet, player_id, details_uri, status, created_at]
+      properties:
+        offer_id:
+          type: string
+        scout_wallet:
+          type: string
+        player_id:
+          type: string
+        details_uri:
+          type: string
+        status:
+          type: string
+          enum: [pending, accepted, rejected]
+        reject_reason:
+          type: string
+          nullable: true
+        responded_at:
+          type: integer
+          nullable: true
+        created_at:
+          type: integer
+
+    # ── Milestone ─────────────────────────────────────────────────────────────
+    Milestone:
+      type: object
+      properties:
+        milestone_id:
+          type: string
+        player_id:
+          type: string
+        milestone_type:
+          type: string
+        evidence_uri:
+          type: string
+        submitted_at:
+          type: integer
+        approved_at:
+          type: integer
+          nullable: true
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: Insufficient role or wallet mismatch
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+# ─── Paths ────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Auth ──────────────────────────────────────────────────────────────────
+  /auth/challenge:
+    get:
+      tags: [auth]
+      summary: Get SEP-10 challenge transaction
+      operationId: getChallenge
+      responses:
+        "200":
+          description: XDR-encoded challenge transaction
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          transaction:
+                            type: string
+                          network_passphrase:
+                            type: string
+
+  /auth/token:
+    post:
+      tags: [auth]
+      summary: Exchange signed challenge for JWT
+      operationId: postToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [transaction, wallet, role]
+              properties:
+                transaction:
+                  type: string
+                  description: Signed SEP-10 XDR transaction
+                wallet:
+                  type: string
+                role:
+                  type: string
+                  enum: [player, scout, validator, admin]
+      responses:
+        "200":
+          description: JWT token
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          token:
+                            type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Players ───────────────────────────────────────────────────────────────
+  /players:
+    get:
+      tags: [players]
+      summary: List and filter players
+      operationId: listPlayers
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - name: region
+          in: query
+          schema:
+            type: string
+        - name: position
+          in: query
+          schema:
+            type: string
+        - name: minTier
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 3
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: fields
+          in: query
+          description: >
+            Comma-separated list of field names to include in each player object.
+            Unknown field names are silently ignored.
+            Omit to return all fields (backwards-compatible).
+            Example: ?fields=player_id,position,region
+          schema:
+            type: string
+            example: "player_id,position,region"
+      responses:
+        "200":
+          description: Paginated player list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlayerList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          description: minTier out of range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+
+  /players/register:
+    post:
+      tags: [players]
+      summary: Register a new player profile
+      operationId: registerPlayer
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wallet, position, region]
+              properties:
+                wallet:
+                  type: string
+                  minLength: 56
+                  maxLength: 56
+                position:
+                  type: string
+                region:
+                  type: string
+                metadataUri:
+                  type: string
+                  description: Pre-pinned IPFS CID (mutually exclusive with metadata)
+                metadata:
+                  type: object
+                  description: >
+                    Arbitrary metadata object. The backend will pin it to IPFS
+                    and derive the metadataUri.
+      responses:
+        "201":
+          description: Player registered
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          playerId:
+                            type: string
+                          metadataUri:
+                            type: string
+                          gatewayUrl:
+                            type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /players/{playerId}:
+    get:
+      tags: [players]
+      summary: Get a player by ID
+      operationId: getPlayer
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Player detail
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/PlayerDetail"
+        "304":
+          description: Not modified (ETag match)
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    put:
+      tags: [players]
+      summary: Update player profile metadata (owner only)
+      operationId: updatePlayer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/playerId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [metadataUri]
+                  properties:
+                    metadataUri:
+                      type: string
+                - type: object
+                  required: [metadata]
+                  properties:
+                    metadata:
+                      type: object
+      responses:
+        "200":
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          transactionId:
+                            type: string
+                          metadataUri:
+                            type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /players/{playerId}/milestones:
+    get:
+      tags: [players]
+      summary: Get player milestones
+      operationId: getPlayerMilestones
+      security:
+        - {}
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/playerId"
+        - name: sortBy
+          in: query
+          schema:
+            type: string
+            enum: [submittedAt, approvedAt]
+            default: submittedAt
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
+      responses:
+        "200":
+          description: Milestone list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/Milestone"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /players/{playerId}/history:
+    get:
+      tags: [players]
+      summary: Get player profile change history (owner or admin)
+      operationId: getPlayerHistory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Profile history entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          type: object
+                          properties:
+                            metadata_uri:
+                              type: string
+                            changed_at:
+                              type: integer
+                            tx_hash:
+                              type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /players/{playerId}/deactivate:
+    post:
+      tags: [players]
+      summary: Deactivate (soft-delete) a player profile (owner only)
+      operationId: deactivatePlayer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Player deactivated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /players/{playerId}/reactivate:
+    post:
+      tags: [players]
+      summary: Reactivate a deactivated player profile (owner only)
+      operationId: reactivatePlayer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Player reactivated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessEnvelope"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /players/{playerId}/trial-offers/{offerId}/accept:
+    post:
+      tags: [players]
+      summary: Accept a trial offer (player owner only)
+      operationId: acceptTrialOffer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/playerId"
+        - name: offerId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Offer accepted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          offerId:
+                            type: string
+                          playerId:
+                            type: string
+                          status:
+                            type: string
+                            enum: [accepted]
+                          respondedAt:
+                            type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Offer already responded to
+
+  /players/{playerId}/trial-offers/{offerId}/reject:
+    post:
+      tags: [players]
+      summary: Reject a trial offer with optional reason (player owner only)
+      operationId: rejectTrialOffer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/playerId"
+        - name: offerId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                  maxLength: 500
+      responses:
+        "200":
+          description: Offer rejected
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          offerId:
+                            type: string
+                          playerId:
+                            type: string
+                          status:
+                            type: string
+                            enum: [rejected]
+                          reason:
+                            type: string
+                            nullable: true
+                          respondedAt:
+                            type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Offer already responded to
+
+  # ── Scouts ────────────────────────────────────────────────────────────────
+  /scouts/{wallet}/subscription:
+    get:
+      tags: [scouts]
+      summary: Get scout subscription status
+      operationId: getSubscription
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Subscription status
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/SubscriptionStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /scouts/{wallet}/subscribe:
+    post:
+      tags: [scouts]
+      summary: Purchase a new subscription
+      operationId: subscribe
+      security:
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tier, duration]
+              properties:
+                tier:
+                  type: string
+                  enum: [basic, premium]
+                duration:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+      responses:
+        "201":
+          description: Subscription created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          transactionId:
+                            type: string
+                          tier:
+                            type: string
+                          expiresAt:
+                            type: integer
+                          status:
+                            type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: Insufficient XLM balance
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      tags: [scouts]
+      summary: Renew or create a subscription
+      operationId: renewSubscription
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tier, duration]
+              properties:
+                tier:
+                  type: string
+                  enum: [basic, premium]
+                duration:
+                  type: integer
+                  minimum: 1
+                  maximum: 365
+      responses:
+        "200":
+          description: Subscription renewed
+        "201":
+          description: New subscription created
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    delete:
+      tags: [scouts]
+      summary: Cancel an active subscription
+      operationId: cancelSubscription
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Subscription cancelled
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /scouts/{wallet}/trial-offer:
+    post:
+      tags: [scouts]
+      summary: Submit a trial offer to a player
+      operationId: submitTrialOffer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [playerId, detailsUri]
+              properties:
+                playerId:
+                  type: string
+                detailsUri:
+                  type: string
+                  description: IPFS URI with offer details
+      responses:
+        "201":
+          description: Trial offer submitted
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          transactionId:
+                            type: string
+                          offerId:
+                            type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: No active subscription or contact unlock
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Player not found
+
+  /scouts/{wallet}/trial-offers:
+    get:
+      tags: [scouts]
+      summary: List trial offers submitted by this scout
+      operationId: listTrialOffers
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Trial offer list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/TrialOffer"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [scouts]
+      summary: Create a trial offer (on-chain event log variant)
+      operationId: createTrialOffer
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [playerId, detailsUri]
+              properties:
+                playerId:
+                  type: string
+                detailsUri:
+                  type: string
+      responses:
+        "201":
+          description: Trial offer created
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /scouts/{wallet}/contacts:
+    get:
+      tags: [scouts]
+      summary: List unlocked player contacts
+      operationId: getUnlockedContacts
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Unlocked contacts
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /scouts/{wallet}/contacts/{playerId}:
+    get:
+      tags: [scouts]
+      summary: Get contact details for an unlocked player
+      operationId: getContactDetails
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Contact details
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /scouts/{wallet}/contacts/{playerId}/unlock:
+    post:
+      tags: [scouts]
+      summary: Unlock a player's contact information
+      operationId: unlockContact
+      security:
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Contact unlocked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /scouts/{wallet}/recommendations:
+    get:
+      tags: [scouts]
+      summary: Get personalised player recommendations for a scout
+      operationId: getScoutRecommendations
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Recommendation list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /scouts/{wallet}/notes/{playerId}:
+    put:
+      tags: [scouts]
+      summary: Create or update a private note on a player
+      operationId: putScoutNote
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Note saved
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    get:
+      tags: [scouts]
+      summary: Get scout's private note for a player
+      operationId: getScoutNote
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Note content
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /scouts/{wallet}/notes:
+    get:
+      tags: [scouts]
+      summary: List all scout notes (newest-first)
+      operationId: listScoutNotes
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Note list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /scouts/{wallet}/api-keys:
+    post:
+      tags: [scouts]
+      summary: Issue a new API key (returned once in plaintext)
+      operationId: issueApiKey
+      security:
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label:
+                  type: string
+                  maxLength: 100
+                scopes:
+                  type: array
+                  items:
+                    type: string
+                    example: write:contacts
+                  description: >-
+                    Optional explicit scope list. Omitted → legacy key with
+                    unrestricted scout-level access. Restricted keys are
+                    enforced on mutating endpoints (#1019).
+      responses:
+        "201":
+          description: API key issued
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    get:
+      tags: [scouts]
+      summary: List existing API keys (metadata only, no plaintext)
+      operationId: listApiKeys
+      security:
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: API key list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /scouts/{wallet}/api-keys/{id}:
+    delete:
+      tags: [scouts]
+      summary: Revoke an API key
+      operationId: revokeApiKey
+      security:
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Key revoked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /scouts/{wallet}/bookmarks/{playerId}:
+    post:
+      tags: [scouts]
+      summary: Bookmark a player (idempotent)
+      operationId: addBookmark
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Bookmarked
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [scouts]
+      summary: Remove a bookmark
+      operationId: removeBookmark
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+        - $ref: "#/components/parameters/playerId"
+      responses:
+        "200":
+          description: Bookmark removed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /scouts/{wallet}/bookmarks:
+    get:
+      tags: [scouts]
+      summary: List bookmarked players with profile summaries
+      operationId: listBookmarks
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Bookmark list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /scouts/{wallet}/saved-searches:
+    post:
+      tags: [scouts]
+      summary: Create a saved search
+      operationId: createSavedSearch
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "201":
+          description: Saved search created
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    get:
+      tags: [scouts]
+      summary: List saved searches (newest-first)
+      operationId: listSavedSearches
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Saved search list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /scouts/{wallet}/saved-searches/{id}:
+    delete:
+      tags: [scouts]
+      summary: Delete a saved search
+      operationId: deleteSavedSearch
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Deleted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /scouts/{wallet}/payments:
+    get:
+      tags: [scouts]
+      summary: Get payment history
+      operationId: getPaymentHistory
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Payment history
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Validators ────────────────────────────────────────────────────────────
+  /validators/milestone:
+    post:
+      tags: [validators]
+      summary: Submit milestone evidence for a player
+      operationId: submitMilestoneEvidence
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [playerId, milestoneType, evidenceUri]
+              properties:
+                playerId:
+                  type: string
+                milestoneType:
+                  type: string
+                evidenceUri:
+                  type: string
+      responses:
+        "201":
+          description: Milestone evidence submitted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /validators/milestones/pending:
+    get:
+      tags: [validators]
+      summary: List all pending milestones
+      operationId: listPendingMilestones
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: position
+          in: query
+          schema:
+            type: string
+        - name: region
+          in: query
+          schema:
+            type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Pending milestone list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /validators/{wallet}/milestones/pending:
+    get:
+      tags: [validators]
+      summary: List pending milestones assigned to this validator
+      operationId: listPendingMilestonesByValidator
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+        - name: position
+          in: query
+          schema:
+            type: string
+        - name: region
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pending milestones for this validator
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  # ── Admin ─────────────────────────────────────────────────────────────────
+  /admin/stats:
+    get:
+      tags: [admin]
+      summary: Platform aggregate counts
+      operationId: getStats
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Aggregate stats
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/SuccessEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          players:
+                            type: integer
+                          milestones:
+                            type: integer
+                          subscriptions:
+                            type: integer
+                          events:
+                            type: integer
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/events:
+    get:
+      tags: [admin]
+      summary: List all indexed contract events
+      operationId: getAllEvents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: startDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: eventType
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Event list
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/events/export:
+    get:
+      tags: [admin]
+      summary: Export events as CSV
+      operationId: exportEvents
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: startDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: eventType
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: CSV download
+          content:
+            text/csv:
+              schema:
+                type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/fees:
+    get:
+      tags: [admin]
+      summary: Get fee withdrawal history
+      operationId: getFeeSummary
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Fee history
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [admin]
+      summary: Withdraw accumulated platform fees
+      operationId: withdrawFees
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [recipient]
+              properties:
+                recipient:
+                  type: string
+      responses:
+        "200":
+          description: Fees withdrawn
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "409":
+          description: No fees available
+
+  /admin/audit:
+    get:
+      tags: [admin]
+      summary: Get paginated audit log entries
+      operationId: getAuditLog
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: startDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: endDate
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+        - name: offset
+          in: query
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Audit log entries
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/audit/trail:
+    get:
+      tags: [admin]
+      summary: Paginated audit trail in canonical AuditEntry shape
+      operationId: getAuditTrail
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Audit trail
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/audit/verify:
+    get:
+      tags: [admin]
+      summary: Verify audit log hash chain integrity
+      operationId: verifyAuditChain
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Verification result
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/validators:
+    get:
+      tags: [admin]
+      summary: List registered validators
+      operationId: listValidators
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Validator list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/validators/register:
+    post:
+      tags: [admin]
+      summary: Register a new validator
+      operationId: registerValidator
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [validatorWallet]
+              properties:
+                validatorWallet:
+                  type: string
+      responses:
+        "202":
+          description: Registration request submitted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/validators/revoke:
+    post:
+      tags: [admin]
+      summary: Revoke an existing validator
+      operationId: revokeValidator
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [validatorWallet]
+              properties:
+                validatorWallet:
+                  type: string
+      responses:
+        "202":
+          description: Revocation request submitted
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/validators/import:
+    post:
+      tags: [admin]
+      summary: Bulk import validators (JSON or CSV)
+      operationId: importValidators
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Import results
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/validators/{wallet}/stats:
+    get:
+      tags: [admin]
+      summary: Get milestone approval/rejection stats for a validator
+      operationId: getValidatorStats
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/walletParam"
+      responses:
+        "200":
+          description: Validator stats
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/players/import:
+    post:
+      tags: [admin]
+      summary: Bulk import players (JSON or CSV)
+      operationId: importPlayers
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Import results
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/contract/pause:
+    post:
+      tags: [admin]
+      summary: Pause the Soroban contract (simulated)
+      operationId: pauseContract
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Contract paused
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/contract/unpause:
+    post:
+      tags: [admin]
+      summary: Unpause the Soroban contract (simulated)
+      operationId: unpauseContract
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Contract unpaused
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/introspect:
+    post:
+      tags: [admin]
+      summary: Decode caller's own JWT claims
+      operationId: introspectToken
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Token claims
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/tokens/revoke:
+    post:
+      tags: [admin]
+      summary: Revoke a JWT by jti
+      operationId: revokeToken
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                jti:
+                  type: string
+                token:
+                  type: string
+      responses:
+        "200":
+          description: Token revoked
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/indexer/reindex:
+    post:
+      tags: [admin]
+      summary: Reset the indexer's last_ledger to replay from a given ledger
+      operationId: reindex
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fromLedger]
+              properties:
+                fromLedger:
+                  type: integer
+      responses:
+        "200":
+          description: Reindex initiated
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/feature-flags:
+    get:
+      tags: [admin]
+      summary: List all feature flags
+      operationId: getFeatureFlags
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Feature flag list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      tags: [admin]
+      summary: Toggle a feature flag
+      operationId: updateFeatureFlag
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, enabled]
+              properties:
+                name:
+                  type: string
+                enabled:
+                  type: boolean
+      responses:
+        "200":
+          description: Flag updated
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/actions/pending:
+    get:
+      tags: [admin]
+      summary: List pending multi-admin action proposals
+      operationId: getPendingActions
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: Pending actions
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/actions/{id}:
+    get:
+      tags: [admin]
+      summary: Get a specific action proposal
+      operationId: getPendingActionById
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Action detail
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /admin/actions/{id}/approve:
+    post:
+      tags: [admin]
+      summary: Co-sign (approve) a pending action proposal
+      operationId: approvePendingAction
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Threshold met — action executed
+        "202":
+          description: Signature recorded — more approvals needed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Duplicate signer
+        "410":
+          description: Action expired
+
+  /admin/webhooks/dead-letters:
+    get:
+      tags: [admin]
+      summary: List exhausted webhook deliveries
+      operationId: listDeadLetters
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+        - name: pageSize
+          in: query
+          schema:
+            type: integer
+            maximum: 100
+      responses:
+        "200":
+          description: Dead-letter list
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /admin/webhooks/{id}/replay:
+    post:
+      tags: [admin]
+      summary: Manually replay a dead-lettered webhook delivery
+      operationId: replayDeadLetter
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Replayed successfully
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Already replayed
+        "502":
+          description: Replay failed
+
+  # ── Health / utility (not under /api prefix) ──────────────────────────────
+  /version:
+    get:
+      tags: [admin]
+      summary: Get running service version and commit SHA
+      operationId: getVersion
+      responses:
+        "200":
+          description: Version info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: string
+                  commit:
+                    type: string
+
+  /health:
+    get:
+      tags: [admin]
+      summary: Liveness / dependency health check
+      operationId: health
+      responses:
+        "200":
+          description: Health status
+
+  /ready:
+    get:
+      tags: [admin]
+      summary: Readiness probe
+      operationId: ready
+      responses:
+        "200":
+          description: All dependencies ready
+        "503":
+          description: One or more dependencies unavailable

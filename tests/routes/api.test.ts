@@ -34,6 +34,9 @@ jest.mock('../../src/db', () => {
     queryEvents: jest.fn().mockReturnValue([]),
     queryPlayers: jest.fn().mockReturnValue([]),
     countPlayers: jest.fn().mockReturnValue(0),
+    searchPlayers: jest.fn().mockReturnValue({ data: [], nextCursor: null }),
+    countEventsFiltered: jest.fn().mockReturnValue(0),
+    getEventsPage: jest.fn().mockReturnValue([]),
     getPlayerById: jest.fn().mockImplementation((id) => {
       if (id === 'player_123') {
         return {
@@ -87,11 +90,27 @@ jest.mock('../../src/db', () => {
       auditRows = [];
       nextAuditId = 1;
     },
-    // src/app.ts's /health and /ready probes go through getDriver().
-    getDriver: jest.fn().mockReturnValue({
-      get: jest.fn().mockResolvedValue({ '?column?': 1 }),
-      run: jest.fn().mockResolvedValue({ changes: 1, lastId: 0 }),
-    }),
+    // src/app.ts's /health and /ready probes go through getDriver() but only
+    // care whether the call resolves, not what it resolves to. Meanwhile
+    // tokenBlocklist.ts's real (unmocked) getDriver()-based checkDb treats
+    // any truthy row as "revoked" — see src/services/tokenBlocklist.ts
+    // checkDb() — so `get` must resolve to `undefined` (no matching row) or
+    // every token in these tests would appear revoked and auth would fail.
+    getDriver: jest.fn(() => ({
+      run: () => ({ changes: 0, lastId: 0 }),
+      get: () => undefined,
+      all: () => [],
+      value: () => undefined,
+      exec: () => {},
+      transaction: (fn: (tx: unknown) => unknown) => fn({
+        run: () => ({ changes: 0, lastId: 0 }),
+        get: () => undefined,
+        all: () => [],
+        value: () => undefined,
+        exec: () => {},
+      }),
+      close: async () => {},
+    })),
   };
 });
 
@@ -102,6 +121,18 @@ jest.mock('../../src/services/indexer', () => ({
 
 jest.mock('../../src/services/webhooks', () => ({
   dispatchEventWebhook: jest.fn().mockResolvedValue(undefined),
+}));
+
+// Without this, GET /api/players/:playerId/milestones's unmocked call to the
+// real queryMilestones() makes a live network call to Soroban testnet for a
+// contract ID that doesn't actually exist there, which errors out as a 500
+// instead of exercising the route's own logic. Every sibling route test file
+// (e.g. tests/routes/compression.test.ts, tests/routes/playerPagination.test.ts)
+// mocks this module for the same reason.
+jest.mock('../../src/services/stellar', () => ({
+  stellarHealth: jest.fn().mockResolvedValue(true),
+  queryMilestones: jest.fn().mockResolvedValue([]),
+  updateProfile: jest.fn().mockResolvedValue(undefined),
 }));
 
 describe('GET /health', () => {

@@ -96,6 +96,53 @@ describe('validate-env runtime validation', () => {
       'Invalid CORS origin format: "invalid-origin-without-protocol". Origins must be "*" or start with http:// or https://'
     );
   });
+
+  it('should pass when PINATA_GATEWAY is a valid HTTPS URL', () => {
+    const env = {
+      NODE_ENV: 'development',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+      PINATA_GATEWAY: 'https://gateway.pinata.cloud',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toEqual([]);
+  });
+
+  it('should pass when PINATA_GATEWAY is unset', () => {
+    const env = {
+      NODE_ENV: 'development',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toEqual([]);
+  });
+
+  it('should report an error when PINATA_GATEWAY is HTTP instead of HTTPS', () => {
+    const env = {
+      NODE_ENV: 'development',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+      PINATA_GATEWAY: 'http://gateway.pinata.cloud',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toContain(
+      'PINATA_GATEWAY="http://gateway.pinata.cloud" is invalid. Must be a valid HTTPS URL.'
+    );
+  });
+
+  it('should report an error when PINATA_GATEWAY is not a valid URL', () => {
+    const env = {
+      NODE_ENV: 'development',
+      CONTRACT_ID: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4',
+      JWT_SECRET: 'test-secret',
+      PINATA_GATEWAY: 'not-a-url',
+    };
+    const errors = validateRuntimeEnv(env);
+    expect(errors).toContain(
+      'PINATA_GATEWAY="not-a-url" is invalid. Must be a valid HTTPS URL.'
+    );
+  });
 });
 
 describe('DB_DRIVER validation', () => {

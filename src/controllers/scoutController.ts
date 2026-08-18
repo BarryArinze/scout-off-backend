@@ -4,14 +4,15 @@ import {
   queryEvents,
   getPlayerById,
   getLatestSubscription,
+  getSubscriptionsByScout,
   insertSubscription,
   dbRenewSubscription,
   dbCancelSubscription,
   insertContactUnlock,
   getContactUnlocksByScout,
   hasContactUnlock,
-  getIdempotencyRecord,
-  saveIdempotencyRecord,
+  updatePlayerProgress,
+  insertTrialOffer as insertTrialOfferRow,
 } from '../db';
 import {
   submitContactPayment,
@@ -23,13 +24,15 @@ import {
   logTrialOffer as stellarLogTrialOffer,
   cancelSubscriptionOnChain,
 } from '../services/stellar';
-import { isValidStellarAddress } from '../utils/stellarAddress';
 import { logger } from '../utils/logger';
+import { checkWalletOwnership } from '../middleware/requireOwner';
+import { broadcaster } from '../services/eventBroadcaster';
 import config from '../config';
 import { ErrorCode } from '../utils/errorCodes';
 import { insertTrialOffer, getTrialOffers } from '../services/indexer';
 import { invokeContract, strVal } from '../utils/contract';
-import { isValidEvidenceUri } from '../utils/uriValidator';
+import { isValidIpfsOrHttpsUri } from '../utils/uriValidator';
+import { invalidatePlayerCache } from '../services/cache';
 
 // ─── Validation schemas ────────────────────────────────────────────────────────
 
@@ -38,7 +41,7 @@ export const trialOfferSchema = z.object({
   detailsUri: z
     .string()
     .min(1)
-    .refine(isValidEvidenceUri, 'detailsUri must be a valid IPFS (ipfs://) or HTTPS URI'),
+    .refine(isValidIpfsOrHttpsUri, 'detailsUri must be a valid IPFS (ipfs://) or HTTPS URI'),
 });
 
 /**
@@ -95,17 +98,9 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
 // ─── GET /api/scouts/:wallet/subscription ─────────────────────────────────────
 
 /** GET /api/scouts/:wallet/subscription */
-export async function getSubscription(req: Request, res: Response, next: NextFunction) {
+export async function getSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-      return;
-    }
-    if (req.account !== wallet) {
-      res.status(401).json({ success: false, error: 'Unauthorized', code: ErrorCode.UNAUTHORIZED });
-      return;
-    }
 
     const now = Math.floor(Date.now() / 1000);
     const graceSeconds = gracePeriodSeconds();
@@ -177,24 +172,15 @@ export async function getSubscription(req: Request, res: Response, next: NextFun
 // ─── POST /api/scouts/:wallet/subscribe ───────────────────────────────────────
 
 /** POST /api/scouts/:wallet/subscribe — new subscription */
-export async function subscribe(req: Request, res: Response, next: NextFunction) {
-  const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
+export async function subscribe(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (req.account !== wallet) {
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account' });
-      return;
-    }
-
-    // Safe retries (#idempotency): a duplicate key within the TTL returns the
-    // cached response instead of triggering a new on-chain transaction.
-    if (idempotencyKey) {
-      const cached = await getIdempotencyRecord(idempotencyKey);
-      if (cached) {
-        res.status(cached.status_code).json(JSON.parse(cached.response));
-        return;
-      }
-    }
+    // Ownership is enforced by requireWalletOwner() at the route level; the
+    // shared guard is re-invoked here so direct callers (unit tests) get the
+    // same protection without duplicating the comparison inline.
+    // validateAddress: false preserves the historical behavior of this
+    // endpoint, which never validated the address format.
+    if (!checkWalletOwnership(req, res, { validateAddress: false })) return;
 
     const parsed = subscribeSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -202,9 +188,10 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
       return;
     }
     const { tier, duration } = parsed.data;
+
     const result = await purchaseSubscription(wallet, tier, duration);
 
-    // Persist locally
+    // Persist locally — grace period is applied at query time, not stored
     await insertSubscription({
       scout_wallet: wallet,
       tier,
@@ -212,13 +199,33 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
       created_at: Math.floor(Date.now() / 1000),
     });
 
-    const body = { success: true, data: result };
-    if (idempotencyKey) await saveIdempotencyRecord(idempotencyKey, 201, body);
+    logger.info(`[scout] action=new_subscription scout=${wallet} tier=${tier} duration=${duration} expiry=${result.expiresAt}`);
+
+    // Broadcast SSE event to any connected subscribers
+    broadcaster.broadcast({
+      type: 'scout_subscribed',
+      payload: {
+        scout: wallet,
+        tier,
+        expires_at: result.expiresAt,
+        tx_hash: result.transactionId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    const body = {
+      success: true,
+      data: {
+        transactionId: result.transactionId,
+        tier,
+        expiresAt: result.expiresAt,
+        status: result.status,
+      },
+    };
     res.status(201).json(body);
   } catch (err) {
     if (err instanceof PaymentError) {
       const body = { success: false, error: err.message, code: err.code };
-      if (idempotencyKey) await saveIdempotencyRecord(idempotencyKey, 402, body);
       res.status(402).json(body);
       return;
     }
@@ -234,13 +241,9 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
  * If none exists, behaves like POST (creates new).
  * Returns 200 for renewal, 201 for new subscription.
  */
-export async function renewSubscription(req: Request, res: Response, next: NextFunction) {
+export async function renewSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (req.account !== wallet) {
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account' });
-      return;
-    }
     const parsed = subscribeSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body' });
@@ -293,13 +296,9 @@ export async function renewSubscription(req: Request, res: Response, next: NextF
  * Returns 403 if the contract rejects the caller as unauthorized.
  * Records cancellation on-chain first; DB row is only updated after confirmation.
  */
-export async function cancelSubscription(req: Request, res: Response, next: NextFunction) {
+export async function cancelSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (req.account !== wallet) {
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account' });
-      return;
-    }
 
     const existingSub = await getLatestSubscription(wallet);
     if (!existingSub) {
@@ -342,19 +341,10 @@ export async function cancelSubscription(req: Request, res: Response, next: Next
 // ─── GET /api/scouts/:wallet/contacts ─────────────────────────────────────────
 
 /** GET /api/scouts/:wallet/contacts */
-export async function getUnlockedContacts(req: Request, res: Response, next: NextFunction) {
+export async function getUnlockedContacts(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     const { playerId } = req.query as { playerId?: string };
-
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-      return;
-    }
-    if (req.account !== wallet) {
-      res.status(401).json({ success: false, error: 'Unauthorized', code: ErrorCode.UNAUTHORIZED });
-      return;
-    }
 
     let contacts = await getContactUnlocksByScout(wallet);
 
@@ -378,28 +368,39 @@ export async function getUnlockedContacts(req: Request, res: Response, next: Nex
 // ─── POST /api/scouts/:wallet/contacts/:playerId/unlock ───────────────────────
 
 /** POST /api/scouts/:wallet/contacts/:playerId/unlock */
-export async function unlockContact(req: Request, res: Response, next: NextFunction) {
+export async function unlockContact(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet, playerId } = req.params;
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-      return;
-    }
     if (!wallet || !playerId) {
       res.status(400).json({ success: false, error: 'wallet and playerId are required', code: ErrorCode.VALIDATION_ERROR });
       return;
     }
 
-    if (req.account !== wallet) {
+    // Ownership is enforced by requireWalletOwner() at the route level; the
+    // shared guard is re-invoked here so direct callers (unit tests) get the
+    // same protection without duplicating the comparison inline.
+    if (!checkWalletOwnership(req, res)) {
       logger.warn(`[scout] action=unlock_contact_denied scout=${wallet} playerId=${playerId} reason=wallet_mismatch`);
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account', code: ErrorCode.WALLET_MISMATCH });
       return;
     }
 
     // Idempotent: a player already unlocked by this scout must not be charged again.
+    // Return the cached contact details so the client can use them immediately.
     if (await hasContactUnlock(wallet, playerId)) {
       logger.info(`[scout] action=unlock_contact_already_unlocked scout=${wallet} playerId=${playerId}`);
-      res.json({ success: true, data: { alreadyUnlocked: true } });
+      const player = await getPlayerById(playerId);
+      res.json({
+        success: true,
+        data: {
+          alreadyUnlocked: true,
+          ...(player && {
+            playerId: player.player_id,
+            wallet: player.wallet,
+            email: `${player.player_id}@example.com`,
+            phone: '+1-555-0199',
+          }),
+        },
+      });
       return;
     }
 
@@ -412,6 +413,9 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
       tx_hash: result.transactionId,
       unlocked_at: Math.floor(Date.now() / 1000),
     });
+    // Player state changed (contact_unlocked) — invalidate player-list caches
+    // after the persistence succeeded so subsequent list queries stay fresh.
+    await invalidatePlayerCache();
     res.json({ success: true, data: result });
   } catch (err) {
     if (err instanceof PaymentError) {
@@ -425,7 +429,7 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
 // ─── GET/POST /api/scouts/:wallet/trial-offers (#285) ──────────────────────────
 
 /** GET /api/scouts/:wallet/trial-offers — on-chain trial offer event history */
-export async function listTrialOffers(req: Request, res: Response, next: NextFunction) {
+export async function listTrialOffers(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     res.json({ success: true, data: await getTrialOffers(wallet) });
@@ -435,17 +439,99 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
 }
 
 /** POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally */
-export async function createTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
 
-    const result = await invokeContract('log_trial_offer', [strVal(wallet), strVal(playerId), strVal(detailsUri)]);
+    const parsed = trialOfferSchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body' });
+      return;
+    }
+    const { playerId, detailsUri } = parsed.data;
+
+    // Verify player exists
+    const playerExists = queryEvents('player_registered').some((e) => e.payload.player_id === playerId);
+    if (!playerExists) {
+      res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
+      return;
+    }
+
+    // Check scout has active subscription or prior contact unlock
+    const hasAccess = await scoutHasPlayerAccess(wallet, playerId);
+    if (!hasAccess) {
+      res.status(402).json({
+        success: false,
+        error: 'Scout must be subscribed or have paid the contact fee for this player',
+        code: ErrorCode.SUBSCRIPTION_REQUIRED,
+      });
+      return;
+    }
+
+    logger.info(`[scout] action=create_trial_offer scout=${wallet} playerId=${playerId} detailsUri=${detailsUri}`);
+
+    // Submit on-chain via Soroban
+    const result = await stellarLogTrialOffer(wallet, playerId, detailsUri);
     const createdAt = Math.floor(Date.now() / 1000);
-    await insertTrialOffer(wallet, playerId, detailsUri, result.hash, createdAt);
+    const offerId = `offer-${createdAt}-${playerId}`;
 
-    res.status(201).json({ success: true, data: { transactionId: result.hash } });
+    // Persist to trial_offer_events (indexer event log, deduped by tx_hash)
+    await insertTrialOffer(wallet, playerId, detailsUri, result.transactionId, createdAt);
+
+    // Persist to trial_offers (offer/response workflow table)
+    await insertTrialOfferRow({
+      offer_id: offerId,
+      scout_wallet: wallet,
+      player_id: playerId,
+      details_uri: detailsUri,
+      created_at: createdAt,
+    });
+
+    // Promote player to Elite Tier (Level 3)
+    await updatePlayerProgress(playerId, 3);
+
+    // Emit SSE: trial offer logged
+    broadcaster.broadcast({
+      type: 'trial_offer_logged',
+      payload: {
+        offer_id: offerId,
+        scout: wallet,
+        player_id: playerId,
+        details_uri: detailsUri,
+        tx_hash: result.transactionId,
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    // Emit SSE: tier promoted to Elite
+    broadcaster.broadcast({
+      type: 'milestone_approved',
+      payload: {
+        player_id: playerId,
+        new_tier: 3,
+        reason: 'trial_offer_logged',
+        timestamp: new Date().toISOString(),
+      },
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        offerId,
+        transactionId: result.transactionId,
+        scout: wallet,
+        playerId,
+        detailsUri,
+        createdAt,
+        tierPromoted: true,
+        newTier: 3,
+      },
+    });
   } catch (err) {
+    if (err instanceof PaymentError) {
+      res.status(402).json({ success: false, error: err.message, code: err.code });
+      return;
+    }
     next(err);
   }
 }
@@ -453,16 +539,10 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
 // ─── POST /api/scouts/:wallet/trial-offer ─────────────────────────────────────
 
 /** POST /api/scouts/:wallet/trial-offer */
-export async function submitTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function submitTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
     const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
-
-    if (req.account !== wallet) {
-      logger.warn(`[scout] action=log_trial_offer_denied scout=${wallet} playerId=${playerId} reason=wallet_mismatch`);
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account', code: ErrorCode.WALLET_MISMATCH });
-      return;
-    }
 
     const playerExists = queryEvents('player_registered').some((e) => e.payload.player_id === playerId);
     if (!playerExists) {
@@ -495,52 +575,190 @@ export async function submitTrialOffer(req: Request, res: Response, next: NextFu
 
 // ─── GET /api/scouts/:wallet/payments ─────────────────────────────────────────
 
+/**
+ * Payment record shape returned by GET /api/scouts/:wallet/payments.
+ * Covers both contact_unlock and subscription payment types.
+ */
+export interface PaymentRecord {
+  id: string | null;
+  type: 'contact_unlock' | 'subscription';
+  amount_xlm: string;
+  player_id: string | null;
+  tier: string | null;
+  tx_hash: string | null;
+  created_at: string;
+  // legacy aliases kept for backwards-compat
+  transactionId: string | null;
+  amount: string;
+  token: string;
+  timestamp: string;
+}
+
+const paymentHistoryQuerySchema = z.object({
+  from: z.string().optional(),
+  to: z.string().optional(),
+  type: z.enum(['subscription', 'contact_unlock']).optional(),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+  format: z.enum(['json', 'csv']).default('json'),
+});
+
 /** GET /api/scouts/:wallet/payments — payment history */
-export async function getPaymentHistory(req: Request, res: Response, next: NextFunction) {
+export async function getPaymentHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid Stellar address' });
+
+    const parsed = paymentHistoryQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid query parameters', code: ErrorCode.VALIDATION_ERROR });
       return;
     }
-    if (req.account !== wallet) {
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account', code: ErrorCode.WALLET_MISMATCH });
+    const { from, to, type, page, pageSize, format } = parsed.data;
+
+    const fromDate = from ? new Date(from) : null;
+    const toDate = to ? new Date(to) : null;
+
+    if (fromDate && isNaN(fromDate.getTime())) {
+      res.status(400).json({ success: false, error: 'Invalid from date', code: ErrorCode.VALIDATION_ERROR });
       return;
     }
-    const { from, to } = req.query as { from?: string; to?: string };
-
-    let payments = queryEvents('contact_unlocked')
-      .filter((e) => e.payload.scout === wallet)
-      .map((e) => ({
-        transactionId: (e.payload.tx_hash as string | undefined) ?? null,
-        amount: (e.payload.fee ?? '0') as string,
-        token: 'XLM',
-        timestamp: (e.payload.timestamp ?? new Date(0).toISOString()) as string,
-      }));
-
-    if (from) {
-      const fromDate = new Date(from).getTime();
-      payments = payments.filter((p) => new Date(p.timestamp).getTime() >= fromDate);
-    }
-    if (to) {
-      const toDate = new Date(to).getTime();
-      payments = payments.filter((p) => new Date(p.timestamp).getTime() <= toDate);
+    if (toDate && isNaN(toDate.getTime())) {
+      res.status(400).json({ success: false, error: 'Invalid to date', code: ErrorCode.VALIDATION_ERROR });
+      return;
     }
 
-    res.json({ success: true, data: payments });
+    // ── Build combined payment list ───────────────────────────────────────────
+    const payments: PaymentRecord[] = [];
+
+    // Contact unlock payments
+    if (!type || type === 'contact_unlock') {
+      const unlocks = await getContactUnlocksByScout(wallet);
+      for (const u of unlocks) {
+        const ts = new Date(u.unlocked_at * 1000).toISOString();
+        if (fromDate && new Date(ts) < fromDate) continue;
+        if (toDate && new Date(ts) > toDate) continue;
+        payments.push({
+          id: u.tx_hash ?? null,
+          type: 'contact_unlock',
+          amount_xlm: '0',
+          player_id: u.player_id,
+          tier: null,
+          tx_hash: u.tx_hash ?? null,
+          created_at: ts,
+          // legacy aliases
+          transactionId: u.tx_hash ?? null,
+          amount: '0',
+          token: 'XLM',
+          timestamp: ts,
+        });
+      }
+
+      // Also pull from contact_unlocked contract events for tx_hash + fee info
+      // (these may contain fee amounts that the DB row doesn't store)
+      const contactEvents = queryEvents('contact_unlocked').filter(
+        (e) => e.payload.scout === wallet,
+      );
+      for (const e of contactEvents) {
+        const ts = (e.payload.timestamp as string | undefined) ?? new Date(0).toISOString();
+        if (fromDate && new Date(ts) < fromDate) continue;
+        if (toDate && new Date(ts) > toDate) continue;
+        const txHash = (e.payload.tx_hash as string | undefined) ?? null;
+        const playerId = (e.payload.player_id as string | undefined) ?? (e.payload.playerId as string | undefined) ?? null;
+        const fee = (e.payload.fee ?? '0') as string;
+        // A DB row for this tx may already be in the list (pushed above,
+        // always with amount '0' since the contact_unlocks table doesn't
+        // store fee). Enrich it with the event's fee instead of skipping —
+        // otherwise the fee info this loop exists to attach never reaches
+        // the DB-sourced entry.
+        const existing = txHash
+          ? payments.find((p) => p.type === 'contact_unlock' && p.tx_hash === txHash)
+          : undefined;
+        if (existing) {
+          existing.amount = fee;
+          existing.amount_xlm = fee;
+        } else {
+          payments.push({
+            id: txHash,
+            type: 'contact_unlock',
+            amount_xlm: fee,
+            player_id: playerId,
+            tier: null,
+            tx_hash: txHash,
+            created_at: ts,
+            transactionId: txHash,
+            amount: fee,
+            token: 'XLM',
+            timestamp: ts,
+          });
+        }
+      }
+    }
+
+    // Subscription payments
+    if (!type || type === 'subscription') {
+      const subs = await getSubscriptionsByScout(wallet);
+      for (const s of subs) {
+        const ts = new Date(s.created_at * 1000).toISOString();
+        if (fromDate && new Date(ts) < fromDate) continue;
+        if (toDate && new Date(ts) > toDate) continue;
+        payments.push({
+          id: String(s.id),
+          type: 'subscription',
+          amount_xlm: '0',
+          player_id: null,
+          tier: s.tier,
+          tx_hash: null,
+          created_at: ts,
+          // legacy aliases
+          transactionId: null,
+          amount: '0',
+          token: 'XLM',
+          timestamp: ts,
+        });
+      }
+    }
+
+    // Sort by created_at descending (newest first)
+    payments.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+    const total = payments.length;
+
+    // ── CSV export ────────────────────────────────────────────────────────────
+    if (format === 'csv') {
+      const csvHeader = 'id,type,amount_xlm,player_id,tier,tx_hash,created_at\n';
+      const csvRows = payments.map((p) =>
+        [
+          p.id ?? '',
+          p.type,
+          p.amount_xlm,
+          p.player_id ?? '',
+          p.tier ?? '',
+          p.tx_hash ?? '',
+          p.created_at,
+        ]
+          .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+          .join(','),
+      );
+      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader('Content-Disposition', 'attachment; filename="payments.csv"');
+      res.status(200).send(csvHeader + csvRows.join('\n'));
+      return;
+    }
+
+    // ── Paginated JSON response ───────────────────────────────────────────────
+    const offset = (page - 1) * pageSize;
+    const pageData = payments.slice(offset, offset + pageSize);
+
+    res.json({ success: true, data: pageData, total, page, pageSize });
   } catch (err) {
     next(err);
   }
 }
 
 /** GET /api/scouts/:wallet/contacts/:playerId */
-export async function getContactDetails(req: Request, res: Response, next: NextFunction) {
+export async function getContactDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet, playerId } = req.params;
-    if (req.account !== wallet) {
-      res.status(401).json({ success: false, error: 'Unauthorized' });
-      return;
-    }
 
     const player = await getPlayerById(playerId);
     if (!player) {

@@ -9,9 +9,42 @@ import {
   Transaction,
 } from '@stellar/stellar-sdk';
 import jwt from 'jsonwebtoken';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 
-const SERVER_KEYPAIR = Keypair.random(); // ephemeral; use a persisted key in production
+const tracer = trace.getTracer('scout-off-backend');
+
+/**
+ * Resolve the SEP-10 server signing keypair.
+ *
+ * Priority:
+ *   1. `config.sep10ServerSecret` — the persisted secret loaded from the
+ *      SEP10_SERVER_SECRET environment variable.  All backend instances in a
+ *      horizontally-scaled deployment **must** share this value so that a
+ *      challenge issued by one instance can be verified by any other.
+ *   2. Ephemeral fallback — generated once at module load when the secret is
+ *      absent.  This is intentionally tolerated only in development and test
+ *      environments (production and staging emit a warning / error at config
+ *      load time before reaching this point).  The fallback is acceptable for
+ *      single-process local dev but will cause cross-instance failures under a
+ *      load balancer, which is exactly the scenario SEP10_SERVER_SECRET solves.
+ */
+function resolveServerKeypair(): Keypair {
+  if (config.sep10ServerSecret) {
+    try {
+      return Keypair.fromSecret(config.sep10ServerSecret);
+    } catch (err) {
+      throw new Error(
+        `SEP10_SERVER_SECRET is set but is not a valid Stellar secret key (strkey starting with 'S'). ` +
+        `Generate a valid keypair with \`stellar keys generate\`. Original error: ${(err as Error).message}`,
+      );
+    }
+  }
+  // Ephemeral fallback for development / test only.
+  return Keypair.random();
+}
+
+const SERVER_KEYPAIR = resolveServerKeypair();
 const CHALLENGE_TTL_SECONDS = 300; // 5 min to sign the challenge
 const TOKEN_TTL_SECONDS = 86400;   // 24 h JWT validity
 
@@ -28,6 +61,8 @@ export function getServerKeypair(): Keypair {
  * The client must sign it with their Stellar keypair and return the XDR.
  */
 export function buildChallenge(accountId: string): string {
+  const span = tracer.startSpan('sep10.buildChallenge', { attributes: { 'sep10.account': accountId } });
+  try {
   const serverAccount = new Account(SERVER_KEYPAIR.publicKey(), '-1');
   const tx = new TransactionBuilder(serverAccount, {
     fee: BASE_FEE,
@@ -46,6 +81,13 @@ export function buildChallenge(accountId: string): string {
 
   tx.sign(SERVER_KEYPAIR);
   return tx.toXDR();
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+  }
 }
 
 /**
@@ -81,6 +123,8 @@ export function extractAccount(xdr: string): string | null {
  * @throws Error if challenge structure is invalid or signature verification fails
  */
 export function verifyAndIssueToken(xdr: string, role?: string): { token: string; account: string } {
+  const span = tracer.startSpan('sep10.verifyAndIssueToken');
+  try {
   const network =
     config.network === 'mainnet' ? Networks.PUBLIC : Networks.TESTNET;
 
@@ -149,10 +193,19 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
   });
   if (!clientSigned) throw new Error('Invalid challenge signature');
 
-  // Issue JWT with client account and role
-  const token = jwt.sign({ sub: clientAccountId, role: role ?? 'player' }, config.jwtSecret, {
+  // Issue JWT with client account, role, and a unique JTI for revocation support
+  const jti = crypto.randomUUID();
+  const token = jwt.sign({ sub: clientAccountId, role: role ?? 'player', jti }, config.jwtSecret, {
     expiresIn: TOKEN_TTL_SECONDS,
   });
 
+  span.setAttribute('sep10.account', clientAccountId);
   return { token, account: clientAccountId };
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+  }
 }

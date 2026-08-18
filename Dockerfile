@@ -1,11 +1,17 @@
 # ─── Stage 1: Build ──────────────────────────────────────────────────────────
 FROM node:20-alpine AS builder
 
+# Accept the Git commit SHA at build time (defaults to "unknown")
+ARG GIT_COMMIT=unknown
+
 WORKDIR /app
 
-# Install dependencies first (better layer caching)
+# Install dependencies first (better layer caching).
+# --ignore-scripts: the `prepare` script installs git hooks via husky, which
+# is meaningless (and, once dev deps are pruned below, unavailable) inside a
+# container that never has a .git directory.
 COPY package*.json ./
-RUN npm ci
+RUN npm ci --ignore-scripts
 
 # Copy source and compile TypeScript → dist/
 COPY tsconfig.json ./
@@ -13,10 +19,14 @@ COPY src ./src
 RUN npm run build
 
 # Prune dev dependencies so only production deps are copied to runtime stage
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --ignore-scripts
 
 # ─── Stage 2: Runtime ────────────────────────────────────────────────────────
 FROM node:20-alpine AS runtime
+
+# Re-declare ARG so the value is available in this stage, then bake it into
+# the image as an ENV so the running container can read it via process.env.
+ARG GIT_COMMIT=unknown
 
 # Non-root user for least-privilege runtime
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
@@ -43,7 +53,8 @@ EXPOSE 4000
 # Set default DB path to the /data volume mount
 ENV DB_PATH=/data/scout-off.db \
     NODE_ENV=production \
-    PORT=4000
+    PORT=4000 \
+    GIT_COMMIT=$GIT_COMMIT
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD wget -qO- http://localhost:4000/health/liveness || exit 1

@@ -117,3 +117,111 @@ describe('INDEXER_BACKFILL_FROM_LEDGER guard (src/index.ts)', () => {
     expect(fetchLastIndexedLedger()).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Issue #884: backfill event idempotency
+// ---------------------------------------------------------------------------
+//
+// The events table has a UNIQUE constraint on tx_hash (db/001_initial.sql).
+// The indexer inserts with INSERT OR IGNORE, so re-processing the same ledger
+// range must never create duplicate rows.
+// ---------------------------------------------------------------------------
+
+describe('backfill event idempotency (#884)', () => {
+  /** Insert a batch of synthetic events for ledgers [startLedger, endLedger] (inclusive).
+   *  Each event gets a deterministic tx_hash so the same range always produces
+   *  the same hashes — enabling duplicate detection. */
+  function insertEventsForRange(startLedger: number, endLedger: number): void {
+    const db = getDb();
+    const insert = db.prepare(
+      `INSERT OR IGNORE INTO events (type, ledger, tx_hash, payload)
+       VALUES (?, ?, ?, ?)`
+    );
+    const insertMany = db.transaction(
+      (start: number, end: number) => {
+        for (let ledger = start; ledger <= end; ledger++) {
+          insert.run(
+            'player_registered',
+            ledger,
+            `tx-${ledger}-backfill-test`,
+            JSON.stringify({ player_id: `p-${ledger}` })
+          );
+        }
+      }
+    );
+    insertMany(startLedger, endLedger);
+  }
+
+  function countEvents(): number {
+    const row = getDb()
+      .prepare('SELECT COUNT(*) AS n FROM events')
+      .get() as { n: number };
+    return row.n;
+  }
+
+  function countByTxHash(txHash: string): number {
+    const row = getDb()
+      .prepare('SELECT COUNT(*) AS n FROM events WHERE tx_hash = ?')
+      .get(txHash) as { n: number };
+    return row.n;
+  }
+
+  beforeEach(() => {
+    const db = getDb();
+    db.prepare('DELETE FROM events').run();
+    db.prepare('DELETE FROM indexer_state').run();
+  });
+
+  // ── Test 1 ────────────────────────────────────────────────────────────────
+  it('first backfill run inserts N events for ledger range 1–100', () => {
+    insertEventsForRange(1, 100);
+    expect(countEvents()).toBe(100);
+  });
+
+  // ── Test 2 ────────────────────────────────────────────────────────────────
+  it('second backfill run for the same range 1–100 does not increase event count', () => {
+    // First run
+    insertEventsForRange(1, 100);
+    const afterFirstRun = countEvents();
+    expect(afterFirstRun).toBe(100);
+
+    // Second run — identical range, identical tx_hashes
+    insertEventsForRange(1, 100);
+    const afterSecondRun = countEvents();
+
+    // Count must stay exactly the same
+    expect(afterSecondRun).toBe(afterFirstRun);
+  });
+
+  // ── Test 3 ────────────────────────────────────────────────────────────────
+  it('extended backfill range 1–200 inserts only the new events (101–200)', () => {
+    // Seed ledgers 1–100 first
+    insertEventsForRange(1, 100);
+    const afterFirst = countEvents();
+    expect(afterFirst).toBe(100);
+
+    // Now "backfill" the full range 1–200 (simulates replaying from ledger 1)
+    insertEventsForRange(1, 200);
+    const afterExtended = countEvents();
+
+    // Only 100 new rows should have been added (101–200)
+    expect(afterExtended).toBe(afterFirst + 100);
+    expect(afterExtended).toBe(200);
+  });
+
+  // ── Test 4 ────────────────────────────────────────────────────────────────
+  it('UNIQUE constraint on tx_hash is responsible for deduplication — each tx_hash appears exactly once', () => {
+    // Insert twice for the same range
+    insertEventsForRange(1, 50);
+    insertEventsForRange(1, 50);
+
+    // Every synthetic tx_hash in the range should appear exactly once
+    for (let ledger = 1; ledger <= 50; ledger++) {
+      const txHash = `tx-${ledger}-backfill-test`;
+      expect(countByTxHash(txHash)).toBe(1);
+    }
+
+    // Total row count must equal the range size, not double it
+    expect(countEvents()).toBe(50);
+  });
+});

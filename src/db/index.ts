@@ -1,5 +1,6 @@
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { EventRecord, ContractEventType } from '../types';
 import { runMigrations } from './migrate';
@@ -9,18 +10,66 @@ import { encryptWebhookSecret, decryptWebhookSecret } from '../utils/webhookSecr
 import { DbDriver } from './driver';
 import { SqliteDriver } from './sqlite-driver';
 import { PostgresDriver } from './postgres-driver';
+import { observeDbQueryDuration } from '../middleware/metrics';
+
+const dbTracer = trace.getTracer('scout-off-backend');
+
+/**
+ * Thin wrapper that creates a DB span, runs fn(), sets ipfs.cid on success,
+ * records exception and ERROR status on throw. Zero-cost when OTEL is not
+ * configured (noop tracer).
+ */
+function withDbSpan<T>(name: string, sql: string, fn: () => T): T {
+  const span = dbTracer.startSpan(`db.${name}`, {
+    attributes: { 'db.system': 'sqlite', 'db.statement': sql.slice(0, 200) },
+  });
+  try {
+    const result = fn();
+    span.end();
+    return result;
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    span.end();
+    throw err;
+  }
+}
 
 function slowQueryThresholdMs(): number {
   return parseInt(process.env.SLOW_QUERY_THRESHOLD_MS ?? '50', 10);
 }
 
-/** Runs fn(), logs a warn if it takes longer than SLOW_QUERY_THRESHOLD_MS. */
+/**
+ * Runs fn(), logs a structured warning if it takes longer than
+ * SLOW_QUERY_THRESHOLD_MS.
+ *
+ * Structured log fields:
+ *  - query_name:  the SQL statement (used as a human-readable identifier)
+ *  - duration_ms: elapsed time in milliseconds
+ *  - row_count:   number of rows returned (arrays) or affected (RunResult);
+ *                 -1 when the result type carries no row count
+ */
 export function timedQuery<T>(sql: string, fn: () => T): T {
   const start = Date.now();
   const result = fn();
-  const duration = Date.now() - start;
-  if (duration >= slowQueryThresholdMs()) {
-    logger.warn(`[db] slow query ${duration}ms: ${sql}`);
+  const duration_ms = Date.now() - start;
+  if (duration_ms >= slowQueryThresholdMs()) {
+    // Derive a best-effort row count from the return value.
+    let row_count = -1;
+    if (Array.isArray(result)) {
+      row_count = result.length;
+    } else if (
+      result !== null &&
+      typeof result === 'object' &&
+      'changes' in (result as object) &&
+      typeof (result as unknown as { changes: unknown }).changes === 'number'
+    ) {
+      row_count = (result as unknown as { changes: number }).changes;
+    } else if (result !== null && result !== undefined && !Array.isArray(result) && typeof result !== 'object') {
+      // scalar (number, boolean, string) — treat as 1 row
+      row_count = 1;
+    }
+    logger.warn({ query_name: sql, duration_ms, row_count });
   }
   return result;
 }
@@ -79,10 +128,12 @@ export async function initDb(): Promise<void> {
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         type       TEXT NOT NULL,
         ledger     INTEGER NOT NULL,
+        ledger_hash TEXT,
         tx_hash    TEXT NOT NULL UNIQUE,
         payload    TEXT NOT NULL,
         created_at INTEGER
       );
+      CREATE INDEX IF NOT EXISTS idx_events_ledger ON events (ledger);
       CREATE INDEX IF NOT EXISTS idx_events_type_ledger ON events (type, ledger);
       CREATE TABLE IF NOT EXISTS indexer_state (
         key   TEXT PRIMARY KEY,
@@ -95,11 +146,13 @@ export async function initDb(): Promise<void> {
         region         TEXT,
         metadata_uri   TEXT,
         progress_level INTEGER DEFAULT 0,
-        created_at     INTEGER
+        created_at     INTEGER,
+        registered_at  INTEGER DEFAULT 0
       );
-      CREATE INDEX IF NOT EXISTS idx_players_region   ON players (region);
-      CREATE INDEX IF NOT EXISTS idx_players_position ON players (position);
-      CREATE INDEX IF NOT EXISTS idx_players_tier     ON players (progress_level);
+      CREATE INDEX IF NOT EXISTS idx_players_region        ON players (region);
+      CREATE INDEX IF NOT EXISTS idx_players_position      ON players (position);
+      CREATE INDEX IF NOT EXISTS idx_players_tier          ON players (progress_level);
+      CREATE INDEX IF NOT EXISTS idx_players_registered_at ON players (registered_at);
       CREATE TABLE IF NOT EXISTS validator_stats (
         wallet             TEXT PRIMARY KEY,
         milestones_approved INTEGER DEFAULT 0,
@@ -185,6 +238,7 @@ interface EventRow {
   type: string;
   payload: string;
   created_at: number | null;
+  ledger_hash: string | null;
 }
 
 export interface GetEventsOptions {
@@ -228,6 +282,14 @@ export function queryEvents(
 /** @deprecated Use queryEvents instead. Will be removed in next release. */
 export const getEvents = queryEvents;
 
+export function rollbackEventsFromLedger(ledger: number): void {
+  const db = getDb();
+  // Delete pending milestones associated with these events (since they might be re-indexed)
+  // Actually, wait, it's safer to just let the indexer re-insert, but pending_milestones has a unique milestone_id so INSERT OR IGNORE will handle it.
+  // We'll delete events from the specified ledger forwards.
+  db.prepare('DELETE FROM events WHERE ledger >= ?').run(ledger);
+}
+
 export function getEventsCount(type?: ContractEventType): number {
   const db = getDb();
   const sql = type
@@ -252,6 +314,37 @@ export interface EventExportRow {
   ledger: number;
   createdAt: number | null;
   payload: Record<string, unknown>;
+}
+
+/**
+ * Count indexed events at the SQL level, filtered by type and/or created_at range.
+ * Used to populate the `total` field in paginated event responses without loading
+ * all matching rows into memory.
+ */
+export function countEventsFiltered(filter: EventsPageFilter): number {
+  const db = getDb();
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (filter.type) {
+    clauses.push('type = ?');
+    params.push(filter.type);
+  }
+  if (filter.startDate) {
+    clauses.push('created_at >= ?');
+    params.push(filter.startDate.getTime());
+  }
+  if (filter.endDate) {
+    clauses.push('created_at <= ?');
+    params.push(filter.endDate.getTime());
+  }
+
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const sql = 'SELECT COUNT(*) AS count FROM events ' + where;
+  const row = timedQuery(sql, () =>
+    db.prepare(sql).get(...(params as unknown[])) as { count: number } | undefined,
+  );
+  return row?.count ?? 0;
 }
 
 /**
@@ -282,8 +375,8 @@ export function getEventsPage(filter: EventsPageFilter, limit: number, offset: n
     params.push(filter.endDate.getTime());
   }
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const sql = `SELECT type, ledger, payload, created_at FROM events ${where} ORDER BY ledger ASC, id ASC LIMIT ? OFFSET ?`;
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const sql = 'SELECT type, ledger, payload, created_at FROM events ' + where + ' ORDER BY ledger ASC, id ASC LIMIT ? OFFSET ?';
   params.push(limit, offset);
 
   const rows = timedQuery(sql, () => db.prepare(sql).all(...(params as unknown[]))) as Array<{
@@ -328,8 +421,8 @@ export function* getEventsIterable(filter: EventsPageFilter): Generator<EventExp
     params.push(filter.endDate.getTime());
   }
 
-  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
-  const sql = `SELECT type, ledger, payload, created_at FROM events ${where} ORDER BY ledger ASC, id ASC`;
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  const sql = 'SELECT type, ledger, payload, created_at FROM events ' + where + ' ORDER BY ledger ASC, id ASC';
 
   const stmt = db.prepare(sql);
   const iterator = stmt.iterate(...(params as unknown[])) as IterableIterator<{
@@ -359,7 +452,12 @@ export interface PlayerRow {
   metadata_uri: string | null;
   progress_level: number;
   created_at: number | null;
+  registered_at: number;
   is_active: number;
+}
+
+export interface ScoredPlayerRow extends PlayerRow {
+  search_score: number;
 }
 
 export interface QueryPlayersOptions {
@@ -372,6 +470,7 @@ export interface QueryPlayersOptions {
 }
 
 export interface PlayerProfileHistoryRow {
+  id: number;
   metadata_uri: string;
   changed_at: number;
   tx_hash: string;
@@ -393,11 +492,29 @@ export async function insertPlayerProfileHistory(p: {
 export async function getPlayerProfileHistory(
   playerId: string,
 ): Promise<PlayerProfileHistoryRow[]> {
-  const sql = `SELECT metadata_uri, changed_at, tx_hash
+  const sql = `SELECT id, metadata_uri, changed_at, tx_hash
        FROM player_profile_history
        WHERE player_id = ?
        ORDER BY changed_at DESC`;
   return timedQueryAsync(sql, () => getDriver().all<PlayerProfileHistoryRow>(sql, [playerId]));
+}
+
+/**
+ * Returns all history rows for a player ordered oldest-first (ASC), with a
+ * 1-based `version` number assigned by insertion order. The version number is
+ * derived from the row's position in the ascending sequence so it is stable
+ * even after rows are inserted concurrently.
+ */
+export async function getPlayerProfileHistoryVersioned(
+  playerId: string,
+): Promise<Array<PlayerProfileHistoryRow & { version: number }>> {
+  const sql = `SELECT id, metadata_uri, changed_at, tx_hash
+       FROM player_profile_history
+       WHERE player_id = ?
+       ORDER BY id ASC`;
+  const rows = await timedQueryAsync(sql, () => getDriver().all<PlayerProfileHistoryRow>(sql, [playerId]));
+
+  return rows.map((row, idx) => ({ ...row, version: idx + 1 }));
 }
 
 export async function insertOrUpdatePlayer(p: {
@@ -407,16 +524,17 @@ export async function insertOrUpdatePlayer(p: {
   region?: string;
   metadata_uri?: string;
   created_at?: number;
+  registered_at?: number;
 }): Promise<void> {
-  const sql = `INSERT INTO players (player_id, wallet, position, region, metadata_uri, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+  const sql = `INSERT INTO players (player_id, wallet, position, region, metadata_uri, created_at, registered_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(player_id) DO UPDATE SET
          wallet       = excluded.wallet,
          position     = excluded.position,
          region       = excluded.region,
          metadata_uri = excluded.metadata_uri`;
   await timedQueryAsync(sql, () =>
-    getDriver().run(sql, [p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null])
+    getDriver().run(sql, [p.player_id, p.wallet, p.position ?? null, p.region ?? null, p.metadata_uri ?? null, p.created_at ?? null, p.registered_at ?? 0])
   );
 }
 
@@ -486,6 +604,18 @@ export async function removePendingMilestone(milestoneId: string): Promise<void>
   await timedQueryAsync(sql, () => getDriver().run(sql, [milestoneId]));
 }
 
+/**
+ * Cancel (delete) all pending milestones for a given player.
+ * Returns the number of rows removed.
+ */
+export async function cancelPendingMilestonesForPlayer(playerId: string): Promise<number> {
+  const sql = 'DELETE FROM pending_milestones WHERE player_id = ?';
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [playerId]);
+    return info.changes;
+  });
+}
+
 export interface GetPendingMilestonesOptions {
   validatorWallet?: string;
   position?: string;
@@ -518,7 +648,7 @@ export async function getPendingMilestones(options: GetPendingMilestonesOptions)
     params.push(options.playerId);
   }
 
-  const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(' AND ')}` : '';
+  const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
 
   // Get total count
   const countSql = `SELECT COUNT(*) AS total FROM pending_milestones pm
@@ -550,13 +680,32 @@ export async function getPlayerById(playerId: string): Promise<PlayerRow | null>
   );
 }
 
+export async function getPlayerByWallet(wallet: string): Promise<PlayerRow | null> {
+  const sql = 'SELECT * FROM players WHERE wallet = ?';
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<PlayerRow>(sql, [wallet])) ?? null
+  );
+}
+
 export async function deactivatePlayer(playerId: string): Promise<void> {
   const sql = 'UPDATE players SET is_active = 0 WHERE player_id = ?';
   await timedQueryAsync(sql, () => getDriver().run(sql, [playerId]));
 }
 
+/** Deactivate a player and persist a human-readable reason. */
+export async function deactivatePlayerWithReason(playerId: string, reason: string): Promise<void> {
+  const sql = 'UPDATE players SET is_active = 0, deactivation_reason = ? WHERE player_id = ?';
+  await timedQueryAsync(sql, () => getDriver().run(sql, [reason, playerId]));
+}
+
 export async function reactivatePlayer(playerId: string): Promise<void> {
   const sql = 'UPDATE players SET is_active = 1 WHERE player_id = ?';
+  await timedQueryAsync(sql, () => getDriver().run(sql, [playerId]));
+}
+
+/** Clear deactivation state and reason on reactivation. */
+export async function reactivatePlayerWithReason(playerId: string): Promise<void> {
+  const sql = "UPDATE players SET is_active = 1, deactivation_reason = NULL WHERE player_id = ?";
   await timedQueryAsync(sql, () => getDriver().run(sql, [playerId]));
 }
 
@@ -580,7 +729,7 @@ function buildPlayerWhereClause(opts: QueryPlayersOptions): { where: string; par
     conditions.push("is_active = 1");
   }
 
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   return { where, params };
 }
 
@@ -603,6 +752,184 @@ export async function countPlayers(opts: Omit<QueryPlayersOptions, 'limit' | 'of
   });
 }
 
+// ─── Player search ranking & cursor pagination (#577) ─────────────────────────
+
+export interface SearchPlayersOptions {
+  region?: string;
+  position?: string;
+  minTier?: number;
+  limit?: number;
+  offset?: number;
+  sortBy?: 'relevance' | 'tier' | 'region' | 'created_at';
+  sortOrder?: 'asc' | 'desc';
+  cursor?: string | null;
+  includeDeactivated?: boolean;
+}
+
+export interface SearchPlayersResult {
+  data: PlayerRow[];
+  nextCursor: string | null;
+}
+
+function encodeCursor(values: (string | number)[]): string {
+  return Buffer.from(JSON.stringify(values)).toString('base64');
+}
+
+function decodeCursor(cursor: string): (string | number)[] | null {
+  try {
+    return JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+export async function searchPlayers(opts: SearchPlayersOptions): Promise<SearchPlayersResult> {
+  const driver = getDriver();
+  const sortBy = opts.sortBy ?? 'relevance';
+  const sortOrder = opts.sortOrder ?? 'desc';
+  const direction = sortOrder === 'asc' ? 'ASC' : 'DESC';
+  const limit = opts.limit ?? 20;
+
+  const conditions: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (opts.region) {
+    conditions.push('region = ?');
+    params.push(opts.region);
+  }
+  if (opts.position) {
+    conditions.push('position = ?');
+    params.push(opts.position);
+  }
+  if (opts.minTier !== undefined) {
+    conditions.push('progress_level >= ?');
+    params.push(opts.minTier);
+  }
+  if (!opts.includeDeactivated) {
+    conditions.push('is_active = 1');
+  }
+
+  const baseWhere = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
+
+  const useCursor = !!opts.cursor;
+
+  if (sortBy === 'relevance') {
+    let cursorWhere = '';
+    const cursorParams: (string | number)[] = [];
+    const offsetClause = (!useCursor && opts.offset) ? `OFFSET ${opts.offset}` : '';
+
+    if (useCursor) {
+      const decoded = decodeCursor(opts.cursor as string);
+      if (decoded && decoded.length >= 2) {
+        cursorWhere = 'AND (search_score, player_id) < (?, ?)';
+        cursorParams.push(decoded[0] as number, decoded[1] as string);
+      }
+    }
+
+    const fetchLimit = useCursor ? limit + 1 : limit;
+    const sql = `WITH scored AS (
+      SELECT *,
+        (CAST(progress_level AS REAL) * 10.0) +
+        (CASE WHEN registered_at > 0 THEN 5.0 ELSE 0.0 END) AS search_score
+      FROM players
+      ${baseWhere}
+    )
+    SELECT * FROM scored
+    ${cursorWhere}
+    ORDER BY search_score DESC, player_id ASC
+    LIMIT ? ${offsetClause}`;
+
+    const allParams = [...params, ...cursorParams, fetchLimit];
+    const rows = await timedQueryAsync(sql, () =>
+      driver.all<ScoredPlayerRow>(sql, allParams)
+    );
+
+    if (useCursor) {
+      return processCursorResults(rows, limit, sortBy, sortOrder);
+    }
+    return { data: rows as PlayerRow[], nextCursor: null };
+  }
+
+  let orderColumn: string;
+  switch (sortBy) {
+    case 'tier':
+      orderColumn = 'progress_level';
+      break;
+    case 'region':
+      orderColumn = 'region';
+      break;
+    case 'created_at':
+      orderColumn = 'registered_at';
+      break;
+    default:
+      orderColumn = 'registered_at';
+  }
+
+  let cursorWhere = '';
+  const cursorParams: (string | number)[] = [];
+  const offsetClause = (!useCursor && opts.offset) ? `OFFSET ${opts.offset}` : '';
+
+  if (useCursor) {
+    const decoded = decodeCursor(opts.cursor as string);
+    if (decoded && decoded.length >= 2) {
+      const lastVal = decoded[0] as string | number;
+      const lastPlayerId = decoded[1] as string;
+      const op = direction === 'ASC' ? '>' : '<';
+      cursorWhere = `AND (${orderColumn}, player_id) ${op} (?, ?)`;
+      cursorParams.push(lastVal, lastPlayerId);
+    }
+  }
+
+  const fetchLimit = useCursor ? limit + 1 : limit;
+  const sql = `SELECT * FROM players ${baseWhere} ${cursorWhere} ORDER BY ${orderColumn} ${direction}, player_id ASC LIMIT ? ${offsetClause}`;
+  const allParams = [...params, ...cursorParams, fetchLimit];
+  const rows = await timedQueryAsync(sql, () =>
+    driver.all<PlayerRow>(sql, allParams)
+  );
+
+  if (useCursor) {
+    return processCursorResults(rows, limit, sortBy, sortOrder);
+  }
+  return { data: rows as PlayerRow[], nextCursor: null };
+}
+
+function processCursorResults(
+  rows: (PlayerRow | ScoredPlayerRow)[],
+  limit: number,
+  sortBy: string,
+  sortOrder: string,
+): SearchPlayersResult {
+  const hasMore = rows.length > limit;
+  const data = hasMore ? rows.slice(0, limit) : rows;
+
+  let nextCursor: string | null = null;
+  if (hasMore && data.length > 0) {
+    const last = data[data.length - 1];
+    if (sortBy === 'relevance') {
+      const scored = last as ScoredPlayerRow;
+      nextCursor = encodeCursor([scored.search_score, scored.player_id]);
+    } else {
+      let lastVal: string | number;
+      switch (sortBy) {
+        case 'tier':
+          lastVal = last.progress_level;
+          break;
+        case 'region':
+          lastVal = last.region ?? '';
+          break;
+        case 'created_at':
+          lastVal = last.registered_at;
+          break;
+        default:
+          lastVal = last.registered_at;
+      }
+      nextCursor = encodeCursor([lastVal, last.player_id]);
+    }
+  }
+
+  return { data, nextCursor };
+}
+
 // ─── Idempotency key helpers ──────────────────────────────────────────────────
 
 export interface IdempotencyRecord {
@@ -611,12 +938,14 @@ export interface IdempotencyRecord {
   response: string; // raw JSON string
   created_at: number;
   expires_at: number;
+  /** 'pending' while the originating request is in-flight; 'complete' once saved. */
+  status: 'pending' | 'complete';
 }
 
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
- * Look up a non-expired idempotency key.
+ * Look up a non-expired idempotency key regardless of its status.
  * Returns the stored record, or null when the key is absent or expired.
  */
 export async function getIdempotencyRecord(key: string): Promise<IdempotencyRecord | null> {
@@ -628,10 +957,58 @@ export async function getIdempotencyRecord(key: string): Promise<IdempotencyReco
 }
 
 /**
+ * Attempt to claim an idempotency key by inserting a 'pending' marker.
+ *
+ * Uses INSERT OR IGNORE so that the insert is a single atomic operation:
+ * exactly one concurrent request will succeed and receive `true`; every
+ * other request for the same key receives `false` and must not run the
+ * downstream handler.
+ *
+ * Returns true  — this caller owns the key; proceed with the handler.
+ * Returns false — another request already claimed the key; caller must wait.
+ */
+export async function claimIdempotencyKey(key: string): Promise<boolean> {
+  const now = Date.now();
+  const sql = `
+    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status)
+    VALUES (?, 0, '', ?, ?, 'pending')
+    ON CONFLICT (key) DO NOTHING
+  `;
+  const result = await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [key, now, now + IDEMPOTENCY_TTL_MS])
+  );
+  // changes === 1 means a new row was inserted (this caller won the race).
+  return result.changes === 1;
+}
+
+/**
+ * Transition a 'pending' idempotency key to 'complete', recording the final
+ * response.  Called by the middleware after the handler has written its response.
+ */
+export async function updateIdempotencyRecord(
+  key: string,
+  statusCode: number,
+  body: unknown,
+): Promise<void> {
+  const sql = `
+    UPDATE idempotency_keys
+    SET status_code = ?, response = ?, status = 'complete'
+    WHERE key = ?
+  `;
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [statusCode, JSON.stringify(body), key])
+  );
+}
+
+/**
  * Persist a new idempotency key with its response payload.
  * Silently ignores conflicts — two concurrent requests with the same key
  * will both compute a response but only the first one to commit wins; the
  * second one will then be served the stored value by getIdempotencyRecord.
+ *
+ * @deprecated Prefer claimIdempotencyKey + updateIdempotencyRecord for proper
+ * race-condition protection.  This function is retained for backwards
+ * compatibility with tests and external callers.
  */
 export async function saveIdempotencyRecord(
   key: string,
@@ -640,8 +1017,8 @@ export async function saveIdempotencyRecord(
 ): Promise<void> {
   const now = Date.now();
   const sql = `
-    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO idempotency_keys (key, status_code, response, created_at, expires_at, status)
+    VALUES (?, ?, ?, ?, ?, 'complete')
     ON CONFLICT(key) DO NOTHING
   `;
   await timedQueryAsync(sql, () =>
@@ -677,6 +1054,15 @@ export async function getLatestSubscription(scoutWallet: string): Promise<Subscr
   return timedQueryAsync(sql, async () =>
     (await getDriver().get<SubscriptionRow>(sql, [scoutWallet])) ?? null
   );
+}
+
+/**
+ * Return all subscription rows for a scout (including cancelled), ordered newest-first.
+ * Used by the payment history endpoint.
+ */
+export async function getSubscriptionsByScout(scoutWallet: string): Promise<SubscriptionRow[]> {
+  const sql = `SELECT * FROM subscriptions WHERE scout_wallet = ? ORDER BY created_at DESC`;
+  return timedQueryAsync(sql, () => getDriver().all<SubscriptionRow>(sql, [scoutWallet]));
 }
 
 export async function insertSubscription(p: {
@@ -726,9 +1112,130 @@ export async function getContactUnlocksByScout(scoutWallet: string): Promise<Con
   return timedQueryAsync(sql, () => getDriver().all<ContactUnlockRow>(sql, [scoutWallet]));
 }
 
+/**
+ * Return all contact-unlock rows for a given player (i.e. every scout who has
+ * unlocked that player's contact details). Used to fan out SSE notifications
+ * when a player is deactivated.
+ */
+export async function getContactUnlocksByPlayer(playerId: string): Promise<ContactUnlockRow[]> {
+  const sql = `SELECT * FROM contact_unlocks WHERE player_id = ? ORDER BY unlocked_at DESC`;
+  return timedQueryAsync(sql, () => getDriver().all<ContactUnlockRow>(sql, [playerId]));
+}
+
 export async function hasContactUnlock(scoutWallet: string, playerId: string): Promise<boolean> {
   const sql = `SELECT 1 FROM contact_unlocks WHERE scout_wallet = ? AND player_id = ? LIMIT 1`;
   return timedQueryAsync(sql, async () => (await getDriver().get(sql, [scoutWallet, playerId])) !== undefined);
+}
+
+// ─── Time-series stats helpers ───────────────────────────────────────────────────
+
+export interface TimeSeriesPoint {
+  date: string;
+  count: number;
+}
+
+export interface RegionBreakdownPoint {
+  date: string;
+  region: string;
+  count: number;
+}
+
+/**
+ * SQL expression that buckets an epoch-milliseconds column into a
+ * 'YYYY-MM-DD' date string, for GROUP BY date. SQLite's strftime() and
+ * Postgres's to_char(to_timestamp(...)) are both dialect-specific — neither
+ * expression works on the other driver — so this branches on config.dbDriver
+ * rather than trying to find one expression that works everywhere.
+ */
+function dateBucketExpr(column: string): string {
+  return config.dbDriver === 'postgres'
+    ? `to_char(to_timestamp(${column} / 1000.0), 'YYYY-MM-DD')`
+    : `strftime('%Y-%m-%d', ${column} / 1000, 'unixepoch')`;
+}
+
+/**
+ * Get daily counts of new players registered within a time window.
+ */
+export async function getNewPlayersTimeSeries(startDateMs: number, endDateMs: number): Promise<TimeSeriesPoint[]> {
+  const sql = `
+    SELECT ${dateBucketExpr('created_at')} as date, COUNT(*) as count
+    FROM players
+    WHERE created_at >= ? AND created_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = await timedQueryAsync(sql, () =>
+    getDriver().all<{ date: string; count: number | string }>(sql, [startDateMs, endDateMs])
+  );
+  return rows.map((r) => ({ date: r.date, count: Number(r.count) }));
+}
+
+/**
+ * Get daily counts of milestones approved within a time window.
+ */
+export function getMilestonesApprovedTimeSeries(startDateMs: number, endDateMs: number): TimeSeriesPoint[] {
+  const sql = `
+    SELECT strftime('%Y-%m-%d', created_at / 1000, 'unixepoch') as date, COUNT(*) as count
+    FROM events
+    WHERE type = 'milestone_approved' AND created_at >= ? AND created_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = timedQuery(sql, () =>
+    getDb().prepare(sql).all(startDateMs, endDateMs) as Array<{ date: string; count: number }>
+  );
+  return rows.map((r) => ({ date: r.date, count: r.count }));
+}
+
+/**
+ * Get daily counts of contact unlocks within a time window.
+ */
+export async function getContactUnlocksTimeSeries(startDateMs: number, endDateMs: number): Promise<TimeSeriesPoint[]> {
+  const sql = `
+    SELECT ${dateBucketExpr('unlocked_at')} as date, COUNT(*) as count
+    FROM contact_unlocks
+    WHERE unlocked_at >= ? AND unlocked_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = await timedQueryAsync(sql, () =>
+    getDriver().all<{ date: string; count: number | string }>(sql, [startDateMs, endDateMs])
+  );
+  return rows.map((r) => ({ date: r.date, count: Number(r.count) }));
+}
+
+/**
+ * Get daily counts of subscriptions started within a time window.
+ */
+export async function getSubscriptionsStartedTimeSeries(startDateMs: number, endDateMs: number): Promise<TimeSeriesPoint[]> {
+  const sql = `
+    SELECT ${dateBucketExpr('created_at')} as date, COUNT(*) as count
+    FROM subscriptions
+    WHERE created_at >= ? AND created_at <= ?
+    GROUP BY date
+    ORDER BY date ASC
+  `;
+  const rows = await timedQueryAsync(sql, () =>
+    getDriver().all<{ date: string; count: number | string }>(sql, [startDateMs, endDateMs])
+  );
+  return rows.map((r) => ({ date: r.date, count: Number(r.count) }));
+}
+
+/**
+ * Get daily counts of new players grouped by region within a time window.
+ */
+export async function getNewPlayersByRegionTimeSeries(startDateMs: number, endDateMs: number): Promise<RegionBreakdownPoint[]> {
+  const sql = `
+    SELECT ${dateBucketExpr('created_at')} as date, region, COUNT(*) as count
+    FROM players
+    WHERE created_at >= ? AND created_at <= ?
+    GROUP BY date, region
+    ORDER BY date ASC, region ASC
+  `;
+  const rows = await timedQueryAsync(sql, () =>
+    getDriver().all<{ date: string; region: string | null; count: number | string }>(sql, [startDateMs, endDateMs])
+  );
+  return rows.map((r) => ({ date: r.date, region: r.region ?? 'unknown', count: Number(r.count) }));
 }
 
 // ─── Audit log helpers ────────────────────────────────────────────────────────
@@ -833,10 +1340,10 @@ export async function getAuditLogs(filters: {
   if (filters.endDate) { conditions.push('created_at <= ?'); params.push(filters.endDate); }
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const limit = filters.limit ?? 50;
   const offset = filters.offset ?? 0;
-  const sql = `SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
+const sql = `SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
   return timedQueryAsync(sql, () => getDriver().all<AuditLogRow>(sql, [...params, limit, offset]));
 }
 
@@ -854,7 +1361,7 @@ export async function getAuditLogsCount(filters: {
   if (filters.endDate) { conditions.push('created_at <= ?'); params.push(filters.endDate); }
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sql = `SELECT COUNT(*) AS count FROM audit_log ${where}`;
   return timedQueryAsync(sql, async () => {
     const row = await getDriver().get<{ count: number | string }>(sql, params);
@@ -879,7 +1386,7 @@ export async function getAllAuditLogRows(filters: {
   if (filters.action) { conditions.push('action = ?'); params.push(filters.action); }
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
-  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const sql = `SELECT * FROM audit_log ${where} ORDER BY id ASC`;
   return timedQueryAsync(sql, () => getDriver().all<AuditLogRow>(sql, params));
 }
@@ -930,6 +1437,23 @@ export async function respondToTrialOffer(p: {
   );
 }
 
+/**
+ * Count the number of trial offers submitted for a given player.
+ * Returns 0 when the trial_offers table does not exist yet (pre-migration).
+ */
+export async function countTrialOffersByPlayer(playerId: string): Promise<number> {
+  try {
+    const sql = 'SELECT COUNT(*) AS cnt FROM trial_offers WHERE player_id = ?';
+    const row = await timedQueryAsync(sql, () =>
+      getDriver().get<{ cnt: number | string }>(sql, [playerId]),
+    );
+    return Number(row?.cnt ?? 0);
+  } catch {
+    // Table may not exist in very early migration states
+    return 0;
+  }
+}
+
 // ─── Pending pin helpers ──────────────────────────────────────────────────────
 
 export interface PendingPinRow {
@@ -939,6 +1463,8 @@ export interface PendingPinRow {
   created_at: string;
   last_tried: string | null;
   hash?: string | null;
+  /** CID written by the winning upload instance once the pin succeeds. */
+  resolved_cid?: string | null;
 }
 
 export async function insertPendingPin(p: {
@@ -983,6 +1509,29 @@ export async function isPendingPinByHash(hash: string): Promise<boolean> {
 export async function incrementPendingPinAttempts(id: number): Promise<void> {
   const sql = 'UPDATE pending_pins SET attempts = attempts + 1, last_tried = ? WHERE id = ?';
   await timedQueryAsync(sql, () => getDriver().run(sql, [new Date().toISOString(), id]));
+}
+
+/**
+ * Persist the resolved CID on a pending_pins row identified by content hash.
+ *
+ * Called by the winning upload instance immediately after a successful Pinata
+ * upload so that any other instance waiting on the same lock can retrieve the
+ * CID from the DB instead of issuing a duplicate upload.
+ */
+export async function setPendingPinResolvedCid(hash: string, cid: string): Promise<void> {
+  const sql = 'UPDATE pending_pins SET resolved_cid = ? WHERE hash = ?';
+  await timedQueryAsync(sql, () => getDriver().run(sql, [cid, hash]));
+}
+
+/**
+ * Return the resolved CID for a previously completed pin identified by content
+ * hash, or null if none has been recorded yet (i.e. the winning instance is
+ * still uploading or the row no longer exists).
+ */
+export async function getResolvedCidByHash(hash: string): Promise<string | null> {
+  const sql = 'SELECT resolved_cid FROM pending_pins WHERE hash = ? LIMIT 1';
+  const row = await timedQueryAsync(sql, () => getDriver().get<{ resolved_cid: string | null }>(sql, [hash]));
+  return row?.resolved_cid ?? null;
 }
 
 // ─── Scout player notes helpers (#488) ───────────────────────────────────────
@@ -1044,6 +1593,93 @@ export async function getScoutNotes(scoutWallet: string): Promise<ScoutPlayerNot
   );
 }
 
+// ─── Scout player notes v2 helpers (multi-note CRUD) ─────────────────────────
+
+export interface ScoutPlayerNoteV2Row {
+  id: number;
+  scout_wallet: string;
+  player_id: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+}
+
+/**
+ * Insert a new private note for a scout on a specific player.
+ * Returns the new row id.
+ */
+export async function insertScoutPlayerNote(p: {
+  scout_wallet: string;
+  player_id: string;
+  content: string;
+  created_at: number;
+  updated_at: number;
+}): Promise<number> {
+  const sql = `
+    INSERT INTO scout_player_notes_v2 (scout_wallet, player_id, content, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?)
+    RETURNING id
+  `;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [p.scout_wallet, p.player_id, p.content, p.created_at, p.updated_at]);
+    return info.lastId;
+  });
+}
+
+/**
+ * List all notes for a scout-player pair, ordered newest-first.
+ */
+export async function getScoutPlayerNotes(
+  scoutWallet: string,
+  playerId: string,
+): Promise<ScoutPlayerNoteV2Row[]> {
+  const sql = `
+    SELECT * FROM scout_player_notes_v2
+    WHERE scout_wallet = ? AND player_id = ?
+    ORDER BY created_at DESC
+  `;
+  return timedQueryAsync(sql, () =>
+    getDriver().all<ScoutPlayerNoteV2Row>(sql, [scoutWallet, playerId]),
+  );
+}
+
+/**
+ * Update the content of a note identified by id and scout_wallet.
+ * Scoping the update to scout_wallet prevents cross-scout tampering.
+ * Returns true when a row was updated, false when not found.
+ */
+export async function updateScoutPlayerNote(p: {
+  id: number;
+  scout_wallet: string;
+  content: string;
+  updated_at: number;
+}): Promise<boolean> {
+  const sql = `
+    UPDATE scout_player_notes_v2
+    SET content = ?, updated_at = ?
+    WHERE id = ? AND scout_wallet = ?
+  `;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [p.content, p.updated_at, p.id, p.scout_wallet]);
+    return info.changes > 0;
+  });
+}
+
+/**
+ * Delete a note by id, scoped to the owning scout wallet.
+ * Returns true when a row was deleted, false when not found.
+ */
+export async function deleteScoutPlayerNote(id: number, scoutWallet: string): Promise<boolean> {
+  const sql = `
+    DELETE FROM scout_player_notes_v2
+    WHERE id = ? AND scout_wallet = ?
+  `;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [id, scoutWallet]);
+    return info.changes > 0;
+  });
+}
+
 // ─── API key helpers (#490) ───────────────────────────────────────────────────
 
 export interface ApiKeyRow {
@@ -1054,26 +1690,41 @@ export interface ApiKeyRow {
   created_at: number;
   last_used_at: number | null;
   revoked_at: number | null;
+  /** JSON-encoded scope list (db/014_api_key_scopes.sql). NULL/empty = legacy key. */
+  scopes: string | null;
+  rate_limit_per_minute: number | null;
 }
 
 /**
  * Persist a new API key.  Only the salted hash is stored; the caller must
  * have already generated the hash before calling this function.
  * Returns the new row id.
+ *
+ * `scopes` is optional: when omitted the key is stored with NULL scopes,
+ * which the authorization layer treats as a legacy key with unrestricted
+ * scout-level access (backward compatible with keys issued before scope
+ * enforcement existed).
  */
 export async function insertApiKey(p: {
   key_hash: string;
   scout_wallet: string;
   label: string;
   created_at: number;
+  scopes?: string[];
 }): Promise<number> {
   const sql = `
-    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at, scopes)
+    VALUES (?, ?, ?, ?, ?)
     RETURNING id
   `;
   return timedQueryAsync(sql, async () => {
-    const info = await getDriver().run(sql, [p.key_hash, p.scout_wallet, p.label, p.created_at]);
+    const info = await getDriver().run(sql, [
+      p.key_hash,
+      p.scout_wallet,
+      p.label,
+      p.created_at,
+      p.scopes ? JSON.stringify(p.scopes) : null,
+    ]);
     return info.lastId;
   });
 }
@@ -1138,12 +1789,64 @@ export async function touchApiKeyLastUsed(id: number): Promise<void> {
   await timedQueryAsync(sql, () => getDriver().run(sql, [now, id]));
 }
 
+// ─── Wallet blocklist helpers (#1019) ────────────────────────────────────────
+
+/**
+ * Add a wallet to the blocklist. Idempotent — re-blocking an already
+ * blocked wallet is a no-op.
+ */
+export async function blockWalletDb(wallet: string, reason: string | null): Promise<void> {
+  const now = Math.floor(Date.now() / 1000);
+  const sql = `
+    INSERT INTO wallet_blocklist (wallet, reason, blocked_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(wallet) DO NOTHING
+  `;
+  await timedQueryAsync(sql, () =>
+    getDriver().run(sql, [wallet, reason, now]),
+  );
+}
+
+/** Remove a wallet from the blocklist. Returns true if a row was removed. */
+export async function unblockWalletDb(wallet: string): Promise<boolean> {
+  const sql = `DELETE FROM wallet_blocklist WHERE wallet = ?`;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [wallet]);
+    return info.changes > 0;
+  });
+}
+
+/** Fresh DB check — is this wallet currently blocklisted? */
+export async function isWalletBlocklistedDb(wallet: string): Promise<boolean> {
+  const sql = `SELECT wallet FROM wallet_blocklist WHERE wallet = ? LIMIT 1`;
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<{ wallet: string }>(sql, [wallet])) !== undefined,
+  );
+}
+
+/** Return every currently blocklisted wallet (one query, used by sweeps). */
+export async function listBlockedWalletsDb(): Promise<string[]> {
+  const sql = `SELECT wallet FROM wallet_blocklist`;
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().all<{ wallet: string }>(sql)).map((r) => r.wallet),
+  );
+}
+
 // ─── Scout bookmarks helpers (#487) ──────────────────────────────────────────
 
 export interface ScoutBookmarkRow {
   id: number;
   scout_wallet: string;
   player_id: string;
+  folder_id: number | null;
+  note: string | null;
+  created_at: number;
+}
+
+export interface ScoutBookmarkFolderRow {
+  id: number;
+  scout_wallet: string;
+  name: string;
   created_at: number;
 }
 
@@ -1154,15 +1857,23 @@ export interface ScoutBookmarkRow {
 export async function insertBookmark(p: {
   scout_wallet: string;
   player_id: string;
+  folder_id?: number | null;
+  note?: string | null;
   created_at: number;
 }): Promise<boolean> {
   const sql = `
-    INSERT INTO scout_bookmarks (scout_wallet, player_id, created_at)
-    VALUES (?, ?, ?)
+    INSERT INTO scout_bookmarks (scout_wallet, player_id, folder_id, note, created_at)
+    VALUES (?, ?, ?, ?, ?)
     ON CONFLICT (scout_wallet, player_id) DO NOTHING
   `;
   return timedQueryAsync(sql, async () => {
-    const info = await getDriver().run(sql, [p.scout_wallet, p.player_id, p.created_at]);
+    const info = await getDriver().run(sql, [
+      p.scout_wallet,
+      p.player_id,
+      p.folder_id ?? null,
+      p.note ?? null,
+      p.created_at,
+    ]);
     return info.changes > 0;
   });
 }
@@ -1181,16 +1892,104 @@ export async function deleteBookmark(scoutWallet: string, playerId: string): Pro
 
 /**
  * List all bookmarks for a scout, ordered by creation time (newest first).
+ * Optionally filter by folder_id.
  */
-export async function getBookmarksByScout(scoutWallet: string): Promise<ScoutBookmarkRow[]> {
+export async function getBookmarksByScout(scoutWallet: string, folderId?: number | null): Promise<ScoutBookmarkRow[]> {
+  let sql: string;
+  let params: (string | number | null)[];
+
+  if (folderId !== undefined) {
+    sql = `
+      SELECT * FROM scout_bookmarks
+      WHERE scout_wallet = ? AND folder_id = ?
+      ORDER BY created_at DESC
+    `;
+    params = [scoutWallet, folderId];
+  } else {
+    sql = `
+      SELECT * FROM scout_bookmarks
+      WHERE scout_wallet = ?
+      ORDER BY created_at DESC
+    `;
+    params = [scoutWallet];
+  }
+
+  return timedQueryAsync(sql, () => getDriver().all<ScoutBookmarkRow>(sql, params));
+}
+
+/**
+ * Insert a bookmark folder. Returns the new folder id.
+ */
+export async function insertBookmarkFolder(p: {
+  scout_wallet: string;
+  name: string;
+  created_at: number;
+}): Promise<number> {
   const sql = `
-    SELECT * FROM scout_bookmarks
+    INSERT INTO scout_bookmark_folders (scout_wallet, name, created_at)
+    VALUES (?, ?, ?)
+    RETURNING id
+  `;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [p.scout_wallet, p.name, p.created_at]);
+    return info.lastId;
+  });
+}
+
+/**
+ * List all bookmark folders for a scout, ordered by creation time (newest first).
+ */
+export async function getBookmarkFoldersByScout(scoutWallet: string): Promise<ScoutBookmarkFolderRow[]> {
+  const sql = `
+    SELECT * FROM scout_bookmark_folders
     WHERE scout_wallet = ?
     ORDER BY created_at DESC
   `;
-  return timedQueryAsync(sql, () =>
-    getDriver().all<ScoutBookmarkRow>(sql, [scoutWallet]),
+  return timedQueryAsync(sql, () => getDriver().all<ScoutBookmarkFolderRow>(sql, [scoutWallet]));
+}
+
+/**
+ * Get a bookmark folder by id, ensuring it belongs to the scout.
+ */
+export async function getBookmarkFolderById(folderId: number, scoutWallet: string): Promise<ScoutBookmarkFolderRow | null> {
+  const sql = `
+    SELECT * FROM scout_bookmark_folders
+    WHERE id = ? AND scout_wallet = ?
+  `;
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<ScoutBookmarkFolderRow>(sql, [folderId, scoutWallet])) ?? null
   );
+}
+
+/**
+ * Delete a bookmark folder by id, ensuring it belongs to the scout.
+ * Returns true when a row was deleted, false when it did not exist.
+ */
+export async function deleteBookmarkFolder(folderId: number, scoutWallet: string): Promise<boolean> {
+  const sql = `DELETE FROM scout_bookmark_folders WHERE id = ? AND scout_wallet = ?`;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [folderId, scoutWallet]);
+    return info.changes > 0;
+  });
+}
+
+/**
+ * Move bookmarks from a folder to root (set folder_id to NULL) when folder is deleted.
+ */
+export async function moveBookmarksToRoot(folderId: number, scoutWallet: string): Promise<void> {
+  const sql = `UPDATE scout_bookmarks SET folder_id = NULL WHERE folder_id = ? AND scout_wallet = ?`;
+  await timedQueryAsync(sql, () => getDriver().run(sql, [folderId, scoutWallet]));
+}
+
+/**
+ * Count bookmarks in a folder.
+ */
+export async function countBookmarksInFolder(folderId: number): Promise<number> {
+  const sql = `SELECT COUNT(*) as count FROM scout_bookmarks WHERE folder_id = ?`;
+  return timedQueryAsync(sql, async () => {
+    const row = await getDriver().get<{ count: number | string }>(sql, [folderId]);
+    return Number(row?.count ?? 0);
+  });
 }
 
 // ─── Scout saved-search helpers (#486) ───────────────────────────────────────
@@ -1201,6 +2000,27 @@ export interface SavedSearchRow {
   name: string;
   filters: string; // JSON string
   created_at: number;
+  notify_enabled: number;
+}
+
+export async function getAllActiveSavedSearches(): Promise<SavedSearchRow[]> {
+  const sql = 'SELECT * FROM scout_saved_searches WHERE notify_enabled = 1';
+  return timedQueryAsync(sql, () => getDriver().all<SavedSearchRow>(sql));
+}
+
+export async function getSavedSearchNotification(scoutWallet: string, playerId: string): Promise<number | null> {
+  const sql = 'SELECT notified_at FROM saved_search_notifications WHERE scout_wallet = ? AND player_id = ?';
+  return timedQueryAsync(sql, async () => {
+    const row = await getDriver().get<{ notified_at: number }>(sql, [scoutWallet, playerId]);
+    return row ? row.notified_at : null;
+  });
+}
+
+export async function recordSavedSearchNotification(scoutWallet: string, playerId: string, notifiedAt: number): Promise<void> {
+  const sql = 'INSERT INTO saved_search_notifications (scout_wallet, player_id, notified_at) ' +
+              'VALUES (?, ?, ?) ' +
+              'ON CONFLICT(scout_wallet, player_id) DO UPDATE SET notified_at = excluded.notified_at';
+  await timedQueryAsync(sql, () => getDriver().run(sql, [scoutWallet, playerId, notifiedAt]));
 }
 
 /**
@@ -1212,14 +2032,15 @@ export async function insertSavedSearch(p: {
   name: string;
   filters: string; // pre-serialised JSON
   created_at: number;
+  notify_enabled?: number;
 }): Promise<number> {
   const sql = `
-    INSERT INTO scout_saved_searches (scout_wallet, name, filters, created_at)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO scout_saved_searches (scout_wallet, name, filters, created_at, notify_enabled)
+    VALUES (?, ?, ?, ?, ?)
     RETURNING id
   `;
   return timedQueryAsync(sql, async () => {
-    const info = await getDriver().run(sql, [p.scout_wallet, p.name, p.filters, p.created_at]);
+    const info = await getDriver().run(sql, [p.scout_wallet, p.name, p.filters, p.created_at, p.notify_enabled ?? 1]);
     return info.lastId;
   });
 }
@@ -1249,6 +2070,133 @@ export async function deleteSavedSearch(id: number, scoutWallet: string): Promis
     const info = await getDriver().run(sql, [id, scoutWallet]);
     return info.changes > 0;
   });
+}
+
+/**
+ * Get a saved search by id.
+ * Only returns rows belonging to the given scout wallet for security.
+ * Returns null when not found.
+ */
+export async function getSavedSearchById(id: number, scoutWallet: string): Promise<SavedSearchRow | null> {
+  const sql = `SELECT * FROM scout_saved_searches WHERE id = ? AND scout_wallet = ?`;
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<SavedSearchRow>(sql, [id, scoutWallet])) ?? null
+  );
+}
+
+/**
+ * Update a saved search's name and/or filters.
+ * Only updates rows belonging to the given scout wallet for security.
+ * Returns true when a row was updated, false when it did not exist.
+ */
+export async function updateSavedSearch(
+  id: number,
+  scoutWallet: string,
+  updates: { name?: string; filters?: string }
+): Promise<boolean> {
+  const fields: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (updates.name !== undefined) {
+    fields.push('name = ?');
+    params.push(updates.name);
+  }
+  if (updates.filters !== undefined) {
+    fields.push('filters = ?');
+    params.push(updates.filters);
+  }
+
+  if (fields.length === 0) {
+    return false;
+  }
+
+  params.push(id, scoutWallet);
+  const sql = `UPDATE scout_saved_searches SET ${fields.join(', ')} WHERE id = ? AND scout_wallet = ?`;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, params);
+    return info.changes > 0;
+  });
+}
+
+/**
+ * Count saved searches for a scout.
+ * Used to enforce the 20 saved searches limit.
+ */
+export async function countSavedSearchesByScout(scoutWallet: string): Promise<number> {
+  const sql = `SELECT COUNT(*) as count FROM scout_saved_searches WHERE scout_wallet = ?`;
+  const row = await timedQueryAsync(sql, () =>
+    getDriver().get<{ count: number | string }>(sql, [scoutWallet])
+  );
+  return Number(row?.count ?? 0);
+}
+
+// ─── Profile views helpers ────────────────────────────────────────────────────
+
+/**
+ * Record a profile view from a scout.
+ * Inserts a new row into the profile_views table with scout wallet, player ID,
+ * and timestamps. Used to track scout engagement with player profiles.
+ */
+export async function recordProfileView(p: {
+  scout_wallet: string;
+  player_id: string;
+  viewed_at: number;
+  created_at: number;
+}): Promise<void> {
+  const sql = `INSERT INTO profile_views (scout_wallet, player_id, viewed_at, created_at) VALUES (?, ?, ?, ?)`;
+  await timedQueryAsync(sql, () => getDriver().run(sql, [p.scout_wallet, p.player_id, p.viewed_at, p.created_at]));
+}
+
+/**
+ * Get the timestamp of the most recent profile view from a scout for a specific player.
+ * Returns the Unix timestamp of the most recent view, or null if no view exists.
+ * Used by deduplication logic to check the 5-minute dedup window.
+ */
+export async function getLastProfileView(scoutWallet: string, playerId: string): Promise<number | null> {
+  const sql = `SELECT viewed_at FROM profile_views WHERE player_id = ? AND scout_wallet = ? ORDER BY viewed_at DESC LIMIT 1`;
+  const row = await timedQueryAsync(sql, () =>
+    getDriver().get<{ viewed_at: number }>(sql, [playerId, scoutWallet])
+  );
+  return row?.viewed_at ?? null;
+}
+
+/**
+ * Get the total count of profile views for a player.
+ * Returns the count of all profile_views records for the given player_id.
+ * Used in analytics aggregation.
+ */
+export async function getProfileViewCount(playerId: string): Promise<number> {
+  const sql = `SELECT COUNT(*) as count FROM profile_views WHERE player_id = ?`;
+  const row = await timedQueryAsync(sql, () =>
+    getDriver().get<{ count: number | string }>(sql, [playerId])
+  );
+  return Number(row?.count ?? 0);
+}
+
+/**
+ * Get the count of unique scout wallets that have viewed a player's profile.
+ * Counts distinct scout_wallet values (excluding NULL) from profile_views for the given player.
+ * Used in analytics aggregation to determine viewer_count.
+ */
+export async function getUniqueViewerCount(playerId: string): Promise<number> {
+  const sql = `SELECT COUNT(DISTINCT scout_wallet) as count FROM profile_views WHERE player_id = ? AND scout_wallet IS NOT NULL`;
+  const row = await timedQueryAsync(sql, () =>
+    getDriver().get<{ count: number | string }>(sql, [playerId])
+  );
+  return Number(row?.count ?? 0);
+}
+
+/**
+ * Get the count of unique scout wallets that have unlocked contact information for a player.
+ * Counts distinct scout_wallet values from the contact_unlocks table for the given player.
+ * Used in analytics aggregation to determine contact_unlock_count.
+ */
+export async function getContactUnlockCount(playerId: string): Promise<number> {
+  const sql = `SELECT COUNT(DISTINCT scout_wallet) as count FROM contact_unlocks WHERE player_id = ?`;
+  const row = await timedQueryAsync(sql, () =>
+    getDriver().get<{ count: number | string }>(sql, [playerId])
+  );
+  return Number(row?.count ?? 0);
 }
 
 // ─── Feature flags (#494) ─────────────────────────────────────────────────────
@@ -1320,7 +2268,7 @@ export interface PendingAdminActionRow {
   created_at: number;
 }
 
-export function insertPendingAdminAction(p: {
+export async function insertPendingAdminAction(p: {
   id: string;
   action_type: string;
   proposer: string;
@@ -1328,59 +2276,59 @@ export function insertPendingAdminAction(p: {
   required_signatures: number;
   expires_at: number;
   created_at: number;
-}): void {
+}): Promise<void> {
   const sql = `INSERT INTO pending_admin_actions (id, action_type, proposer, payload, required_signatures, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`;
-  timedQuery(sql, () => getDb().prepare(sql).run(p.id, p.action_type, p.proposer, p.payload, p.required_signatures, p.expires_at, p.created_at));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [p.id, p.action_type, p.proposer, p.payload, p.required_signatures, p.expires_at, p.created_at]));
 }
 
-export function getPendingAdminActionById(id: string): PendingAdminActionRow | null {
+export async function getPendingAdminActionById(id: string): Promise<PendingAdminActionRow | null> {
   const sql = `SELECT * FROM pending_admin_actions WHERE id = ?`;
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(id) as PendingAdminActionRow | undefined) ?? null
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<PendingAdminActionRow>(sql, [id])) ?? null
   );
 }
 
-export function getPendingAdminActionsByStatus(status: string): PendingAdminActionRow[] {
+export async function getPendingAdminActionsByStatus(status: string): Promise<PendingAdminActionRow[]> {
   const sql = `SELECT * FROM pending_admin_actions WHERE status = ? ORDER BY created_at DESC`;
-  return timedQuery(sql, () => getDb().prepare(sql).all(status) as PendingAdminActionRow[]);
+  return timedQueryAsync(sql, () => getDriver().all<PendingAdminActionRow>(sql, [status]));
 }
 
-export function updatePendingAdminActionStatus(id: string, status: string): void {
+export async function updatePendingAdminActionStatus(id: string, status: string): Promise<void> {
   const sql = `UPDATE pending_admin_actions SET status = ? WHERE id = ?`;
-  timedQuery(sql, () => getDb().prepare(sql).run(status, id));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [status, id]));
 }
 
-export function incrementActionSignatures(id: string): void {
+export async function incrementActionSignatures(id: string): Promise<void> {
   const sql = `UPDATE pending_admin_actions SET collected_signatures = collected_signatures + 1 WHERE id = ?`;
-  timedQuery(sql, () => getDb().prepare(sql).run(id));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [id]));
 }
 
-export function expireStalePendingAdminActions(): number {
+export async function expireStalePendingAdminActions(): Promise<number> {
   const sql = `UPDATE pending_admin_actions SET status = 'expired' WHERE status = 'pending' AND expires_at <= ?`;
-  const info = timedQuery(sql, () => getDb().prepare(sql).run(Date.now()));
+  const info = await timedQueryAsync(sql, () => getDriver().run(sql, [Date.now()]));
   return info.changes;
 }
 
-export function insertAdminActionSignature(p: {
+export async function insertAdminActionSignature(p: {
   action_id: string;
   signer: string;
   signed_at: number;
-}): boolean {
-  const sql = `INSERT OR IGNORE INTO admin_action_signatures (action_id, signer, signed_at) VALUES (?, ?, ?)`;
-  const info = timedQuery(sql, () => getDb().prepare(sql).run(p.action_id, p.signer, p.signed_at));
+}): Promise<boolean> {
+  const sql = `INSERT INTO admin_action_signatures (action_id, signer, signed_at) VALUES (?, ?, ?) ON CONFLICT (action_id, signer) DO NOTHING`;
+  const info = await timedQueryAsync(sql, () => getDriver().run(sql, [p.action_id, p.signer, p.signed_at]));
   return info.changes > 0;
 }
 
-export function getAdminActionSignature(action_id: string, signer: string): { signed_at: number } | null {
+export async function getAdminActionSignature(action_id: string, signer: string): Promise<{ signed_at: number } | null> {
   const sql = `SELECT signed_at FROM admin_action_signatures WHERE action_id = ? AND signer = ?`;
-  return timedQuery(sql, () =>
-    (getDb().prepare(sql).get(action_id, signer) as { signed_at: number } | undefined) ?? null
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<{ signed_at: number }>(sql, [action_id, signer])) ?? null
   );
 }
 
-export function getAdminActionSignatures(action_id: string): { signer: string; signed_at: number }[] {
+export async function getAdminActionSignatures(action_id: string): Promise<{ signer: string; signed_at: number }[]> {
   const sql = `SELECT signer, signed_at FROM admin_action_signatures WHERE action_id = ? ORDER BY signed_at ASC`;
-  return timedQuery(sql, () => getDb().prepare(sql).all(action_id) as { signer: string; signed_at: number }[]);
+  return timedQueryAsync(sql, () => getDriver().all<{ signer: string; signed_at: number }>(sql, [action_id]));
 }
 
 // ─── Webhook subscriptions (#470) ────────────────────────────────────────────
@@ -1393,22 +2341,32 @@ export interface WebhookSubscription {
   id: number;
   url: string;
   secret: string;
+  scout_wallet: string | null;
+  event_types: string | null; // JSON array of ContractEventType strings, or null = all
   created_at: string;
 }
 
-export function createWebhookSubscription(url: string, secret?: string): WebhookSubscription {
+export function createWebhookSubscription(
+  url: string,
+  secret?: string,
+  scoutWallet?: string,
+  eventTypes?: string[],
+): WebhookSubscription {
   const finalSecret = secret ?? crypto.randomBytes(32).toString('hex');
   // Encrypted at rest (#686) — only the ciphertext is ever persisted. The
   // plaintext is returned to the caller here (e.g. for the API response at
   // issuance time) but is never written back to storage.
   const encryptedSecret = encryptWebhookSecret(finalSecret);
-  const sql = 'INSERT INTO webhook_subscriptions (url, secret) VALUES (?, ?)';
+  const eventTypesJson = eventTypes && eventTypes.length > 0 ? JSON.stringify(eventTypes) : null;
+  const sql = 'INSERT INTO webhook_subscriptions (url, secret, scout_wallet, event_types) VALUES (?, ?, ?, ?)';
   return timedQuery(sql, () => {
-    const info = getDb().prepare(sql).run(url, encryptedSecret);
+    const info = getDb().prepare(sql).run(url, encryptedSecret, scoutWallet ?? null, eventTypesJson);
     return {
       id: Number(info.lastInsertRowid),
       url,
       secret: finalSecret,
+      scout_wallet: scoutWallet ?? null,
+      event_types: eventTypesJson,
       created_at: new Date().toISOString(),
     };
   });
@@ -1421,6 +2379,42 @@ export function listWebhookSubscriptions(): WebhookSubscription[] {
     // Decrypted only here, in memory, immediately before the caller signs a
     // delivery with it (src/services/webhooks.ts) — never persisted.
     return rows.map((row) => ({ ...row, secret: decryptWebhookSecret(row.secret) }));
+  });
+}
+
+/**
+ * Look up a single webhook subscription by its row id.
+ * Returns the row with the secret still encrypted (callers that need the
+ * plaintext secret must call decryptWebhookSecret themselves).
+ * Returns undefined when not found.
+ */
+export function getWebhookSubscriptionById(id: number): WebhookSubscription | undefined {
+  const sql = 'SELECT * FROM webhook_subscriptions WHERE id = ?';
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).get(id) as WebhookSubscription | undefined,
+  );
+}
+
+/**
+ * List all webhook subscriptions owned by a specific scout wallet.
+ * Secrets are returned encrypted — decrypt before use.
+ */
+export function getWebhookSubscriptionsByScout(scoutWallet: string): WebhookSubscription[] {
+  const sql = 'SELECT * FROM webhook_subscriptions WHERE scout_wallet = ? ORDER BY id ASC';
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).all(scoutWallet) as WebhookSubscription[],
+  );
+}
+
+/**
+ * Delete a webhook subscription by id, scoped to a specific scout wallet to
+ * prevent cross-scout deletion. Returns true when a row was deleted.
+ */
+export function deleteWebhookSubscription(id: number, scoutWallet: string): boolean {
+  const sql = 'DELETE FROM webhook_subscriptions WHERE id = ? AND scout_wallet = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(id, scoutWallet);
+    return info.changes > 0;
   });
 }
 
@@ -1448,7 +2442,7 @@ export function ensureLegacyWebhookSubscription(): void {
 // postWebhookWithRetry() exhausts all retry attempts for a given subscriber,
 // instead of the delivery being logged and dropped.
 
-export type WebhookDeadLetterStatus = 'pending' | 'replayed';
+export type WebhookDeadLetterStatus = 'pending' | 'in_progress' | 'replayed';
 
 export interface WebhookDeadLetter {
   id: number;
@@ -1456,9 +2450,12 @@ export interface WebhookDeadLetter {
   url: string;
   event_type: string;
   payload: string;
+  delivery_id: string;
   failure_reason: string;
   attempts: number;
   status: WebhookDeadLetterStatus;
+  locked_by: string | null;
+  locked_at: string | null;
   created_at: string;
   replayed_at: string | null;
 }
@@ -1468,14 +2465,15 @@ export interface InsertDeadLetterInput {
   url: string;
   eventType: string;
   payload: string;
+  deliveryId: string;
   failureReason: string;
   attempts: number;
 }
 
 export function insertWebhookDeadLetter(input: InsertDeadLetterInput): WebhookDeadLetter {
   const sql = `INSERT INTO webhook_dead_letters
-    (subscription_id, url, event_type, payload, failure_reason, attempts, status)
-   VALUES (?, ?, ?, ?, ?, ?, 'pending')`;
+    (subscription_id, url, event_type, payload, delivery_id, failure_reason, attempts, status)
+   VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`;
   return timedQuery(sql, () => {
     const info = getDb()
       .prepare(sql)
@@ -1484,6 +2482,7 @@ export function insertWebhookDeadLetter(input: InsertDeadLetterInput): WebhookDe
         input.url,
         input.eventType,
         input.payload,
+        input.deliveryId,
         input.failureReason,
         input.attempts
       );
@@ -1493,9 +2492,12 @@ export function insertWebhookDeadLetter(input: InsertDeadLetterInput): WebhookDe
       url: input.url,
       event_type: input.eventType,
       payload: input.payload,
+      delivery_id: input.deliveryId,
       failure_reason: input.failureReason,
       attempts: input.attempts,
       status: 'pending',
+      locked_by: null,
+      locked_at: null,
       created_at: new Date().toISOString(),
       replayed_at: null,
     };
@@ -1525,8 +2527,42 @@ export function getWebhookDeadLetterById(id: number): WebhookDeadLetter | undefi
 }
 
 export function markWebhookDeadLetterReplayed(id: number): void {
-  const sql = "UPDATE webhook_dead_letters SET status = 'replayed', replayed_at = ? WHERE id = ?";
+  const sql = "UPDATE webhook_dead_letters SET status = 'replayed', replayed_at = ?, locked_by = NULL, locked_at = NULL WHERE id = ?";
   timedQuery(sql, () => getDb().prepare(sql).run(new Date().toISOString(), id));
+}
+
+/**
+ * Atomically claim a pending dead-letter row for processing by setting
+ * status to 'in_progress' and recording the worker identifier.
+ *
+ * Returns the claimed row on success, or null if another worker already
+ * claimed it (or the row was already replayed / exhausted).
+ *
+ * The UPDATE ... WHERE status = 'pending' is atomic in both SQLite and
+ * PostgreSQL, so exactly one concurrent caller wins the race.
+ */
+export function claimWebhookDeadLetter(id: number, workerId: string): WebhookDeadLetter | null {
+  const now = new Date().toISOString();
+  const sql = `UPDATE webhook_dead_letters
+    SET status = 'in_progress', locked_by = ?, locked_at = ?
+    WHERE id = ? AND status = 'pending'`;
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(workerId, now, id);
+    if (info.changes === 0) return null;
+    return getWebhookDeadLetterById(id) ?? null;
+  });
+}
+
+/**
+ * Release a claim on a dead-letter row, returning it to 'pending' status.
+ * Used when a sweep fails partway through and the row needs to be retried
+ * by a future sweep.
+ */
+export function releaseWebhookDeadLetterClaim(id: number): void {
+  const sql = `UPDATE webhook_dead_letters
+    SET status = 'pending', locked_by = NULL, locked_at = NULL
+    WHERE id = ? AND status = 'in_progress'`;
+  timedQuery(sql, () => getDb().prepare(sql).run(id));
 }
 
 export function updateWebhookDeadLetterAttempt(
@@ -1536,4 +2572,100 @@ export function updateWebhookDeadLetterAttempt(
 ): void {
   const sql = 'UPDATE webhook_dead_letters SET attempts = ?, failure_reason = ? WHERE id = ?';
   timedQuery(sql, () => getDb().prepare(sql).run(attempts, failureReason, id));
+}
+
+/** Delete a specific dead-letter row by id. Returns true when a row was deleted. */
+export function deleteWebhookDeadLetter(id: number): boolean {
+  const sql = 'DELETE FROM webhook_dead_letters WHERE id = ?';
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(id);
+    return info.changes > 0;
+  });
+}
+
+/** Delete all dead-letter rows older than cutoffDays days. Returns the count deleted. */
+export function purgeOldWebhookDeadLetters(cutoffDays: number): number {
+  // created_at is stored as ISO text ("2024-01-01T00:00:00.000Z")
+  const cutoff = new Date(Date.now() - cutoffDays * 24 * 60 * 60 * 1000).toISOString();
+  const sql = "DELETE FROM webhook_dead_letters WHERE created_at < ?";
+  return timedQuery(sql, () => {
+    const info = getDb().prepare(sql).run(cutoff);
+    return info.changes;
+  });
+}
+
+// ─── Fee withdrawal helpers (#fee-withdrawal) ────────────────────────────────
+
+export interface FeeWithdrawalRow {
+  id: number;
+  idempotency_key: string | null;
+  treasury_address: string;
+  amount_stroops: string;
+  tx_hash: string;
+  admin_wallet: string;
+  created_at: string;
+}
+
+/**
+ * Insert a confirmed fee withdrawal record.
+ * The UNIQUE constraint on `tx_hash` prevents duplicate rows for the same
+ * on-chain transaction; the UNIQUE constraint on `idempotency_key` provides
+ * a storage-layer guard against double-submission at the DB level (the HTTP
+ * idempotency middleware is the primary gate, but belts-and-suspenders here
+ * is valuable for audit integrity).
+ *
+ * Returns the new row id.
+ */
+export async function insertFeeWithdrawal(p: {
+  idempotencyKey: string | null;
+  treasuryAddress: string;
+  amountStroops: string;
+  txHash: string;
+  adminWallet: string;
+  createdAt: string;
+}): Promise<number> {
+  const sql = `
+    INSERT INTO fee_withdrawals
+      (idempotency_key, treasury_address, amount_stroops, tx_hash, admin_wallet, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+    RETURNING id
+  `;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [
+      p.idempotencyKey ?? null,
+      p.treasuryAddress,
+      p.amountStroops,
+      p.txHash,
+      p.adminWallet,
+      p.createdAt,
+    ]);
+    return info.lastId;
+  });
+}
+
+/**
+ * Look up a fee withdrawal by idempotency key.
+ * Returns null when no record exists for the given key, so callers can
+ * distinguish "never submitted" from "already submitted".
+ */
+export async function getFeeWithdrawalByIdempotencyKey(key: string): Promise<FeeWithdrawalRow | null> {
+  const sql = `SELECT * FROM fee_withdrawals WHERE idempotency_key = ? LIMIT 1`;
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<FeeWithdrawalRow>(sql, [key])) ?? null,
+  );
+}
+
+/**
+ * Return the most recent fee_withdrawals rows, newest-first.
+ * Used by GET /api/admin/fees to show withdrawal history.
+ */
+export async function listFeeWithdrawals(limit = 50, offset = 0): Promise<FeeWithdrawalRow[]> {
+  const sql = `
+    SELECT * FROM fee_withdrawals
+    ORDER BY created_at DESC
+    LIMIT ? OFFSET ?
+  `;
+  return timedQueryAsync(sql, () =>
+    getDriver().all<FeeWithdrawalRow>(sql, [limit, offset]),
+  );
 }

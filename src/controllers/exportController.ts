@@ -73,7 +73,24 @@ export function formatEventCsvRow(row: EventExportRow): string {
  *   startDate  — ISO 8601, inclusive lower bound on the event's indexed time
  *   endDate    — ISO 8601, inclusive upper bound on the event's indexed time
  *   eventType  — filter to a single contract event type
+ *
+ * ## Client-disconnect handling
+ *
+ * The `for...of` loop below drives a synchronous generator
+ * (`getEventsIterable`), so it only yields control back to Node's event
+ * loop when `res.write()` reports backpressure and we `await` a `drain`
+ * event. That is not a reliable signal on its own: a client with a fast
+ * connection, or a query whose rows are small enough to never fill the
+ * socket buffer, can let the loop run to completion fully synchronously —
+ * during which time Node has no opportunity to dispatch the request's
+ * `'close'` event even if the socket already dropped. Every
+ * `DISCONNECT_CHECK_INTERVAL` rows, the loop explicitly yields via
+ * `setImmediate` and checks the disconnect flag, so a dead connection is
+ * noticed within one batch instead of only when (if ever) a write happens
+ * to block.
  */
+const DISCONNECT_CHECK_INTERVAL = 500;
+
 export async function exportEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = adminDateRangeSchema.safeParse(req.query ?? {});
@@ -96,9 +113,13 @@ export async function exportEvents(req: Request, res: Response, next: NextFuncti
 
     const iterable = getEventsIterable({ type: eventTypeFilter, startDate, endDate });
 
-    // Clean up the SQLite cursor when the client disconnects mid-stream
+    // Clean up the SQLite cursor when the client disconnects mid-stream, and
+    // record the disconnect so the loop below can notice it even when no
+    // write ever blocks (see the disconnect-handling note above).
+    let clientDisconnected = false;
     if (typeof req.on === 'function') {
       req.on('close', () => {
+        clientDisconnected = true;
         iterable.return?.();
       });
     }
@@ -113,6 +134,20 @@ export async function exportEvents(req: Request, res: Response, next: NextFuncti
         // Internal buffer is full — wait for drain before writing more
         await new Promise<void>((resolve) => res.once('drain', resolve));
       }
+
+      if (rowCount % DISCONNECT_CHECK_INTERVAL === 0) {
+        // Yield to the event loop so a pending 'close' event — which Node
+        // cannot dispatch while this loop keeps the call stack busy — gets a
+        // chance to run and flip clientDisconnected.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (clientDisconnected || res.writableEnded || res.destroyed) {
+          return;
+        }
+      }
+    }
+
+    if (clientDisconnected || res.writableEnded || res.destroyed) {
+      return;
     }
 
     // Footer: lets the client detect a truncated export (missing this line

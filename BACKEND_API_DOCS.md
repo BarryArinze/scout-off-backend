@@ -6,6 +6,7 @@ All endpoints are served from the base URL configured via `PORT` (default: `4000
 
 ## Table of Contents
 
+- [API Versioning](#api-versioning)
 - [Authentication](#authentication)
 - [Endpoints](#endpoints)
   - [Health](#health)
@@ -19,6 +20,62 @@ All endpoints are served from the base URL configured via `PORT` (default: `4000
 
 ---
 
+## API Versioning
+
+The platform supports two stable API versions. All routes are available under multiple prefixes:
+
+| Prefix     | Description                                  |
+| ---------- | -------------------------------------------- |
+| `/api`     | Unversioned alias (maps to v1; **deprecated** in production) |
+| `/api/v1`  | Stable v1 — use this for all new integrations |
+| `/api/v2`  | Stable v2 — currently identical to v1; new v2-only behaviour will be introduced here |
+
+### Selecting a version
+
+**URL prefix (recommended)**
+
+```bash
+# v1
+curl http://localhost:4000/api/v1/players
+
+# v2
+curl http://localhost:4000/api/v2/players
+```
+
+**`API-Version` request header (alternative)**
+
+Send `API-Version: 2` on any unversioned `/api/` path to be routed to v2 handlers:
+
+```bash
+curl -H "API-Version: 2" http://localhost:4000/api/players
+```
+
+### `API-Version` response header
+
+Every response from an `/api/` path includes an `API-Version` response header indicating which version actually handled the request:
+
+```
+API-Version: 1
+```
+
+or
+
+```
+API-Version: 2
+```
+
+### Deprecation policy
+
+Calling the bare `/api/` prefix (without `/v1` or `/v2`) in a **production** environment emits a `warn`-level log entry:
+
+```
+[deprecation] Unversioned /api/ path called: GET /api/players — prefer /api/v1/ or /api/v2/. Unversioned paths will be removed in a future release.
+```
+
+Clients should migrate to `/api/v1/` to suppress this warning and prepare for the eventual removal of the unversioned alias.
+
+---
+
 ## Authentication
 
 Most protected routes require a **Bearer JWT** obtained from `POST /auth/token`.
@@ -28,6 +85,42 @@ Authorization: Bearer <token>
 ```
 
 Tokens are issued after a successful SEP-10 Stellar wallet challenge/response flow.
+
+### API keys & scopes (#1019)
+
+Server-to-server integrations can authenticate with a long-lived API key
+instead of a JWT:
+
+```
+X-API-Key: <raw-key>
+```
+
+API keys are issued via `POST /api/scouts/:wallet/api-keys` and revoked via
+`DELETE /api/scouts/:wallet/api-keys/:id`. Only a salted hash is stored.
+
+#### Scope enforcement
+
+Keys without an explicit `scopes` list (legacy keys) keep **unrestricted**
+scout-level access — backward compatible with keys issued before scope
+enforcement. Keys issued with an explicit `scopes` list are **restricted**:
+mutating endpoints require the matching scope and return `403` with
+`reason.requiredScope` otherwise.
+
+| Scope | Enforced on |
+|-------|-------------|
+| `write:contacts` | `POST /scouts/:wallet/contacts/:playerId/unlock` |
+| `write:subscriptions` | `POST/PUT/DELETE /scouts/:wallet/subscribe` |
+| `write:trial_offers` | `POST /scouts/:wallet/trial-offer` and `/trial-offers` |
+| `write:webhooks` | `POST /scouts/:wallet/webhooks`, `DELETE .../:id`, `POST .../:id/test` |
+| `write:api_keys` | `POST /scouts/:wallet/api-keys`, `DELETE .../:id` |
+| `write:bookmarks` | bookmark & bookmark-folder mutations |
+| `write:notes` | scout-note mutations |
+| `write:saved_searches` | saved-search mutations |
+| `write:player_tokens` | `POST /players/:playerId/tokens/buy` |
+| `read:subscription` | `GET /scouts/:wallet/subscription` |
+
+REST and GraphQL share the same scope contract (`src/utils/apiKeyScopes.ts`).
+See `docs/auth.md` for the full vocabulary and legacy-compatibility rules.
 
 ---
 
@@ -220,7 +313,8 @@ Filter players by region, position, and minimum verified tier. No auth required.
       "wallet": "GABC...XYZ",
       "position": "Midfielder",
       "region": "West Africa",
-      "progress_level": 2
+      "progress_level": 2,
+      "progress_tier_name": "Performance Milestones"
     }
   ],
   "total": 1,
@@ -229,12 +323,19 @@ Filter players by region, position, and minimum verified tier. No auth required.
 }
 ```
 
+**Response fields**
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `progress_level` | integer | Numeric progress tier (0–3) |
+| `progress_tier_name` | string | Human-readable tier name: `Unverified`, `Verified Identity`, `Performance Milestones`, or `Elite Tier` |
+
 **Error `400`** — invalid `minTier`
 
 ```json
 {
   "success": false,
-  "error": "minTier 5 is out of range. Valid values: 0, 1, 2, 3."
+  "error": "minTier must be a number; valid values are 0=Unverified, 1=Verified, 2=Performance, 3=Elite"
 }
 ```
 
@@ -248,7 +349,12 @@ curl -X GET "http://localhost:4000/api/players?region=West%20Africa&position=Mid
 
 #### `GET /api/players/:playerId`
 
-Retrieve a single player profile. No auth required.
+Retrieve a single player profile. No auth required for **active** players.
+
+**Deactivated players** are hidden from everyone except the profile owner
+(auth wallet matching the player's `player_id` or `wallet`) and admins — the
+same shared decision (`src/utils/playerAccess.ts`) used by the milestones
+endpoints and GraphQL. Unauthorized callers receive `404`.
 
 **Response `200`**
 
@@ -261,6 +367,7 @@ Retrieve a single player profile. No auth required.
     "position": "Midfielder",
     "region": "West Africa",
     "progress_level": 2,
+    "progress_tier_name": "Performance Milestones",
     "tierName": "tier.2.name",
     "tierDescription": "tier.2.description"
   }
@@ -283,7 +390,12 @@ curl -X GET "http://localhost:4000/api/players/abc123"
 
 #### `GET /api/players/:playerId/milestones`
 
-Tamper-proof milestone history for a player. No auth required.
+Tamper-proof milestone history for a player. No auth required for **active**
+players.
+
+**Deactivated players** follow the same shared authorization as `GET
+/api/players/:playerId` (`src/utils/playerAccess.ts`): owner/admin only,
+otherwise `404` — identical behavior in REST and GraphQL.
 
 **Response `200`**
 
@@ -363,6 +475,71 @@ curl -X GET "http://localhost:4000/api/scouts/GSCOUT1EXAMPLEWALLETXXXXXXXXXXXXXX
 ```
 
 > ⚠️ **Stubbed** — contact data is read from indexed contract events; no write endpoint yet.
+
+---
+
+#### `GET /api/scouts/:wallet/payments`
+
+Payment history for a scout, combining contact unlock payments and subscription payments. Only the owning scout or an admin may call this endpoint. **Requires Bearer auth (scout role).**
+
+**Query params**
+
+| Param      | Type    | Required | Description                                                                                  |
+| ---------- | ------- | -------- | -------------------------------------------------------------------------------------------- |
+| `type`     | string  | ❌       | Filter by payment type: `subscription` or `contact_unlock`                                   |
+| `from`     | string  | ❌       | ISO 8601 start date (inclusive)                                                              |
+| `to`       | string  | ❌       | ISO 8601 end date (inclusive)                                                                |
+| `page`     | integer | ❌       | Page number (default: `1`)                                                                   |
+| `pageSize` | integer | ❌       | Results per page (default: `50`, minimum: `1`, maximum: `100`)                               |
+| `format`   | string  | ❌       | Response format: `json` (default) or `csv` — when `csv`, returns a downloadable CSV file    |
+
+**Response `200` (JSON)**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "tx-abc123",
+      "type": "contact_unlock",
+      "amount_xlm": "5",
+      "player_id": "player-xyz",
+      "tier": null,
+      "tx_hash": "tx-abc123",
+      "created_at": "2024-06-01T00:00:00.000Z",
+      "transactionId": "tx-abc123",
+      "amount": "5",
+      "token": "XLM",
+      "timestamp": "2024-06-01T00:00:00.000Z"
+    }
+  ],
+  "total": 1,
+  "page": 1,
+  "pageSize": 50
+}
+```
+
+**Response `200` (CSV)** — `Content-Type: text/csv; Content-Disposition: attachment; filename="payments.csv"`
+
+```csv
+id,type,amount_xlm,player_id,tier,tx_hash,created_at
+"tx-abc123","contact_unlock","5","player-xyz","","tx-abc123","2024-06-01T00:00:00.000Z"
+```
+
+**Error `403`** — JWT wallet does not match the `:wallet` path parameter.
+
+**Example requests**
+
+```bash
+# JSON — subscription payments only, date-filtered
+curl "http://localhost:4000/api/scouts/GSCOUT.../payments?type=subscription&from=2024-01-01&to=2024-12-31" \
+  -H "Authorization: Bearer <scout-jwt>"
+
+# CSV export
+curl "http://localhost:4000/api/scouts/GSCOUT.../payments?format=csv" \
+  -H "Authorization: Bearer <scout-jwt>" \
+  -o payments.csv
+```
 
 ---
 
@@ -587,21 +764,58 @@ curl -X GET "http://localhost:4000/api/admin/events?startDate=2024-01-01&endDate
 
 #### `GET /api/admin/events/export`
 
-Streams all indexed contract events as a CSV file. **Requires Bearer auth (admin role).**
+Streams all indexed contract events as a CSV file using a Node.js streaming pipeline. **Requires Bearer auth (admin role).**
 
-Query params (identical semantics to `GET /api/admin/events`): `startDate`, `endDate` (ISO 8601, inclusive), `eventType`.
+Unlike a buffered response, this endpoint reads rows from the `events` table one at a time via a `better-sqlite3` cursor (`Statement.iterate()`) and writes each CSV line to the HTTP response as it is produced. Memory usage is **bounded and roughly constant** regardless of table size — exporting 1 million rows consumes less than a few MB of heap.
 
-Rows are read from the database in bounded pages and written to the response as each page
-arrives, so memory usage does not grow with the number of events.
+**Query params** (identical semantics to `GET /api/admin/events`)
 
-**Response `200`** — `Content-Type: text/csv`, `Content-Disposition: attachment; filename="events.csv"`
+| Param       | Type   | Required | Description                                                    |
+| ----------- | ------ | -------- | -------------------------------------------------------------- |
+| `startDate` | string | ❌       | ISO 8601 — inclusive lower bound on the event's indexed time   |
+| `endDate`   | string | ❌       | ISO 8601 — inclusive upper bound on the event's indexed time   |
+| `eventType` | string | ❌       | Filter to a single contract event type (e.g. `player_registered`) |
+
+**Response headers**
+
+| Header               | Value                                        |
+| -------------------- | -------------------------------------------- |
+| `Content-Type`       | `text/csv`                                   |
+| `Content-Disposition`| `attachment; filename="events.csv"`          |
+| `Transfer-Encoding`  | `chunked` (set by Node.js HTTP automatically)|
+
+**Response `200`** — CSV stream, columns: `event_type`, `ledger`, `timestamp`, `payload`
+
 ```csv
 event_type,ledger,timestamp,payload
-player_registered,12345,1700000000,"{}"
+player_registered,12345,1700000000,"{""wallet"":""G...""}"
 milestone_approved,12346,1700000060,"{}"
+__EOF__,2,,
 ```
 
+The last line is always `__EOF__,<row_count>,,`. Clients should verify this line is present to detect truncated exports (e.g. caused by a dropped connection mid-stream).
+
+**CSV escaping** — fields follow RFC 4180: any value containing a comma, double-quote, or newline is wrapped in double-quotes with internal double-quotes doubled (`"` → `""`).
+
+**Backpressure** — the export loop pauses DB reads whenever the HTTP socket buffer is full (waits for the `drain` event) so a slow client cannot cause unbounded memory growth on the server.
+
+**Consistency** — the cursor holds a snapshot of the `events` table as of the first row read. Rows inserted by the background indexer after the cursor opens are excluded — no duplicates and no skipped rows within the snapshot boundary.
+
 **Response `400`** — invalid `startDate`/`endDate`, or `startDate` after `endDate`.
+
+**Example request**
+
+```bash
+# Stream all events to a local file
+curl -X GET "http://localhost:4000/api/admin/events/export" \
+  -H "Authorization: Bearer <admin-jwt>" \
+  --output events.csv
+
+# Filter by type and date range
+curl -X GET "http://localhost:4000/api/admin/events/export?eventType=player_registered&startDate=2024-01-01T00:00:00Z&endDate=2024-12-31T23:59:59Z" \
+  -H "Authorization: Bearer <admin-jwt>" \
+  --output filtered.csv
+```
 
 ---
 
@@ -630,6 +844,89 @@ Fee withdrawal history. **Requires Bearer auth (admin role).**
 ```bash
 curl -X GET "http://localhost:4000/api/admin/fees" \
   -H "Authorization: Bearer <admin-jwt>"
+```
+
+---
+
+#### `POST /api/admin/fees/withdraw`
+
+Withdraw accumulated platform fees from the Soroban contract to a treasury address. **Requires Bearer auth (admin role).**
+
+This is the fully-specified withdrawal endpoint. It queries the contract's live fee balance before submitting, enforces multi-sig when `ADMIN_THRESHOLD > 1`, prevents duplicate submissions via an idempotency key, and records every confirmed withdrawal in the `fee_withdrawals` table.
+
+**Request headers**
+
+| Header            | Required | Description                                                                 |
+| ----------------- | -------- | --------------------------------------------------------------------------- |
+| `Authorization`   | ✅       | `Bearer <admin-jwt>`                                                        |
+| `Idempotency-Key` | ❌       | Opaque string (e.g. UUID). Repeat requests with the same key return the cached result (24-hour TTL). |
+
+**Request body**
+
+| Field             | Type           | Required | Description                                                              |
+| ----------------- | -------------- | -------- | ------------------------------------------------------------------------ |
+| `treasuryAddress` | string         | ✅       | Valid Stellar public key (G…) — destination for the withdrawn fees       |
+| `amountStroops`   | string\|number | ✅       | Positive integer in stroops. Must be ≤ the contract's current fee balance |
+
+**Response `200`** — withdrawal confirmed on-chain
+
+```json
+{
+  "success": true,
+  "data": {
+    "transactionId": "abc123...",
+    "treasuryAddress": "GTREASURY...",
+    "amountStroops": "500000000",
+    "recipient": "GTREASURY...",
+    "amount": "500000000",
+    "token": "XLM"
+  }
+}
+```
+
+**Response `202`** — multi-sig required (`ADMIN_THRESHOLD > 1`); action queued for co-signing
+
+```json
+{
+  "success": true,
+  "message": "Fee withdrawal proposed, awaiting 1 more admin signature(s)",
+  "data": {
+    "actionId": "clxyz...",
+    "collectedSignatures": 1,
+    "requiredSignatures": 2,
+    "treasuryAddress": "GTREASURY...",
+    "amountStroops": "500000000"
+  }
+}
+```
+
+**Error responses**
+
+| Status | Condition                                                           |
+| ------ | ------------------------------------------------------------------- |
+| `400`  | `treasuryAddress` is not a valid Stellar public key, or `amountStroops` is missing / not a positive integer |
+| `401`  | Missing or expired Bearer token                                     |
+| `403`  | Caller does not have the `admin` role, or wallet not in `ADMIN_WALLETS` |
+| `409`  | No fees available (`NO_FEES`), contract paused (`CONTRACT_PAUSED`), or a concurrent withdrawal is already in progress |
+| `422`  | `amountStroops` exceeds the contract's current fee balance          |
+| `503`  | Transient RPC / network error — safe to retry                       |
+
+**Example requests**
+
+```bash
+# Single-admin withdrawal
+curl -X POST "http://localhost:4000/api/admin/fees/withdraw" \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -d '{ "treasuryAddress": "GTREASURY...", "amountStroops": "500000000" }'
+
+# Idempotent retry — returns the same 200 response without re-submitting
+curl -X POST "http://localhost:4000/api/admin/fees/withdraw" \
+  -H "Authorization: Bearer <admin-jwt>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000" \
+  -d '{ "treasuryAddress": "GTREASURY...", "amountStroops": "500000000" }'
 ```
 
 ---
@@ -679,6 +976,42 @@ curl -X GET "http://localhost:4000/api/admin/audit?startDate=2024-01-01&endDate=
 
 ---
 
+## Server-Sent Events (`GET /api/events/stream`) (#1019)
+
+Long-lived SSE stream of contract events relevant to the authenticated wallet.
+Authentication: Bearer JWT (any role) or `X-API-Key`. Optional query params:
+`eventType` (one type) and `playerId` (narrowing). Wallet isolation is always
+enforced; a `: ping` keep-alive comment is sent every
+`SSE_KEEPALIVE_INTERVAL_MS` (default 15 s).
+
+**Live authorization enforcement:**
+
+- Revoking the connection's JWT (logout / admin revocation) emits a terminal
+  `event: session_ended` (reason `token_revoked`) and closes the stream.
+- Blocklisting the wallet (see `docs/auth.md`) emits `session_ended` (reason
+  `wallet_blocklisted`) and closes it; blocklisted wallets also get `403` on
+  new connections.
+- No protected events are delivered after termination.
+
+**Detection bound:** immediate for revocations/blocklists in the same process;
+≤ `SSE_AUTH_SWEEP_INTERVAL_MS` (default 30 s) for changes persisted by
+another instance (one sweep query per process — never per keep-alive tick).
+
+## GraphQL (`POST /graphql`) (#1019)
+
+Read-only GraphQL endpoint sharing the REST authorization model:
+
+- **API keys:** `X-API-Key` is accepted; restricted keys enforce
+  `read:milestones` (milestones queries) and `read:subscription`
+  (`scoutSubscription`).
+- **Milestones:** deactivated players follow the same owner/admin-only
+  decision as REST (`src/utils/playerAccess.ts`); unauthorized callers get a
+  `NOT_FOUND` error (root) or no data (nested `Player.milestones`).
+- **Abuse control:** depth limit (`MAX_DEPTH = 5`) plus a query-cost limit
+  (`MAX_QUERY_COST = 135`) that counts every field node — aliases included —
+  so a single request with ~20+ aliased expensive operations is rejected
+  with a `QUERY_COST_EXCEEDED` error instead of bypassing the depth limit.
+
 ## Stubbed Routes
 
 The following routes currently return data sourced entirely from indexed on-chain events and have no corresponding write/mutation endpoint in the backend:
@@ -688,6 +1021,43 @@ The following routes currently return data sourced entirely from indexed on-chai
 | `GET /api/scouts/:wallet/subscription`   | Subscription state managed on-chain via `subscribe()`; backend is read-only   |
 | `GET /api/scouts/:wallet/contacts`       | Contact unlocks managed on-chain via `pay_to_contact()`; backend is read-only |
 | `GET /api/validators/milestones/pending` | Milestone approval is an on-chain transaction; backend only indexes events    |
+
+---
+
+## Request Timeouts
+
+A global request timeout (`REQUEST_TIMEOUT_MS`, default **30 s**) is applied to all routes via the `requestTimeout` middleware in `app.ts`. When a response has not been sent within the configured window, the middleware writes:
+
+```json
+{
+  "success": false,
+  "error": "Request timed out",
+  "code": "REQUEST_TIMEOUT"
+}
+```
+
+with HTTP status **503**.
+
+### Per-route overrides
+
+Certain routes override the default timeout because their expected duration differs significantly:
+
+| Route | Timeout | Reason |
+|-------|---------|--------|
+| `GET /api/admin/events/export` | **120 s** | Streaming CSV export of large tables can take up to 60 s; the longer window prevents a spurious 503 on a slow-but-healthy export. |
+| `POST /api/admin/reindex` | **none (0)** | Returns 202 immediately — the actual ledger backfill runs as a background job and must never be killed by a network timeout. |
+| `GET /health/liveness` | **5 s** | Kubernetes liveness probe — if the process cannot respond in 5 s it should be restarted. |
+| `GET /health/readiness` | **5 s** | Kubernetes readiness probe — if the DB is unresponsive for more than 5 s the pod should be removed from the load-balancer. |
+
+### Using `createTimeout` in new routes
+
+Import the factory from the timeout middleware to apply a custom value on a specific route:
+
+```ts
+import { createTimeout } from '../middleware/timeout';
+
+router.get('/slow-endpoint', createTimeout(60_000), requireRole('admin'), myHandler);
+```
 
 ---
 
@@ -727,7 +1097,7 @@ When a request triggers a Soroban contract error, the API translates the on-chai
 | 5    | MilestoneNotFound  | 404 Not Found            | Milestone ID does not exist                    | Refresh the milestone list and verify the ID                    |
 | 6    | AlreadyVerified    | 409 Conflict             | Milestone already approved                     | No duplicate approvals needed; check milestone status           |
 | 7    | InsufficientFee    | 402 Payment Required     | Payment is below the required contact fee      | Fetch the current fee via `get_contact_fee()` and retry         |
-| 8    | NotSubscribed      | 402 Payment Required     | Scout has no active subscription               | Call `subscribe` before browsing premium data                   |
+| 8    | NotSubscribed      | 402 Payment Required     | Scout has no active subscription               | Call `subscribe` before browsing premium data; or attempting to cancel an already-cancelled or expired subscription |
 | 9    | Unauthorized       | 401 Unauthorized         | Caller is not authorized for this action       | Confirm you are signing with the correct Stellar account        |
 | 10   | ContractPaused     | 503 Service Unavailable  | Contract is paused by the admin                | Wait for admin to call `unpause_contract()`                     |
 | 11   | Overflow           | 500 Internal Server Error| Arithmetic overflow in fee calculation         | Use amounts within the safe u128 range                          |
@@ -742,5 +1112,53 @@ When a request triggers a Soroban contract error, the API translates the on-chai
 | `POST /api/validators/milestone` | 2 (NotInitialized), 4 (InvalidValidator), 10 (ContractPaused) |
 | `POST /api/scouts/:wallet/contacts/:playerId/unlock` | 7 (InsufficientFee), 8 (NotSubscribed), 9 (Unauthorized), 10 (ContractPaused) |
 | `GET /api/scouts/:wallet/subscription` | 8 (NotSubscribed) |
-| `POST /api/admin/contract/pause` | 9 (Unauthorized), 1 (AlreadyInitialized) |
-| `POST /api/admin/contract/unpause` | 9 (Unauthorized), 10 (ContractPaused) |
+| `DELETE /api/scouts/:wallet/subscription` | 8 (NotSubscribed — no active subscription or already cancelled), 9 (Unauthorized), 10 (ContractPaused) |
+| `GET /api/admin/fees` | 10 (ContractPaused) |
+| `POST /api/admin/contract/pause` | 9 (Unauthorized), 2 (NotInitialized) |
+| `POST /api/admin/contract/unpause` | 9 (Unauthorized), 2 (NotInitialized) |
+
+### Cancel Subscription
+
+`DELETE /api/scouts/:wallet/subscription` — Cancels a scout's active on-chain subscription.
+
+**On-chain semantics:**
+- The `cancel_subscription(scout)` entrypoint on the `subscription` contract marks the subscription as expired at the current ledger (no refund).
+- Returns HTTP `402` with error code `NOT_SUBSCRIBED` (contract code 8) when:
+  - the scout has never subscribed, or
+  - the subscription has already expired naturally, or
+  - the subscription was previously cancelled.
+- The cancel is idempotent in the sense that a successfully cancelled subscription cannot be cancelled again (subsequent attempts return `NOT_SUBSCRIBED`).
+- After cancellation `is_subscribed(scout)` returns `false` immediately.
+
+**Response (success):**
+```json
+{ "success": true, "transactionId": "abc123..." }
+```
+
+**Response (no subscription):**
+```json
+{ "success": false, "error": "Scout has no active on-chain subscription", "code": "NOT_SUBSCRIBED" }
+```
+
+### Pause / Unpause Contract
+
+`POST /api/admin/contract/pause` / `POST /api/admin/contract/unpause`
+
+These endpoints invoke `pause(admin)` / `unpause(admin)` on the **subscription** contract via the platform keypair. The subscription contract's pause flag gates `subscribe`, `pay_to_contact`, and `withdraw_fees`. The `register` and `connection` contracts each have their own `pause`/`unpause` entrypoints that must be called separately if a full platform pause is needed.
+
+**Behavior:**
+- Calling `pause` when already paused is a no-op (returns success).
+- Calling `unpause` when already active is a no-op (returns success).
+- Only the admin address configured at contract initialization may call these.
+- The platform backend routes these calls to the **subscription contract** (`SUBSCRIPTION_CONTRACT_ID`).
+
+### Fee Balance Query
+
+`GET /api/admin/fees` — Returns the accumulated platform fee balance from the subscription contract.
+
+The underlying call is `get_fee_balance() → i128` on the `subscription` contract, which is a read-only simulation (no transaction submitted, no keypair required). The balance represents total fees accumulated from `subscribe` and `pay_to_contact` calls since the last `withdraw_fees`.
+
+**Response:**
+```json
+{ "balanceStroops": "5000000", "balanceXLM": "0.5" }
+```

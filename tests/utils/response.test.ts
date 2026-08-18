@@ -1,4 +1,20 @@
-import { ok, paginated, fail, toIso, normalizeTimestamps } from '../../src/utils/response';
+import { ok, paginated, fail, toIso, normalizeTimestamps, sendSuccess, sendError } from '../../src/utils/response';
+
+// ---------------------------------------------------------------------------
+// Minimal mock of Express Response used by sendSuccess / sendError tests.
+// ---------------------------------------------------------------------------
+function makeMockRes() {
+  const res = {
+    statusCode: 200,
+    headers: {} as Record<string, string>,
+    body: null as unknown,
+    status(code: number) { this.statusCode = code; return this; },
+    json(data: unknown) { this.body = data; return this; },
+    setHeader(name: string, value: string) { this.headers[name] = value; return this; },
+    set(name: string, value: string) { this.headers[name] = value; return this; },
+  };
+  return res;
+}
 
 describe('response utils', () => {
   describe('ok', () => {
@@ -136,6 +152,90 @@ describe('response utils', () => {
       const result = normalizeTimestamps(payload, []);
       expect(result).toEqual(payload);
       expect(result).not.toBe(payload);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // sendSuccess
+  // -------------------------------------------------------------------------
+  describe('sendSuccess', () => {
+    it('sends a 200 response with success envelope by default', () => {
+      const res = makeMockRes();
+      sendSuccess(res as never, { id: 42, name: 'Player One' });
+
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toEqual({
+        success: true,
+        data: { id: 42, name: 'Player One' },
+      });
+    });
+
+    it('sends a custom status code and merges meta into the envelope', () => {
+      const res = makeMockRes();
+      sendSuccess(res as never, { id: 1 }, 201, { page: 1 });
+
+      expect(res.statusCode).toBe(201);
+      expect(res.body).toEqual({
+        success: true,
+        data: { id: 1 },
+        page: 1,
+      });
+    });
+
+    it('sets Content-Type: application/json header', () => {
+      const res = makeMockRes();
+      sendSuccess(res as never, { ok: true });
+
+      expect(res.headers['Content-Type']).toBe('application/json');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // sendError
+  // -------------------------------------------------------------------------
+  describe('sendError', () => {
+    it('sends a 400 response with the error message', () => {
+      const res = makeMockRes();
+      sendError(res as never, 'Invalid wallet address', 400);
+
+      expect(res.statusCode).toBe(400);
+      expect(res.body).toEqual({
+        success: false,
+        error: 'Invalid wallet address',
+      });
+    });
+
+    it('defaults to status 500 for internal server errors', () => {
+      const res = makeMockRes();
+      sendError(res as never, 'Something went wrong');
+
+      expect(res.statusCode).toBe(500);
+      expect(res.body).toEqual({
+        success: false,
+        error: 'Something went wrong',
+      });
+    });
+
+    it('includes an errors array for validation errors when provided', () => {
+      const res = makeMockRes();
+      sendError(res as never, 'Validation failed', 422, [
+        'wallet is required',
+        'position must be one of: GK, DEF, MID, FWD',
+      ]);
+
+      expect(res.statusCode).toBe(422);
+      expect(res.body).toEqual({
+        success: false,
+        error: 'Validation failed',
+        errors: ['wallet is required', 'position must be one of: GK, DEF, MID, FWD'],
+      });
+    });
+
+    it('sets Content-Type: application/json header', () => {
+      const res = makeMockRes();
+      sendError(res as never, 'Not found', 404);
+
+      expect(res.headers['Content-Type']).toBe('application/json');
     });
   });
 });

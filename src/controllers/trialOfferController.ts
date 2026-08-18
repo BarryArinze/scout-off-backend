@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { getTrialOfferById, respondToTrialOffer, insertTrialOffer } from '../db';
 import { queryEvents } from '../db';
 import { logger } from '../utils/logger';
+import { broadcaster } from '../services/eventBroadcaster';
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -32,7 +33,7 @@ function getPlayerWallet(playerId: string): string | null {
  * - 404: offer not found
  * - 409: offer already responded to
  */
-export async function acceptTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function acceptTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { playerId, offerId } = req.params;
 
@@ -97,6 +98,17 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
 
     logger.info(`[trialOffer] accepted offerId=${offerId} playerId=${playerId}`);
 
+    // Notify the scout via SSE that their trial offer was accepted.
+    broadcaster.broadcast({
+      type: 'trial_offer_accepted',
+      payload: {
+        offer_id: offerId,
+        player_id: playerId,
+        scout: offer.scout_wallet,
+        responded_at: now,
+      },
+    });
+
     // NOTE: On-chain record of the response is a future step.
     // When the Soroban contract supports `respond_to_offer(offer_id, accepted: bool)`,
     // invoke it here via stellarService.respondToTrialOffer(offerId, 'accepted').
@@ -124,7 +136,7 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
  * - 404: offer not found
  * - 409: offer already responded to
  */
-export async function rejectTrialOffer(req: Request, res: Response, next: NextFunction) {
+export async function rejectTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { playerId, offerId } = req.params;
 
@@ -193,6 +205,18 @@ export async function rejectTrialOffer(req: Request, res: Response, next: NextFu
     await respondToTrialOffer({ offer_id: offerId, status: 'rejected', reject_reason: reason, responded_at: now });
 
     logger.info(`[trialOffer] rejected offerId=${offerId} playerId=${playerId} reason=${reason ?? 'none'}`);
+
+    // Notify the scout via SSE that their trial offer was rejected.
+    broadcaster.broadcast({
+      type: 'trial_offer_rejected',
+      payload: {
+        offer_id: offerId,
+        player_id: playerId,
+        scout: offer.scout_wallet,
+        reason: reason ?? null,
+        responded_at: now,
+      },
+    });
 
     // NOTE: On-chain record of the response is a future step (see acceptTrialOffer above).
 

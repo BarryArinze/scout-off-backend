@@ -1,33 +1,189 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
-import { queryEvents, getEventsCount, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount } from '../db';
+import { queryEvents, countEventsFiltered, getEventsPage, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow, getNewPlayersTimeSeries, getMilestonesApprovedTimeSeries, getContactUnlocksTimeSeries, getSubscriptionsStartedTimeSeries, getNewPlayersByRegionTimeSeries, TimeSeriesPoint, RegionBreakdownPoint, insertFeeWithdrawal } from '../db';
 import { getAllValidators, insertValidator, revokeValidatorRow, getValidatorByWallet } from '../services/indexer';
 import { isValidStellarAddress } from '../utils/stellarAddress';
+import { STELLAR_ADDRESS_RE } from '../utils/validators';
 import { logAuditEvent } from '../services/audit';
-import { verifyAuditChain } from '../utils/auditVerify';
-import { withdrawFees as stellarWithdrawFees, FeeWithdrawalError, FeeWithdrawalResult, pauseContractOnChain, unpauseContractOnChain, registerValidatorOnChain, ValidatorActionError } from '../services/stellar';
-import { revokeToken } from '../services/tokenBlocklist';
+import { verifyAuditChain, verifyAuditChainFull } from '../utils/auditVerify';
+import { withdrawFees as stellarWithdrawFees, FeeWithdrawalError, FeeWithdrawalResult, getFeeBalance, pauseContractOnChain, unpauseContractOnChain, registerValidatorOnChain, revokeValidatorOnChain, ValidatorActionError } from '../services/stellar';
+import { revokeToken, isTokenRevoked } from '../services/tokenBlocklist';
+import { cacheGet, cacheSet } from '../services/cache';
 import config from '../config';
 import { logger } from '../utils/logger';
 import { ErrorCode } from '../utils/errorCodes';
 import { proposeAction, approveAction, listPendingActions, getActionDetails } from '../services/adminMultiSig';
+import { withConcurrencyLimit } from '../utils/concurrency';
 import type { ApiResponse, EventRecord, ContractEventType } from '../types';
+
+// ─── Audit trail types & constants (#832) ─────────────────────────────────────
+
+/**
+ * The exhaustive set of audit event types that the platform can emit.
+ * Used for validation of the ?eventType query parameter.
+ */
+export const KNOWN_AUDIT_EVENT_TYPES = [
+  // Admin action events (event_source = 'admin_action')
+  'fee_history_query',
+  'contract_state_change',
+  'validator_registration',
+  'validator_revocation',
+  'fee_withdrawal_attempt',
+  'platform_fee_update_attempt',
+  'bulk_validator_import',
+  // App-level events (event_source = 'app_event')
+  'player_registered',
+  'profile_updated',
+  'milestone_submitted',
+  'milestone_approved',
+  'player_search',
+  'pending_milestones_viewed',
+  // Auth events
+  'auth_failed',
+  'auth_forbidden',
+] as const;
+
+export type AuditEventType = (typeof KNOWN_AUDIT_EVENT_TYPES)[number];
+
+/**
+ * Canonical response shape for a single audit log entry (#832).
+ * Maps the internal `audit_log` column names to the public API contract.
+ */
+export interface AuditEntryResponse {
+  id: number;
+  event_type: string;
+  actor_wallet: string;
+  target_id: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  hash: string;
+}
+
+/**
+ * Send a consistent 400 response for a failed Zod parse: a generic top-level
+ * `error: 'Validation Error'` label plus a `details` array of per-field
+ * messages (mirrors the shape already produced by validateBody/validateQuery
+ * in src/middleware/validate.ts for routes that use that middleware).
+ */
+function sendValidationError(res: Response, error: z.ZodError): void {
+  const details = error.errors.map((e) => ({ field: e.path.join('.'), message: e.message }));
+  res.status(400).json({ success: false, error: 'Validation Error', details, code: ErrorCode.VALIDATION_ERROR });
+}
+
+/**
+ * Convert a raw DB row to the public AuditEntry response shape.
+ * `target_id` is extracted from query_params if present there.
+ */
+function rowToAuditEntry(row: AuditLogRow): AuditEntryResponse {
+  let params: Record<string, unknown> = {};
+  try {
+    params = JSON.parse(row.query_params) as Record<string, unknown>;
+  } catch {
+    // Leave params empty — malformed JSON should not crash the endpoint.
+  }
+  const { target_id, targetId, validatorWallet, player_id, playerId, ...rest } = params;
+  // Prefer explicit target_id / targetId keys; fall back to common domain keys.
+  const resolvedTargetId =
+    (target_id as string | undefined) ??
+    (targetId as string | undefined) ??
+    (validatorWallet as string | undefined) ??
+    (player_id as string | undefined) ??
+    (playerId as string | undefined) ??
+    null;
+  return {
+    id: row.id,
+    event_type: row.action,
+    actor_wallet: row.admin_wallet,
+    target_id: resolvedTargetId,
+    metadata: { ...rest },
+    created_at: row.created_at,
+    hash: row.hash,
+  };
+}
 
 // Use shared validator for Stellar public keys
 
+const statsQuerySchema = z.object({
+  window: z.enum(['7d', '30d', '90d']).optional(),
+  breakdown: z.enum(['region']).optional(),
+});
+
 /** GET /api/admin/stats */
-export async function getStats(req: Request, res: Response, next: NextFunction) {
+export async function getStats(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    res.json({
-      success: true,
-      data: {
-        players: queryEvents('player_registered').length,
-        milestones: queryEvents('milestone_approved').length,
-        subscriptions: queryEvents('scout_subscribed').length,
-        events: queryEvents().length,
-      },
-    });
+    const parsed = statsQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    const { window, breakdown } = parsed.data;
+
+    // If no window or breakdown requested, return basic stats (backward compatible)
+    if (!window && !breakdown) {
+      res.json({
+        success: true,
+        data: {
+          players: queryEvents('player_registered').length,
+          milestones: queryEvents('milestone_approved').length,
+          subscriptions: queryEvents('scout_subscribed').length,
+          events: queryEvents().length,
+        },
+      });
+      return;
+    }
+
+    // Default to 30d if window is not specified but breakdown is
+    const windowValue = window ?? '30d';
+
+    // Calculate time window
+    const windowDays = windowValue === '7d' ? 7 : windowValue === '30d' ? 30 : 90;
+    const endDate = new Date();
+    const startDate = new Date();
+    startDate.setDate(startDate.getDate() - windowDays);
+
+    const startDateMs = startDate.getTime();
+    const endDateMs = endDate.getTime();
+
+    // Generate cache key
+    const cacheKey = `admin:stats:${windowValue}:${breakdown ?? 'none'}`;
+    const cached = await cacheGet<{ data: Record<string, unknown> }>(cacheKey);
+    if (cached) {
+      res.json({ success: true, data: cached.data });
+      return;
+    }
+
+    // Fetch time-series data
+    const newPlayers = getNewPlayersTimeSeries(startDateMs, endDateMs);
+    const milestonesApproved = getMilestonesApprovedTimeSeries(startDateMs, endDateMs);
+    const contactUnlocks = getContactUnlocksTimeSeries(startDateMs, endDateMs);
+    const subscriptionsStarted = getSubscriptionsStartedTimeSeries(startDateMs, endDateMs);
+
+    const data: Record<string, unknown> = {
+      window: windowValue,
+      startDate: startDate.toISOString().split('T')[0],
+      endDate: endDate.toISOString().split('T')[0],
+      newPlayers,
+      milestonesApproved,
+      contactUnlocks,
+      subscriptionsStarted,
+    };
+
+    // Add region breakdown if requested
+    if (breakdown === 'region') {
+      const newPlayersByRegion = getNewPlayersByRegionTimeSeries(startDateMs, endDateMs);
+      data.newPlayersByRegion = newPlayersByRegion;
+    }
+
+    // Cache for 5 minutes (300000ms)
+    await cacheSet(cacheKey, { data }, 5 * 60 * 1000);
+
+    res.json({ success: true, data });
   } catch (err) {
     next(err);
   }
@@ -46,12 +202,16 @@ const auditQuerySchema = z.object({
   offset: z.coerce.number().int().min(0).default(0),
 });
 
-/** GET /api/admin/audit */
-export async function getAuditLog(req: Request, res: Response, next: NextFunction) {
+/** GET /api/admin/audit (legacy #345 endpoint — backward-compatible) */
+export async function getAuditLog(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = auditQuerySchema.safeParse(req.query);
     if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid query parameters' });
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
       return;
     }
     const { startDate, endDate, action, limit, offset } = parsed.data;
@@ -69,18 +229,104 @@ export async function getAuditLog(req: Request, res: Response, next: NextFunctio
   }
 }
 
+// ─── Audit trail endpoint (#832) ──────────────────────────────────────────────
+
+const auditTrailQuerySchema = z.object({
+  /** Filter by audit event type. Must be one of the known event types. */
+  eventType: z
+    .string()
+    .refine(
+      (v) => (KNOWN_AUDIT_EVENT_TYPES as readonly string[]).includes(v),
+      (v) => ({ message: `Invalid eventType "${v}". Must be one of: ${KNOWN_AUDIT_EVENT_TYPES.join(', ')}` })
+    )
+    .optional(),
+  /** ISO 8601 start of date range (inclusive). */
+  from: z
+    .string()
+    .refine((v) => !isNaN(Date.parse(v)), { message: 'from must be a valid ISO 8601 date string' })
+    .optional(),
+  /** ISO 8601 end of date range (inclusive). */
+  to: z
+    .string()
+    .refine((v) => !isNaN(Date.parse(v)), { message: 'to must be a valid ISO 8601 date string' })
+    .optional(),
+  /** 1-based page number (default: 1). */
+  page: z.coerce.number().int().min(1).default(1),
+  /** Number of entries per page, max 100 (default: 50). */
+  pageSize: z.coerce.number().int().min(1).max(100).default(50),
+}).refine(
+  (d) => {
+    if (d.from && d.to) {
+      return new Date(d.from) <= new Date(d.to);
+    }
+    return true;
+  },
+  { message: 'from must not be after to' }
+);
+
+/**
+ * GET /api/admin/audit/trail
+ *
+ * Returns paginated, filterable audit trail entries in a structured AuditEntry
+ * shape. Accepts ?eventType=, ?from=, ?to= (ISO 8601), ?page=, ?pageSize=.
+ *
+ * @response 200 { success: true, data: AuditEntry[], total, page, pageSize }
+ * @response 400 { success: false, error: string } - Invalid query parameters
+ * @auth Bearer (admin role required)
+ */
+export async function getAuditTrail(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parsed = auditTrailQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+
+    const { eventType, from, to, page, pageSize } = parsed.data;
+    const offset = (page - 1) * pageSize;
+
+    const rows = await getAuditLogs({
+      action: eventType,
+      startDate: from,
+      endDate: to,
+      limit: pageSize,
+      offset,
+    });
+
+    const total = await getAuditLogsCount({
+      action: eventType,
+      startDate: from,
+      endDate: to,
+    });
+
+    res.json({
+      success: true,
+      data: rows.map(rowToAuditEntry),
+      total,
+      page,
+      pageSize,
+    });
+  } catch (err) {
+    next(err);
+  }
+}
+
 /**
  * GET /api/admin/audit/verify
  *
- * Walks the audit_log hash chain end-to-end and reports whether it is intact,
- * or — if not — the id of the first row where it breaks (see #464). Useful
- * for periodic compliance checks / incident response: a `valid: false`
- * result means a historical row was edited, deleted, or reordered outside
- * the application (e.g. direct DB access).
+ * Walks the full audit_log hash chain, collecting every violation rather than
+ * stopping at the first broken row (#764). Returns a structured integrity
+ * report with status 'ok' | 'tampered' | 'timeout', a violations array, the
+ * total chain_length, and rows_checked. Useful for periodic compliance checks
+ * and incident response.
  */
-export async function getAuditChainVerification(req: Request, res: Response, next: NextFunction) {
+export async function getAuditChainVerification(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const result = await verifyAuditChain();
+    const result = await verifyAuditChainFull();
     res.json({ success: true, data: result });
   } catch (err) {
     next(err);
@@ -97,51 +343,149 @@ export const adminDateRangeSchema = z.object({
   { message: 'startDate must not be after endDate' }
 );
 
-const paginationSchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).optional(),
-  offset: z.coerce.number().int().min(0).optional(),
-  page: z.coerce.number().int().min(1).optional(),
-  pageSize: z.coerce.number().int().min(1).max(100).optional(),
-});
+/**
+ * Zod schema for all query parameters accepted by GET /api/admin/events.
+ *
+ * Supports two pagination styles for backwards compatibility:
+ *   - Legacy:  ?limit=N&offset=M   (max limit 100, offset >= 0)
+ *   - Modern:  ?page=N&pageSize=N  (max pageSize 200, page >= 1)
+ *
+ * Date-range filtering via ?startDate / ?endDate (ISO 8601) or the shorter
+ * aliases ?from / ?to are both accepted and normalised to startDate/endDate.
+ */
+const eventsQuerySchema = z
+  .object({
+    // ── date-range ─────────────────────────────────────────────────────────
+    startDate: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'startDate must be a valid ISO 8601 date' })
+      .optional(),
+    endDate: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'endDate must be a valid ISO 8601 date' })
+      .optional(),
+    from: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'from must be a valid ISO 8601 date' })
+      .optional(),
+    to: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'to must be a valid ISO 8601 date' })
+      .optional(),
+    // ── event type ─────────────────────────────────────────────────────────
+    eventType: z.string().optional(),
+    // ── legacy pagination (limit / offset) ─────────────────────────────────
+    limit: z.coerce.number().int().min(1).max(100).optional(),
+    offset: z.coerce.number().int().min(0).optional(),
+    // ── modern pagination (page / pageSize) ────────────────────────────────
+    page: z.coerce.number().int().min(1).optional(),
+    pageSize: z.coerce.number().int().min(1).max(200).optional(),
+    // ── ledger range ────────────────────────────────────────────────────────
+    fromLedger: z.coerce.number().int().min(0).optional(),
+    toLedger: z.coerce.number().int().min(0).optional(),
+  })
+  .refine(
+    (d) => {
+      const start = d.startDate ?? d.from;
+      const end = d.endDate ?? d.to;
+      if (start && end) return new Date(start) <= new Date(end);
+      return true;
+    },
+    { message: 'startDate must not be after endDate' },
+  )
+  .refine(
+    (d) => {
+      if (d.fromLedger !== undefined && d.toLedger !== undefined) {
+        return d.fromLedger <= d.toLedger;
+      }
+      return true;
+    },
+    { message: 'fromLedger must not be greater than toLedger' },
+  );
 
 /** GET /api/admin/events */
-export async function getAllEvents(req: Request, res: Response, next: NextFunction) {
+export async function getAllEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const dateResult = adminDateRangeSchema.safeParse(req.query);
-    if (!dateResult.success) {
-      res.status(400).json({ success: false, error: dateResult.error.errors[0]?.message ?? 'Invalid query parameters', code: ErrorCode.VALIDATION_ERROR });
+    const parsed = eventsQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      sendValidationError(res, parsed.error);
       return;
     }
-    const pageResult = paginationSchema.safeParse(req.query);
-    if (!pageResult.success) {
-      res.status(400).json({ success: false, error: pageResult.error.errors[0]?.message ?? 'Invalid pagination parameters', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const { startDate, endDate, eventType } = dateResult.data;
-    const { limit: requestedLimit, offset: requestedOffset, page, pageSize } = pageResult.data;
-    const limit = requestedLimit ?? pageSize ?? 20;
-    const offset = requestedOffset ?? ((page ?? 1) - 1) * limit;
+
+    const { startDate, endDate, from, to, eventType, limit, offset, page, pageSize } = parsed.data;
+
+    // Resolve date range — ?from/?to are aliases for ?startDate/?endDate
+    const resolvedStart = startDate ?? from;
+    const resolvedEnd = endDate ?? to;
+    const startDateObj = resolvedStart ? new Date(resolvedStart) : undefined;
+    const endDateObj = resolvedEnd ? new Date(resolvedEnd) : undefined;
 
     const eventTypeFilter = eventType as ContractEventType | undefined;
-    let events = queryEvents(eventTypeFilter, { limit, offset }) as unknown as EventRecord[];
-    if (startDate) events = events.filter((e) => new Date(e.created_at ?? 0) >= startDate!);
-    if (endDate) events = events.filter((e) => new Date(e.created_at ?? 0) <= endDate!);
 
-    const total = getEventsCount(eventTypeFilter);
-    res.json({ success: true, data: events, total, limit, offset });
+    // Resolve pagination — legacy limit/offset takes precedence when supplied;
+    // falls back to page/pageSize, then defaults (limit=20, offset=0).
+    const resolvedLimit = limit ?? pageSize ?? 20;
+    const resolvedOffset = offset ?? ((page ?? 1) - 1) * resolvedLimit;
+
+    const filter = { type: eventTypeFilter, startDate: startDateObj, endDate: endDateObj };
+
+    // Fetch the page from the DB (date filtering happens at SQL level)
+    const rows = getEventsPage(filter, resolvedLimit, resolvedOffset);
+    const total = countEventsFiltered(filter);
+    const totalPages = Math.ceil(total / resolvedLimit);
+
+    const data = rows.map((r) => ({
+      source: '',
+      type: r.type,
+      payload: r.payload,
+      contractAddress: '',
+      created_at: r.createdAt,
+    }));
+
+    res.json({
+      success: true,
+      data,
+      total,
+      // Return both pagination styles so existing callers keep working
+      limit: resolvedLimit,
+      offset: resolvedOffset,
+      page: Math.floor(resolvedOffset / resolvedLimit) + 1,
+      pageSize: resolvedLimit,
+      totalPages,
+    });
   } catch (err) {
     next(err);
   }
 }
 
+const feesQuerySchema = z
+  .object({
+    startDate: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'startDate must be a valid ISO 8601 date' })
+      .optional(),
+    endDate: z
+      .string()
+      .refine((v) => !isNaN(Date.parse(v)), { message: 'endDate must be a valid ISO 8601 date' })
+      .optional(),
+  })
+  .refine(
+    (d) => {
+      if (d.startDate && d.endDate) return new Date(d.startDate) <= new Date(d.endDate);
+      return true;
+    },
+    { message: 'startDate must not be after endDate' },
+  );
+
 /** GET /api/admin/fees — returns fees_withdrawn event payloads */
-export async function getFeeSummary(req: Request, res: Response, next: NextFunction) {
+export async function getFeeSummary(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const dateResult = adminDateRangeSchema.safeParse(req.query);
-    if (!dateResult.success) {
-      res.status(400).json({ success: false, error: dateResult.error.errors[0]?.message ?? 'Invalid query parameters', code: ErrorCode.VALIDATION_ERROR });
+    const parsed = feesQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      sendValidationError(res, parsed.error);
       return;
     }
+
     const adminWallet = req.account ?? 'unknown';
     await logAuditEvent({
       action: 'fee_history_query',
@@ -158,7 +502,7 @@ export async function getFeeSummary(req: Request, res: Response, next: NextFunct
 }
 
 /** GET /api/admin/validators */
-export async function listValidators(req: Request, res: Response, next: NextFunction) {
+export async function listValidators(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     res.json({ success: true, data: await getAllValidators() });
   } catch (err) {
@@ -173,13 +517,41 @@ export async function listValidators(req: Request, res: Response, next: NextFunc
  * on-chain confirmation, so a failed/rejected chain call never leaves a
  * local row that doesn't reflect contract state.
  */
-export async function registerValidator(req: Request, res: Response, next: NextFunction) {
+export async function registerValidator(req: Request, res: Response, next: NextFunction): Promise<void> {
   const adminWallet = req.account ?? 'unknown';
   const { validatorWallet } = req.body as { validatorWallet?: string };
 
   if (!validatorWallet || !isValidStellarAddress(validatorWallet)) {
     logger.warn(`[admin] register_validator rejected — invalid address | admin=${adminWallet} target=${validatorWallet}`);
-    res.status(400).json({ success: false, error: 'validatorWallet must be a valid Stellar address', code: ErrorCode.VALIDATION_ERROR });
+    res.status(400).json({
+      success: false,
+      error: 'Validation Error',
+      details: [{ field: 'validatorWallet', message: 'Invalid Stellar address' }],
+      code: ErrorCode.VALIDATION_ERROR,
+    });
+    return;
+  }
+
+  // Multi-sig threshold check: propose when threshold > 1.
+  if (!config.adminWallets.includes(adminWallet)) {
+    res.status(403).json({ success: false, error: 'Insufficient permissions' });
+    return;
+  }
+
+  const proposal = await proposeAction('pause_contract', { validatorWallet, action: 'register_validator' }, adminWallet);
+  if (proposal.status === 'proposed') {
+    logAuditEvent({
+      action: 'validator_registration',
+      adminWallet,
+      queryParams: { validatorWallet, actionId: proposal.actionId, outcome: 'multisig_pending' },
+      timestamp: new Date().toISOString(),
+      contractAction: 'register_validator',
+    });
+    res.status(202).json({
+      success: true,
+      message: `Validator registration proposed, awaiting ${config.adminThreshold - 1} more admin signature(s)`,
+      data: { actionId: proposal.actionId, collectedSignatures: 1, requiredSignatures: config.adminThreshold },
+    });
     return;
   }
 
@@ -251,7 +623,7 @@ export async function registerValidator(req: Request, res: Response, next: NextF
  * on-chain confirmation, so a failed/rejected chain call never leaves the
  * local row out of sync with contract state.
  */
-export async function revokeValidator(req: Request, res: Response, next: NextFunction) {
+export async function revokeValidator(req: Request, res: Response, next: NextFunction): Promise<void> {
   const adminWallet = req.account ?? 'unknown';
   const { validatorWallet } = req.body as { validatorWallet?: string };
 
@@ -261,18 +633,41 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
     return;
   }
 
-  try {
-    // Short-circuit on already-revoked local state before touching the chain.
-    const existing = await getValidatorByWallet(validatorWallet);
-    if (existing?.revoked_at != null) {
-      res.status(409).json({
-        success: false,
-        error: `Validator ${validatorWallet} is already revoked`,
-        code: ErrorCode.CONFLICT,
-      });
-      return;
-    }
+  // Multi-sig threshold check.
+  if (!config.adminWallets.includes(adminWallet)) {
+    res.status(403).json({ success: false, error: 'Insufficient permissions' });
+    return;
+  }
 
+  // Short-circuit on already-revoked local state before touching the chain.
+  const existing = await getValidatorByWallet(validatorWallet);
+  if (existing?.revoked_at != null) {
+    res.status(409).json({
+      success: false,
+      error: `Validator ${validatorWallet} is already revoked`,
+      code: ErrorCode.CONFLICT,
+    });
+    return;
+  }
+
+  const proposal = await proposeAction('pause_contract', { validatorWallet, action: 'revoke_validator' }, adminWallet);
+  if (proposal.status === 'proposed') {
+    logAuditEvent({
+      action: 'validator_revocation',
+      adminWallet,
+      queryParams: { validatorWallet, actionId: proposal.actionId, outcome: 'multisig_pending' },
+      timestamp: new Date().toISOString(),
+      contractAction: 'revoke_validator',
+    });
+    res.status(202).json({
+      success: true,
+      message: `Validator revocation proposed, awaiting ${config.adminThreshold - 1} more admin signature(s)`,
+      data: { actionId: proposal.actionId, collectedSignatures: 1, requiredSignatures: config.adminThreshold },
+    });
+    return;
+  }
+
+  try {
     logger.info(`[admin] action=revoke_validator admin=${adminWallet} target=${validatorWallet}`);
     // Audit the attempt before submitting the on-chain transaction (pre-transaction state).
     await logAuditEvent({
@@ -341,7 +736,7 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
  * Invokes pause() on the Soroban contract via the platform keypair.
  * Returns 409 if the contract is already paused.
  */
-export async function pauseContract(req: Request, res: Response, next: NextFunction) {
+export async function pauseContract(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const adminWallet = req.account ?? 'unknown';
     // Check if admin wallet is in allowed admin wallets
@@ -350,7 +745,7 @@ export async function pauseContract(req: Request, res: Response, next: NextFunct
       return;
     }
     // Check threshold for high-value operations
-    const proposal = proposeAction('pause_contract', {}, adminWallet);
+    const proposal = await proposeAction('pause_contract', {}, adminWallet);
     if (proposal.status === 'immediate') {
       await logAuditEvent({
         action: 'contract_state_change',
@@ -360,7 +755,7 @@ export async function pauseContract(req: Request, res: Response, next: NextFunct
         contractAction: 'pause_contract',
       }).catch(() => {});
 
-      const result = await pauseContractOnChain();
+      const result = await pauseContractOnChain(adminWallet);
 
       await logAuditEvent({
         action: 'contract_state_change',
@@ -396,7 +791,7 @@ export async function pauseContract(req: Request, res: Response, next: NextFunct
  * Invokes unpause() on the Soroban contract via the platform keypair.
  * Returns 409 if the contract is not currently paused.
  */
-export async function unpauseContract(req: Request, res: Response, next: NextFunction) {
+export async function unpauseContract(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const adminWallet = req.account ?? 'unknown';
     // Check if admin wallet is in allowed admin wallets
@@ -405,7 +800,7 @@ export async function unpauseContract(req: Request, res: Response, next: NextFun
       return;
     }
     // Check threshold for high-value operations
-    const proposal = proposeAction('unpause_contract', {}, adminWallet);
+    const proposal = await proposeAction('unpause_contract', {}, adminWallet);
     if (proposal.status === 'immediate') {
       await logAuditEvent({
         action: 'contract_state_change',
@@ -415,7 +810,7 @@ export async function unpauseContract(req: Request, res: Response, next: NextFun
         contractAction: 'unpause_contract',
       }).catch(() => {});
 
-      const result = await unpauseContractOnChain();
+      const result = await unpauseContractOnChain(adminWallet);
 
       await logAuditEvent({
         action: 'contract_state_change',
@@ -452,7 +847,7 @@ const revokeTokenSchema = z.object({
 }).refine((d) => !!d.jti || !!d.token, { message: 'jti or token is required' });
 
 /** POST /api/admin/tokens/revoke */
-export async function revokeTokenController(req: Request, res: Response, next: NextFunction) {
+export async function revokeTokenController(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = revokeTokenSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -489,22 +884,44 @@ export async function revokeTokenController(req: Request, res: Response, next: N
  * an arbitrary token there would let an admin introspect another user's
  * claims (#279).
  */
-export async function introspectToken(req: Request, res: Response, next: NextFunction) {
+export async function introspectToken(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     // requireRole('admin') has already verified this header's token.
+    // Any `token` field in the request body is intentionally ignored — accepting
+    // an arbitrary token there would let an admin introspect another user's
+    // claims (#279).
     const callerToken = (req.headers.authorization ?? '').slice(7);
     const payload = jwt.decode(callerToken) as jwt.JwtPayload | null;
     if (!payload) {
       res.status(400).json({ success: false, error: 'Invalid or expired token', code: ErrorCode.TOKEN_INVALID });
       return;
     }
+
+    // Revocation check — only meaningful when the token carries a jti claim.
+    const revoked = payload.jti ? isTokenRevoked(payload.jti) : false;
+
+    // A token is valid when it has not expired AND has not been revoked.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const expired = payload.exp !== undefined ? payload.exp <= nowSec : false;
+    const valid = !expired && !revoked;
+
+    // Human-readable ISO 8601 timestamps (supplementary — tests do not require these).
+    const iatIso = payload.iat !== undefined ? new Date(payload.iat * 1000).toISOString() : undefined;
+    const expIso = payload.exp !== undefined ? new Date(payload.exp * 1000).toISOString() : undefined;
+
     res.json({
       success: true,
       data: {
+        // Fields required by existing tests — kept at the top level of data.
         sub: payload.sub,
         role: payload.role,
         iat: payload.iat,
         exp: payload.exp,
+        // Supplementary fields added by this issue.
+        valid,
+        ...(revoked && { revoked: true }),
+        ...(iatIso !== undefined && { iatIso }),
+        ...(expIso !== undefined && { expIso }),
       },
     });
   } catch (err) {
@@ -512,12 +929,10 @@ export async function introspectToken(req: Request, res: Response, next: NextFun
   }
 }
 
-const STELLAR_ADDRESS_RE_PUBLIC = /^G[A-Z2-7]{55}$/;
-
 export const withdrawFeesSchema = z.object({
   recipient: z
     .string()
-    .regex(STELLAR_ADDRESS_RE_PUBLIC, 'recipient must be a valid Stellar public key'),
+    .refine((v) => STELLAR_ADDRESS_RE.test(v), 'Invalid Stellar address'),
 });
 
 /**
@@ -537,7 +952,7 @@ export function setWithdrawalLockForTesting(): void {
 }
 
 /** POST /api/admin/fees — withdraw accumulated platform fees */
-export async function withdrawFeesController(req: Request, res: Response, next: NextFunction) {
+export async function withdrawFeesController(req: Request, res: Response, next: NextFunction): Promise<void> {
   // Controller-level role guard (defence-in-depth in addition to the route middleware).
   if (req.role !== 'admin') {
     res.status(403).json({ success: false, error: 'Insufficient permissions', code: ErrorCode.FORBIDDEN });
@@ -550,29 +965,11 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
     res.status(403).json({ success: false, error: 'Insufficient permissions' });
     return;
   }
-  // Check threshold for high-value operations
-  if (config.adminThreshold > 1) {
-    const parsed = withdrawFeesSchema.safeParse(req.body);
-    if (!parsed.success) {
-      await logAuditEvent({
-        action: 'fee_withdrawal_attempt',
-        adminWallet,
-        queryParams: { error: 'validation_failed', reason: parsed.error.errors[0]?.message },
-        timestamp: new Date().toISOString(),
-      }).catch(() => {});
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const proposal = proposeAction('withdraw_fees', { recipient: parsed.data.recipient }, adminWallet);
-    res.status(202).json({
-      success: true,
-      message: `Fee withdrawal proposed, awaiting ${config.adminThreshold - 1} more admin signature(s)`,
-      data: { actionId: proposal.actionId, collectedSignatures: 1, requiredSignatures: config.adminThreshold, recipient: parsed.data.recipient },
-    });
-    return;
-  }
+  // Validate the request body up front — this must happen before the
+  // threshold branch below, since the single-admin path used to skip
+  // validation entirely and hand an unvalidated `recipient` straight to
+  // stellarWithdrawFees().
   const parsed = withdrawFeesSchema.safeParse(req.body);
-
   if (!parsed.success) {
     await logAuditEvent({
       action: 'fee_withdrawal_attempt',
@@ -580,7 +977,18 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
       queryParams: { error: 'validation_failed', reason: parsed.error.errors[0]?.message },
       timestamp: new Date().toISOString(),
     }).catch(() => {});
-    res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body', code: ErrorCode.VALIDATION_ERROR });
+    sendValidationError(res, parsed.error);
+    return;
+  }
+
+  // Check threshold for high-value operations
+  if (config.adminThreshold > 1) {
+    const proposal = await proposeAction('withdraw_fees', { recipient: parsed.data.recipient }, adminWallet);
+    res.status(202).json({
+      success: true,
+      message: `Fee withdrawal proposed, awaiting ${config.adminThreshold - 1} more admin signature(s)`,
+      data: { actionId: proposal.actionId, collectedSignatures: 1, requiredSignatures: config.adminThreshold, recipient: parsed.data.recipient },
+    });
     return;
   }
 
@@ -649,6 +1057,12 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
         case 'NO_FEES':
           res.status(409).json({ success: false, error: 'No fees available to withdraw', code: ErrorCode.NO_FEES });
           return;
+        case 'INSUFFICIENT_FEES':
+          // Legacy path withdraws the full balance, so this only happens when
+          // the live balance dropped after the amount was resolved — the
+          // requested (full) amount is no longer available.
+          res.status(409).json({ success: false, error: 'No fees available to withdraw', code: ErrorCode.NO_FEES });
+          return;
         case 'CONTRACT_PAUSED':
           res.status(409).json({ success: false, error: 'Contract is paused; withdrawal not available', code: ErrorCode.CONTRACT_PAUSED });
           return;
@@ -674,7 +1088,7 @@ const reindexSchema = z.object({
  * GET /api/admin/validators/:wallet/stats
  * Returns validator stats: milestones_approved and milestones_rejected.
  */
-export async function getValidatorStatsEndpoint(req: Request, res: Response, next: NextFunction) {
+export async function getValidatorStatsEndpoint(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const wallet = req.params.wallet;
     // Validate wallet address
@@ -711,11 +1125,11 @@ export async function getValidatorStatsEndpoint(req: Request, res: Response, nex
  * POST /api/admin/indexer/reindex
  * Resets the indexer's last_ledger to fromLedger so the next poll replays from that point.
  */
-export async function reindex(req: Request, res: Response, next: NextFunction) {
+export async function reindex(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const parsed = reindexSchema.safeParse(req.body);
     if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'fromLedger must be a non-negative integer', code: ErrorCode.VALIDATION_ERROR });
+      sendValidationError(res, parsed.error);
       return;
     }
     const { fromLedger } = parsed.data;
@@ -735,7 +1149,7 @@ const updatePlatformFeeSchema = z.object({
  * POST /api/admin/platform-fee
  * Update platform fee configuration on-chain
  */
-export async function updatePlatformFee(req: Request, res: Response, next: NextFunction) {
+export async function updatePlatformFee(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     if (req.role !== 'admin') {
       res.status(403).json({ success: false, error: 'Insufficient permissions' });
@@ -782,9 +1196,9 @@ export async function updatePlatformFee(req: Request, res: Response, next: NextF
  * GET /api/admin/actions/pending
  * List all pending multi-admin actions (expired ones are purged on read).
  */
-export async function getPendingActions(req: Request, res: Response, next: NextFunction) {
+export async function getPendingActions(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const actions = listPendingActions().map((a) => ({
+    const actions = (await listPendingActions()).map((a) => ({
       id: a.id,
       actionType: a.action_type,
       proposer: a.proposer,
@@ -804,9 +1218,9 @@ export async function getPendingActions(req: Request, res: Response, next: NextF
  * GET /api/admin/actions/:id
  * Get details of a specific pending action including collected signers.
  */
-export async function getPendingActionById(req: Request, res: Response, next: NextFunction) {
+export async function getPendingActionById(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const details = getActionDetails(req.params.id);
+    const details = await getActionDetails(req.params.id);
     if (!details) {
       res.status(404).json({ success: false, error: 'Action not found', code: ErrorCode.NOT_FOUND });
       return;
@@ -835,7 +1249,7 @@ export async function getPendingActionById(req: Request, res: Response, next: Ne
  * POST /api/admin/actions/:id/approve
  * Co-sign a pending multi-admin action.
  */
-export async function approvePendingAction(req: Request, res: Response, next: NextFunction) {
+export async function approvePendingAction(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const adminWallet = req.account ?? 'unknown';
 
@@ -844,7 +1258,7 @@ export async function approvePendingAction(req: Request, res: Response, next: Ne
       return;
     }
 
-    const result = approveAction(req.params.id, adminWallet);
+    const result = await approveAction(req.params.id, adminWallet);
 
     if (result.status === 'duplicate') {
       res.status(409).json({
@@ -914,7 +1328,7 @@ export interface ImportValidatorEntry {
   region?: string;
 }
 
-export type ImportResultStatus = 'registered' | 'duplicate' | 'invalid';
+export type ImportResultStatus = 'registered' | 'duplicate' | 'invalid' | 'pending_approval';
 
 export interface ImportValidatorResult {
   wallet: string;
@@ -953,8 +1367,17 @@ export function parseCsvBody(text: string): ImportValidatorEntry[] {
 
 /**
  * Process a batch of ImportValidatorEntry items and return per-entry results.
- * Delegates registration to the same insertValidator() path used by the single-
- * registration endpoint so no registration logic is duplicated.
+ *
+ * Multi-sig gating:
+ *   - When ADMIN_THRESHOLD > 1, queues each valid row as a pending admin action
+ *     instead of registering immediately on-chain. Per-row status is "pending_approval".
+ *   - When ADMIN_THRESHOLD <= 1, calls registerValidatorOnChain() for each valid row
+ *     with a concurrency limit of 5 simultaneous calls.
+ *
+ * Database mutation ordering:
+ *   - DB insert (insertValidator) happens ONLY AFTER on-chain confirmation succeeds
+ *   - Prevents orphaned rows that don't reflect contract state
+ *   - Uses allSettled semantics so one failure doesn't abort the batch
  *
  * Duplicate detection:
  *   - A validator that already exists AND is not revoked → "duplicate"
@@ -966,39 +1389,124 @@ export async function processBatch(
   adminWallet: string,
 ): Promise<ImportValidatorResult[]> {
   const results: ImportValidatorResult[] = [];
-  // Track wallets already seen in this batch to handle intra-batch duplicates
   const seenInBatch = new Set<string>();
 
-  for (const entry of entries) {
+  // Split entries into two phases: validation, then registration/queueing
+  const validatedEntries: Array<{
+    entry: ImportValidatorEntry;
+    index: number;
+  }> = [];
+
+  // Phase 1: Validation (fast path, synchronous)
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
     const { wallet, label, region } = entry;
 
-    // 1. Validate the address
+    // Check if wallet address is valid
     if (!isValidStellarAddress(wallet)) {
       logger.warn(`[admin] import_validator rejected — invalid address | admin=${adminWallet} target=${wallet}`);
-      results.push({ wallet, status: 'invalid', reason: 'invalid Stellar address', label, region });
+      results[i] = { wallet, status: 'invalid', reason: 'invalid Stellar address', label, region };
       continue;
     }
 
-    // 2. Check intra-batch duplicate
+    // Check intra-batch duplicate
     if (seenInBatch.has(wallet)) {
-      results.push({ wallet, status: 'duplicate', reason: 'duplicate within batch', label, region });
+      results[i] = { wallet, status: 'duplicate', reason: 'duplicate within batch', label, region };
       continue;
     }
 
-    // 3. Check DB for an already-active (non-revoked) registration
+    // Check DB for already-active (non-revoked) registration
     const existing = await getValidatorByWallet(wallet);
     if (existing && existing.revoked_at === null) {
-      results.push({ wallet, status: 'duplicate', reason: 'already registered', label, region });
+      results[i] = { wallet, status: 'duplicate', reason: 'already registered', label, region };
       seenInBatch.add(wallet);
       continue;
     }
 
-    // 4. Register — reuses the same insertValidator path as the single endpoint
-    logger.info(`[admin] action=import_register_validator admin=${adminWallet} target=${wallet}`);
-    // TODO: invoke register_validator on Soroban contract (same as single-registration endpoint)
-    await insertValidator(wallet);
+    // Passes validation
     seenInBatch.add(wallet);
-    results.push({ wallet, status: 'registered', label, region });
+    validatedEntries.push({ entry, index: i });
+  }
+
+  // Phase 2: Registration/Queueing (async, with multi-sig gating and concurrency limit)
+  if (validatedEntries.length > 0) {
+    if (config.adminThreshold > 1) {
+      // Multi-sig: queue each validated entry as a pending admin action
+      for (const { entry, index } of validatedEntries) {
+        const { wallet, label, region } = entry;
+        try {
+          const proposal = await proposeAction(
+            'bulk_validator_import',
+            { wallet, label: label || undefined, region: region || undefined },
+            adminWallet,
+          );
+          // Status depends on whether threshold was already met (immediate) or pending
+          const status = proposal.status === 'immediate' ? 'registered' : 'pending_approval';
+          logger.info(
+            `[admin] action=import_register_validator_multisig admin=${adminWallet} target=${wallet} status=${status}`,
+          );
+          results[index] = {
+            wallet,
+            status: status as ImportResultStatus,
+            label,
+            region,
+          };
+        } catch (err) {
+          logger.error(`[admin] import_validator_multisig error | admin=${adminWallet} target=${wallet} error=${err}`);
+          results[index] = {
+            wallet,
+            status: 'invalid',
+            reason: `Multi-sig queuing failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+            label,
+            region,
+          };
+        }
+      }
+    } else {
+      // Single-admin: call registerValidatorOnChain with concurrency limit of 5
+      const tasks = validatedEntries.map(({ entry, index }) => {
+        return async () => {
+          const { wallet, label, region } = entry;
+          try {
+            logger.info(`[admin] action=import_register_validator admin=${adminWallet} target=${wallet}`);
+            const result = await registerValidatorOnChain(wallet);
+
+            // DB insert ONLY after on-chain confirmation succeeds
+            await insertValidator(wallet, result.transactionId);
+
+            logger.info(
+              `[admin] action=import_register_validator_success admin=${adminWallet} target=${wallet} txid=${result.transactionId}`,
+            );
+            results[index] = {
+              wallet,
+              status: 'registered',
+              label,
+              region,
+            };
+          } catch (err) {
+            logger.error(
+              `[admin] import_validator error | admin=${adminWallet} target=${wallet} error=${err instanceof Error ? err.message : 'unknown'}`,
+            );
+            // Do NOT insert into DB if on-chain call fails
+            results[index] = {
+              wallet,
+              status: 'invalid',
+              reason:
+                err instanceof ValidatorActionError
+                  ? `On-chain registration failed: ${err.code}`
+                  : `On-chain registration failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+              label,
+              region,
+            };
+          }
+        };
+      });
+
+      // Execute with concurrency limit of 5
+      await withConcurrencyLimit(tasks, 5);
+
+      // Results are already populated by each task
+    }
   }
 
   return results;
@@ -1019,7 +1527,7 @@ export async function processBatch(
  * @response 400 { success: false, error: string } - Unparseable body or no entries
  * @auth Bearer (admin role required)
  */
-export async function importValidators(req: Request, res: Response, next: NextFunction) {
+export async function importValidators(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const adminWallet = req.account ?? 'unknown';
     const contentType = (req.headers['content-type'] ?? '').toLowerCase();
@@ -1069,17 +1577,23 @@ export async function importValidators(req: Request, res: Response, next: NextFu
     const results = await processBatch(entries, adminWallet);
 
     const registered = results.filter((r) => r.status === 'registered').length;
+    const pending = results.filter((r) => r.status === 'pending_approval').length;
     const duplicates = results.filter((r) => r.status === 'duplicate').length;
     const invalid = results.filter((r) => r.status === 'invalid').length;
 
     logger.info(
-      `[admin] action=import_validators admin=${adminWallet} total=${results.length} registered=${registered} duplicates=${duplicates} invalid=${invalid}`,
+      `[admin] action=import_validators admin=${adminWallet} total=${results.length} registered=${registered} pending=${pending} duplicates=${duplicates} invalid=${invalid}`,
     );
 
     await logAuditEvent({
       action: 'bulk_validator_import',
       adminWallet,
-      queryParams: { total: results.length, registered, duplicates, invalid },
+      queryParams: {
+        total: results.length,
+        registered: registered + pending,
+        duplicates,
+        invalid,
+      },
       timestamp: new Date().toISOString(),
     }).catch(() => {});
 
@@ -1089,7 +1603,7 @@ export async function importValidators(req: Request, res: Response, next: NextFu
         results,
         summary: {
           total: results.length,
-          registered,
+          registered: registered + pending,
           duplicates,
           invalid,
         },
@@ -1097,5 +1611,332 @@ export async function importValidators(req: Request, res: Response, next: NextFu
     });
   } catch (err) {
     next(err);
+  }
+}
+
+// ─── POST /api/admin/fees/withdraw ─────────────────────────────────────────
+//
+// Fully-specified fee withdrawal endpoint (replaces the stub in
+// withdrawFeesController above). Key differences from the legacy endpoint:
+//
+//  1. Body:      { treasuryAddress, amountStroops }  (not { recipient })
+//  2. Validate:  treasuryAddress via isValidStellarAddress
+//                amountStroops > 0 AND ≤ on-chain get_fee_balance()
+//  3. Multi-sig: if ADMIN_THRESHOLD > 1 → propose and return 202
+//  4. Execute:   withdraw_fees(admin, treasury_address, amount_stroops)
+//                — the validated amount is threaded into the contract call
+//                (not silently discarded) and enforced on-chain
+//  5. DB record: fee_withdrawals row (idempotency_key, treasury_address,
+//                amount_stroops, tx_hash, admin_wallet, created_at) where
+//                amount_stroops stores the ACTUAL on-chain-confirmed amount
+//                parsed from the transaction result — the requested amount
+//                remains in the audit log for reconciliation (see below)
+//  6. Audit log: fee_withdrawal event carrying both the requested
+//                (amountStroops) and actual (amount) withdrawal amounts, so
+//                the audit trail records what was requested AND what moved
+//  7. Idempotency: Idempotency-Key header handled by the idempotency
+//                  middleware applied in the route; the controller also
+//                  writes to the fee_withdrawals idempotency_key column
+//                  as a storage-layer guard.
+
+const withdrawFeesV2Schema = z.object({
+  treasuryAddress: z
+    .string({ required_error: 'treasuryAddress is required' })
+    .refine(isValidStellarAddress, {
+      message: 'treasuryAddress must be a valid Stellar public key',
+    }),
+  amountStroops: z
+    .union([z.string(), z.number()])
+    .transform((v) => String(v))
+    .refine((v) => /^\d+$/.test(v) && BigInt(v) > 0n, {
+      message: 'amountStroops must be a positive integer',
+    }),
+});
+
+/**
+ * POST /api/admin/fees/withdraw
+ *
+ * Withdraw accumulated platform fees from the Soroban contract.
+ *
+ * Request body: { treasuryAddress: string, amountStroops: string | number }
+ * Optional header: Idempotency-Key  (prevents duplicate submissions)
+ *
+ * Flow:
+ *  1. Role + admin-wallet guard
+ *  2. Zod validation
+ *  3. get_fee_balance() — reject 422 if amountStroops > balance
+ *  4. Multi-sig gate — if ADMIN_THRESHOLD > 1 propose and return 202
+ *  5. Concurrency lock — reject 409 if another withdrawal is in flight
+ *  6. withdraw_fees() on-chain
+ *  7. Insert fee_withdrawals DB record
+ *  8. Audit log
+ */
+export async function withdrawFeesV2Controller(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  // ── 1. Role guard (defence-in-depth in addition to route middleware) ───────
+  if (req.role !== 'admin') {
+    res.status(403).json({
+      success: false,
+      error: 'Insufficient permissions',
+      code: ErrorCode.FORBIDDEN,
+    });
+    return;
+  }
+
+  const adminWallet = req.account ?? 'unknown';
+
+  if (!config.adminWallets.includes(adminWallet)) {
+    res.status(403).json({ success: false, error: 'Insufficient permissions' });
+    return;
+  }
+
+  // ── 2. Zod validation ───────────────────────────────────────────────────────
+  const parsed = withdrawFeesV2Schema.safeParse(req.body);
+  if (!parsed.success) {
+    const reason = parsed.error.errors[0]?.message ?? 'Invalid request body';
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: { error: 'validation_failed', reason },
+      timestamp: new Date().toISOString(),
+    });
+    res.status(400).json({
+      success: false,
+      error: reason,
+      code: ErrorCode.VALIDATION_ERROR,
+    });
+    return;
+  }
+
+  const { treasuryAddress, amountStroops } = parsed.data;
+
+  // ── 3. Multi-sig gate ───────────────────────────────────────────────────────
+  if (config.adminThreshold > 1) {
+    const proposal = await proposeAction(
+      'withdraw_fees',
+      { treasuryAddress, amountStroops },
+      adminWallet,
+    );
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: {
+        treasuryAddress,
+        amountStroops,
+        actionId: proposal.actionId,
+        outcome: 'multisig_pending',
+      },
+      timestamp: new Date().toISOString(),
+    });
+    res.status(202).json({
+      success: true,
+      message: `Fee withdrawal proposed, awaiting ${config.adminThreshold - 1} more admin signature(s)`,
+      data: {
+        actionId: proposal.actionId,
+        collectedSignatures: 1,
+        requiredSignatures: config.adminThreshold,
+        treasuryAddress,
+        amountStroops,
+      },
+    });
+    return;
+  }
+
+  // ── 4. Validate amountStroops against live on-chain fee balance ────────────
+  try {
+    const balance = await getFeeBalance();
+    if (BigInt(amountStroops) > balance) {
+      logAuditEvent({
+        action: 'fee_withdrawal_attempt',
+        adminWallet,
+        queryParams: {
+          treasuryAddress,
+          amountStroops,
+          feeBalance: balance.toString(),
+          error: 'amount_exceeds_balance',
+          outcome: 'failure',
+        },
+        timestamp: new Date().toISOString(),
+      });
+      res.status(422).json({
+        success: false,
+        error: `amountStroops (${amountStroops}) exceeds the contract fee balance (${balance})`,
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+  } catch (balanceErr) {
+    // Non-fatal balance check failure — log and proceed; the contract itself
+    // will reject the withdrawal if the amount is invalid.
+    logger.warn(
+      `[admin] fee_balance_check_failed admin=${adminWallet} err=${
+        balanceErr instanceof Error ? balanceErr.message : balanceErr
+      }`,
+    );
+  }
+
+  // ── 5. Concurrency guard ────────────────────────────────────────────────────
+  if (withdrawalInProgress) {
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: {
+        treasuryAddress,
+        amountStroops,
+        error: 'concurrent_withdrawal_rejected',
+        outcome: 'failure',
+      },
+      timestamp: new Date().toISOString(),
+      contractAction: 'withdraw_fees',
+    });
+    res.status(409).json({
+      success: false,
+      error: 'A withdrawal is already in progress',
+      code: ErrorCode.CONFLICT,
+    });
+    return;
+  }
+
+  withdrawalInProgress = true;
+
+  // Extract idempotency key from the header (the middleware has already served
+  // a cached response if the key was seen before — reaching here means it's new).
+  const idempotencyKey =
+    typeof req.headers['idempotency-key'] === 'string'
+      ? req.headers['idempotency-key'].trim() || null
+      : null;
+
+  try {
+    // ── 6. On-chain execution ─────────────────────────────────────────────────
+    logger.info(
+      `[admin] action=withdraw_fees admin=${adminWallet} treasury=${treasuryAddress} amount=${amountStroops}`,
+    );
+
+    const result: FeeWithdrawalResult = await stellarWithdrawFees(treasuryAddress, amountStroops);
+
+    // ── 7. DB record ──────────────────────────────────────────────────────────
+    // amount_stroops stores the ACTUAL on-chain-confirmed amount (parsed from
+    // the transaction result by the stellar service), NOT the requested value:
+    // the DB is the record of what actually left the contract. The requested
+    // amountStroops is preserved in the audit log below, so the two can be
+    // reconciled — they normally match, but if the live balance dropped
+    // between validation and execution the contract enforces the lower amount
+    // and the DB reflects reality while the audit log keeps the request.
+    try {
+      insertFeeWithdrawal({
+        idempotencyKey,
+        treasuryAddress,
+        amountStroops: result.amount,
+        txHash: result.transactionId,
+        adminWallet,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (dbErr) {
+      // DB write failure must not block the response — the on-chain transaction
+      // already succeeded. Log the error so ops can reconcile manually.
+      logger.error(
+        `[admin] fee_withdrawal_db_insert_failed txHash=${result.transactionId} err=${
+          dbErr instanceof Error ? dbErr.message : dbErr
+        }`,
+      );
+    }
+
+    // ── 8. Audit log ──────────────────────────────────────────────────────────
+    // Carries BOTH the requested amount (amountStroops) and the actual
+    // on-chain-confirmed amount (amount, parsed from the tx result) so the
+    // audit trail reflects what was actually withdrawn, and so the requested
+    // vs actual discrepancy is preserved for reconciliation against the
+    // fee_withdrawals row.
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: {
+        treasuryAddress,
+        amountStroops,
+        recipient: result.recipient,
+        transactionId: result.transactionId,
+        amount: result.amount,
+        token: result.token,
+        outcome: 'success',
+      },
+      timestamp: new Date().toISOString(),
+      contractAction: 'withdraw_fees',
+    });
+
+    res.status(200).json({
+      success: true,
+      data: {
+        transactionId: result.transactionId,
+        treasuryAddress,
+        amountStroops,
+        recipient: result.recipient,
+        amount: result.amount,
+        token: result.token,
+      },
+    });
+  } catch (err) {
+    const errorCode = err instanceof FeeWithdrawalError ? err.code : 'UNKNOWN';
+    const retryable = err instanceof FeeWithdrawalError ? err.retryable : false;
+
+    logAuditEvent({
+      action: 'fee_withdrawal_attempt',
+      adminWallet,
+      queryParams: {
+        treasuryAddress,
+        amountStroops,
+        error: err instanceof Error ? err.message : 'unknown_error',
+        errorCode,
+        retryable,
+        outcome: 'failure',
+      },
+      timestamp: new Date().toISOString(),
+      contractAction: 'withdraw_fees',
+    });
+
+    if (err instanceof FeeWithdrawalError) {
+      switch (err.code) {
+        case 'NO_FEES':
+          res.status(409).json({
+            success: false,
+            error: 'No fees available to withdraw',
+            code: ErrorCode.NO_FEES,
+          });
+          return;
+        case 'CONTRACT_PAUSED':
+          res.status(409).json({
+            success: false,
+            error: 'Contract is paused; withdrawal not available',
+            code: ErrorCode.CONTRACT_PAUSED,
+          });
+          return;
+        case 'INVALID_RECIPIENT':
+          res.status(400).json({
+            success: false,
+            error: 'Invalid treasury address',
+            code: ErrorCode.INVALID_RECIPIENT,
+          });
+          return;
+        case 'INSUFFICIENT_FEES':
+          res.status(422).json({
+            success: false,
+            error: 'Requested withdrawal amount exceeds the available fee balance',
+            code: ErrorCode.VALIDATION_ERROR,
+          });
+          return;
+        case 'NETWORK_ERROR':
+          res.status(503).json({
+            success: false,
+            error: 'Network error; please retry',
+            code: ErrorCode.NETWORK_ERROR,
+          });
+          return;
+      }
+    }
+    next(err);
+  } finally {
+    withdrawalInProgress = false;
   }
 }

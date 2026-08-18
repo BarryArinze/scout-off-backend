@@ -58,11 +58,13 @@ export async function recordAudit(
   payload: Record<string, unknown>,
   notes?: string
 ): Promise<AuditEntry> {
+  // Strip log injection characters from optional notes
+  const sanitizedNotes = notes?.replace(/[\r\n]+/g, ' ');
   const payloadHash = createHash('sha256').update(JSON.stringify(payload)).digest('hex');
   const row = await insertAuditLog({
     action: eventType,
     adminWallet: actorWallet,
-    queryParams: { payloadHash, ...(notes !== undefined ? { notes } : {}) },
+    queryParams: { payloadHash, ...(sanitizedNotes !== undefined ? { notes: sanitizedNotes } : {}) },
     createdAt: new Date().toISOString(),
     eventSource: APP_EVENT_SOURCE,
   });

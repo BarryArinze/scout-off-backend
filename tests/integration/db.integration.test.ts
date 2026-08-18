@@ -66,6 +66,10 @@ beforeEach(async () => {
     );
     CREATE INDEX IF NOT EXISTS idx_contact_unlocks_scout ON contact_unlocks (scout_wallet);
   `);
+  // runMigrations() expects the DbDriver abstraction (with .all()/.exec()/
+  // .run()/.transaction()), not a raw better-sqlite3 Database instance —
+  // wrap it the same way tests/db/migrate.test.ts and
+  // tests/db/compositeIndex.test.ts do.
   await runMigrations(new SqliteDriver(db));
 });
 
