@@ -353,7 +353,9 @@
     },
     "/scouts/{wallet}/trial-offer": {
       "post": {
-        "tags": ["scouts"], "summary": "Submit a trial offer to a player", "operationId": "submitTrialOffer",        "security": [ { "bearerAuth": [] }, { "apiKeyAuth": [] } ],
+        "tags": ["scouts"], "summary": "Submit a trial offer to a player (deprecated alias)", "operationId": "submitTrialOffer", "deprecated": true,
+        "description": "Deprecated alias of POST /scouts/{wallet}/trial-offers. It runs the same handler, so validation, persistence, tier promotion, SSE broadcast, response body and error codes are identical. Migrate to the plural path.",
+        "security": [ { "bearerAuth": [] }, { "apiKeyAuth": [] } ],
         "parameters": [ { "$ref": "#/components/parameters/walletParam" } ],
         "requestBody": {
           "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["playerId", "detailsUri"], "properties": { "playerId": { "type": "string" }, "detailsUri": { "type": "string" } } } } } },
@@ -378,7 +380,9 @@
         }
       },
       "post": {
-        "tags": ["scouts"], "summary": "Create a trial offer (on-chain event log variant)", "operationId": "createTrialOffer",        "security": [ { "bearerAuth": [] }, { "apiKeyAuth": [] } ],
+        "tags": ["scouts"], "summary": "Submit a trial offer to a player", "operationId": "createTrialOffer",
+        "description": "Canonical trial-offer submission. Validates the body, submits the offer on-chain, indexes it into trial_offer_events, persists it to trial_offers as pending, promotes the player to Elite Tier and broadcasts the trial_offer_logged and milestone_approved SSE events.",
+        "security": [ { "bearerAuth": [] }, { "apiKeyAuth": [] } ],
         "parameters": [ { "$ref": "#/components/parameters/walletParam" } ],
         "requestBody": {
           "required": true, "content": { "application/json": { "schema": { "type": "object", "required": ["playerId", "detailsUri"], "properties": { "playerId": { "type": "string" }, "detailsUri": { "type": "string" } } } } } },

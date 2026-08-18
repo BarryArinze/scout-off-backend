@@ -459,7 +459,14 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
   }
 }
 
-/** POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally */
+/**
+ * POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally.
+ *
+ * This is the **canonical** implementation of "a scout submits a trial offer for a player".
+ * The legacy `POST /api/scouts/:wallet/trial-offer` route (`submitTrialOffer` below)
+ * delegates here, so both routes share one code path — validation, on-chain submission,
+ * `trial_offer_events` + `trial_offers` persistence, Elite Tier promotion and SSE broadcast.
+ */
 export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
@@ -562,47 +569,27 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
   }
 }
 
-// ─── POST /api/scouts/:wallet/trial-offer ─────────────────────────────────────
+// ─── POST /api/scouts/:wallet/trial-offer (deprecated alias) ──────────────────
 
-/** POST /api/scouts/:wallet/trial-offer */
+/**
+ * POST /api/scouts/:wallet/trial-offer — **deprecated** alias of
+ * `POST /api/scouts/:wallet/trial-offers` (`createTrialOffer`).
+ *
+ * Both paths describe the same business operation, so this handler owns no logic
+ * of its own: it delegates to the canonical implementation, which means it now
+ * performs the full flow (Zod validation, player/access checks, on-chain submission,
+ * `trial_offer_events` + `trial_offers` persistence, Elite Tier promotion and SSE
+ * broadcast) instead of the partial one it used to run.
+ *
+ * Kept reachable because it is published in `openapi.json` and covered by the
+ * `write:trial_offers` API-key scope; clients should migrate to the plural path.
+ */
 export async function submitTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
-    const { playerId, detailsUri } = req.body as { playerId: string; detailsUri: string };
-
-    if (req.account !== wallet) {
-      logger.warn(`[scout] action=log_trial_offer_denied scout=${wallet} playerId=${playerId} reason=wallet_mismatch`);
-      res.status(403).json({ success: false, error: 'Forbidden: wallet does not match authenticated account', code: ErrorCode.WALLET_MISMATCH });
-      return;
-    }
-
-    const playerExists = queryEvents('player_registered').some((e) => e.payload.player_id === playerId);
-    if (!playerExists) {
-      res.status(404).json({ success: false, error: 'Player not found', code: ErrorCode.PLAYER_NOT_FOUND });
-      return;
-    }
-
-    const hasAccess = await scoutHasPlayerAccess(wallet, playerId);
-    if (!hasAccess) {
-      res.status(402).json({
-        success: false,
-        error: 'Scout must be subscribed or have paid the contact fee for this player',
-        code: ErrorCode.SUBSCRIPTION_REQUIRED,
-      });
-      return;
-    }
-
-    logger.info(`[scout] action=log_trial_offer_attempt scout=${wallet} playerId=${playerId}`);
-
-    const result = await stellarLogTrialOffer(wallet, playerId, detailsUri);
-    res.status(201).json({ success: true, data: result });
-  } catch (err) {
-    if (err instanceof PaymentError) {
-      res.status(402).json({ success: false, error: err.message, code: err.code });
-      return;
-    }
-    next(err);
-  }
+  logger.warn(
+    `[deprecation] POST /api/scouts/:wallet/trial-offer called — prefer POST /api/scouts/:wallet/trial-offers. ` +
+      'The singular path is an alias and will be removed in a future release.',
+  );
+  return createTrialOffer(req, res, next);
 }
 
 // ─── GET /api/scouts/:wallet/payments ─────────────────────────────────────────

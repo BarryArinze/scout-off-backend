@@ -110,7 +110,7 @@ mutating endpoints require the matching scope and return `403` with
 |-------|-------------|
 | `write:contacts` | `POST /scouts/:wallet/contacts/:playerId/unlock` |
 | `write:subscriptions` | `POST/PUT/DELETE /scouts/:wallet/subscribe` |
-| `write:trial_offers` | `POST /scouts/:wallet/trial-offer` and `/trial-offers` |
+| `write:trial_offers` | `POST /scouts/:wallet/trial-offers` (and its deprecated alias `/trial-offer`) |
 | `write:webhooks` | `POST /scouts/:wallet/webhooks`, `DELETE .../:id`, `POST .../:id/test` |
 | `write:api_keys` | `POST /scouts/:wallet/api-keys`, `DELETE .../:id` |
 | `write:bookmarks` | bookmark & bookmark-folder mutations |
@@ -579,6 +579,64 @@ Personalized player recommendations for a scout based on region and position pre
 curl -X GET "http://localhost:4000/api/scouts/GSCOUT1EXAMPLEWALLETXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX/recommendations?pageSize=20&minTier=1" \
   -H "Authorization: Bearer <scout-jwt>"
 ```
+
+#### `POST /api/scouts/:wallet/trial-offers`
+
+Submit a trial offer to a player. **This is the canonical trial-offer submission endpoint.** **Requires Bearer auth (scout role, wallet must match the authenticated account) and the `write:trial_offers` API-key scope.**
+
+The request is validated, submitted on-chain via `log_trial_offer`, indexed into `trial_offer_events`, persisted to `trial_offers` as a `pending` offer, promotes the player to Elite Tier (level 3), and broadcasts the `trial_offer_logged` and `milestone_approved` SSE events. Supports the `Idempotency-Key` header to make retries safe.
+
+**Body**
+
+| Field        | Type   | Required | Description                                           |
+| ------------ | ------ | -------- | ----------------------------------------------------- |
+| `playerId`   | string | ✅       | The target player's on-chain identifier               |
+| `detailsUri` | string | ✅       | Offer details — must be an `ipfs://` or `https://` URI |
+
+**Response `201`**
+
+```json
+{
+  "success": true,
+  "data": {
+    "offerId": "offer-1750000000-abc123",
+    "transactionId": "a1b2c3...",
+    "scout": "GSCOUT...",
+    "playerId": "abc123",
+    "detailsUri": "ipfs://QmExample",
+    "createdAt": 1750000000,
+    "tierPromoted": true,
+    "newTier": 3
+  }
+}
+```
+
+| Status | Meaning                                                            |
+| ------ | ------------------------------------------------------------------ |
+| `400`  | Body failed validation (missing `playerId`, non-IPFS/HTTPS `detailsUri`) |
+| `402`  | Scout has no active subscription and has not unlocked this contact |
+| `403`  | Wallet does not match the authenticated account                    |
+| `404`  | Player not found                                                   |
+
+**Example request**
+
+```bash
+curl -X POST "http://localhost:4000/api/scouts/GSCOUT1EXAMPLEWALLETXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX/trial-offers" \
+  -H "Authorization: Bearer <scout-jwt>" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: 6b1f..." \
+  -d '{ "playerId": "abc123", "detailsUri": "ipfs://QmExample" }'
+```
+
+#### `POST /api/scouts/:wallet/trial-offer` (deprecated)
+
+> **Deprecated (#1034).** This singular path is an **alias** of `POST /api/scouts/:wallet/trial-offers` and is kept only for existing clients. It runs the exact same handler, so validation, persistence, tier promotion, SSE broadcast, response body and error codes are identical to the canonical endpoint above. Calling it emits a `warn`-level log entry:
+>
+> ```
+> [deprecation] POST /api/scouts/:wallet/trial-offer called — prefer POST /api/scouts/:wallet/trial-offers. The singular path is an alias and will be removed in a future release.
+> ```
+>
+> Clients should migrate to the plural path. Note that before #1034 this route did **not** persist the offer, promote the player's tier, or broadcast SSE, and its `data` object carried a `playerTier` field; it now returns the canonical response shape shown above.
 
 ---
 

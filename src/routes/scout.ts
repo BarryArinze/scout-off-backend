@@ -143,11 +143,17 @@ router.route('/:wallet/payments')
 
 /**
  * POST /api/scouts/:wallet/trial-offer
+ *
+ * DEPRECATED alias of POST /api/scouts/:wallet/trial-offers (#1034). It runs the
+ * same handler, so it carries the same middleware chain — including walletRateLimit
+ * and idempotency, which guard the on-chain submission this route now performs.
  */
 router.route('/:wallet/trial-offer')
   .post(
     requireRole('scout'),
     requireApiKeyScope('write:trial_offers'),
+    walletRateLimit(),
+    idempotency,
     validateBody(trialOfferSchema),
     submitTrialOffer,
   )
@@ -157,9 +163,10 @@ router.route('/:wallet/trial-offer')
  * GET /api/scouts/:wallet/trial-offers
  * POST /api/scouts/:wallet/trial-offers
  *
- * On-chain trial offer event log (#285): submits (and lists) trial offers
- * indexed locally by tx_hash. Distinct from the singular /trial-offer stub
- * endpoint above and from the accept/reject workflow in trialOfferController.
+ * Canonical trial-offer submission (#285, #770): submits the offer on-chain,
+ * indexes it locally by tx_hash, promotes the player's tier and broadcasts SSE.
+ * The singular /trial-offer path above is a deprecated alias of this POST.
+ * Distinct from the accept/reject workflow in trialOfferController.
  */
 router.route('/:wallet/trial-offers')
   .get(requireRole('scout'), listTrialOffers)
