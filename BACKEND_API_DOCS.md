@@ -1097,7 +1097,7 @@ When a request triggers a Soroban contract error, the API translates the on-chai
 | 5    | MilestoneNotFound  | 404 Not Found            | Milestone ID does not exist                    | Refresh the milestone list and verify the ID                    |
 | 6    | AlreadyVerified    | 409 Conflict             | Milestone already approved                     | No duplicate approvals needed; check milestone status           |
 | 7    | InsufficientFee    | 402 Payment Required     | Payment is below the required contact fee      | Fetch the current fee via `get_contact_fee()` and retry         |
-| 8    | NotSubscribed      | 402 Payment Required     | Scout has no active subscription               | Call `subscribe` before browsing premium data                   |
+| 8    | NotSubscribed      | 402 Payment Required     | Scout has no active subscription               | Call `subscribe` before browsing premium data; or attempting to cancel an already-cancelled or expired subscription |
 | 9    | Unauthorized       | 401 Unauthorized         | Caller is not authorized for this action       | Confirm you are signing with the correct Stellar account        |
 | 10   | ContractPaused     | 503 Service Unavailable  | Contract is paused by the admin                | Wait for admin to call `unpause_contract()`                     |
 | 11   | Overflow           | 500 Internal Server Error| Arithmetic overflow in fee calculation         | Use amounts within the safe u128 range                          |
@@ -1112,5 +1112,53 @@ When a request triggers a Soroban contract error, the API translates the on-chai
 | `POST /api/validators/milestone` | 2 (NotInitialized), 4 (InvalidValidator), 10 (ContractPaused) |
 | `POST /api/scouts/:wallet/contacts/:playerId/unlock` | 7 (InsufficientFee), 8 (NotSubscribed), 9 (Unauthorized), 10 (ContractPaused) |
 | `GET /api/scouts/:wallet/subscription` | 8 (NotSubscribed) |
-| `POST /api/admin/contract/pause` | 9 (Unauthorized), 1 (AlreadyInitialized) |
-| `POST /api/admin/contract/unpause` | 9 (Unauthorized), 10 (ContractPaused) |
+| `DELETE /api/scouts/:wallet/subscription` | 8 (NotSubscribed — no active subscription or already cancelled), 9 (Unauthorized), 10 (ContractPaused) |
+| `GET /api/admin/fees` | 10 (ContractPaused) |
+| `POST /api/admin/contract/pause` | 9 (Unauthorized), 2 (NotInitialized) |
+| `POST /api/admin/contract/unpause` | 9 (Unauthorized), 2 (NotInitialized) |
+
+### Cancel Subscription
+
+`DELETE /api/scouts/:wallet/subscription` — Cancels a scout's active on-chain subscription.
+
+**On-chain semantics:**
+- The `cancel_subscription(scout)` entrypoint on the `subscription` contract marks the subscription as expired at the current ledger (no refund).
+- Returns HTTP `402` with error code `NOT_SUBSCRIBED` (contract code 8) when:
+  - the scout has never subscribed, or
+  - the subscription has already expired naturally, or
+  - the subscription was previously cancelled.
+- The cancel is idempotent in the sense that a successfully cancelled subscription cannot be cancelled again (subsequent attempts return `NOT_SUBSCRIBED`).
+- After cancellation `is_subscribed(scout)` returns `false` immediately.
+
+**Response (success):**
+```json
+{ "success": true, "transactionId": "abc123..." }
+```
+
+**Response (no subscription):**
+```json
+{ "success": false, "error": "Scout has no active on-chain subscription", "code": "NOT_SUBSCRIBED" }
+```
+
+### Pause / Unpause Contract
+
+`POST /api/admin/contract/pause` / `POST /api/admin/contract/unpause`
+
+These endpoints invoke `pause(admin)` / `unpause(admin)` on the **subscription** contract via the platform keypair. The subscription contract's pause flag gates `subscribe`, `pay_to_contact`, and `withdraw_fees`. The `register` and `connection` contracts each have their own `pause`/`unpause` entrypoints that must be called separately if a full platform pause is needed.
+
+**Behavior:**
+- Calling `pause` when already paused is a no-op (returns success).
+- Calling `unpause` when already active is a no-op (returns success).
+- Only the admin address configured at contract initialization may call these.
+- The platform backend routes these calls to the **subscription contract** (`SUBSCRIPTION_CONTRACT_ID`).
+
+### Fee Balance Query
+
+`GET /api/admin/fees` — Returns the accumulated platform fee balance from the subscription contract.
+
+The underlying call is `get_fee_balance() → i128` on the `subscription` contract, which is a read-only simulation (no transaction submitted, no keypair required). The balance represents total fees accumulated from `subscribe` and `pay_to_contact` calls since the last `withdraw_fees`.
+
+**Response:**
+```json
+{ "balanceStroops": "5000000", "balanceXLM": "0.5" }
+```

@@ -751,7 +751,7 @@ export async function pauseContract(req: Request, res: Response, next: NextFunct
         contractAction: 'pause_contract',
       });
 
-      const result = await pauseContractOnChain();
+      const result = await pauseContractOnChain(adminWallet);
 
       logAuditEvent({
         action: 'contract_state_change',
@@ -806,7 +806,7 @@ export async function unpauseContract(req: Request, res: Response, next: NextFun
         contractAction: 'unpause_contract',
       });
 
-      const result = await unpauseContractOnChain();
+      const result = await unpauseContractOnChain(adminWallet);
 
       logAuditEvent({
         action: 'contract_state_change',

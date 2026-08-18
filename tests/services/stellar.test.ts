@@ -3,7 +3,7 @@
  *   - isSubscribed()              — view-only simulation call
  *   - queryMilestones()           — view-only simulation call
  *   - cancelSubscriptionOnChain() — real Soroban invocation
- *   - pauseContractOnChain()      — real Soroban invocation
+ *   - pauseContractOnChain(WALLET)      — real Soroban invocation
  *   - withdrawFees()              — real Soroban invocation
  *   - updateProfile()             — real Soroban invocation
  *
@@ -456,7 +456,7 @@ describe('pauseContractOnChain', () => {
     mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'real-pause-tx-hash-001' });
     mockGetTransaction.mockResolvedValue({ status: 'SUCCESS' });
 
-    const result = await pauseContractOnChain();
+    const result = await pauseContractOnChain(WALLET);
 
     expect(result.transactionId).toBe('real-pause-tx-hash-001');
     expect(mockGetAccount).toHaveBeenCalled();
@@ -474,7 +474,7 @@ describe('pauseContractOnChain', () => {
       .mockResolvedValueOnce({ status: 'SUCCESS' });
 
     jest.useFakeTimers();
-    const promise = pauseContractOnChain();
+    const promise = pauseContractOnChain(WALLET);
     await jest.runAllTimersAsync();
     const result = await promise;
     jest.useRealTimers();
@@ -487,7 +487,7 @@ describe('pauseContractOnChain', () => {
     sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'ContractPaused' });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'CONTRACT_ALREADY_PAUSED',
     });
@@ -499,7 +499,7 @@ describe('pauseContractOnChain', () => {
     sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #10' });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'CONTRACT_ALREADY_PAUSED',
     });
@@ -509,7 +509,7 @@ describe('pauseContractOnChain', () => {
     sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Something went wrong' });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'NETWORK_ERROR',
     });
@@ -522,7 +522,7 @@ describe('pauseContractOnChain', () => {
       hash: 'pause-err-hash',
     });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'NETWORK_ERROR',
     });
@@ -534,7 +534,7 @@ describe('pauseContractOnChain', () => {
     mockSendTransaction.mockResolvedValue({ status: 'PENDING', hash: 'pause-fail-hash' });
     mockGetTransaction.mockResolvedValue({ status: 'FAILED' });
 
-    await expect(pauseContractOnChain()).rejects.toMatchObject({
+    await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
       name: 'ContractActionError',
       code: 'NETWORK_ERROR',
     });
@@ -544,7 +544,7 @@ describe('pauseContractOnChain', () => {
     mockGetAccount.mockRejectedValue(new Error('network unreachable'));
 
     await expectRejectionAfterRetries(
-      () => pauseContractOnChain(),
+      () => pauseContractOnChain(WALLET),
       (p) => expect(p).rejects.toThrow('network unreachable'),
     );
   });
