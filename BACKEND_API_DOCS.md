@@ -1034,6 +1034,180 @@ curl -X GET "http://localhost:4000/api/admin/audit?startDate=2024-01-01&endDate=
 
 ---
 
+### Admin Multi-Signature Actions
+
+High-value admin operations require M-of-N approval when `ADMIN_THRESHOLD > 1`. The multi-signature system provides atomic execution and tamper-proof audit trails for critical platform operations.
+
+#### Configuration
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `ADMIN_THRESHOLD` | Minimum signatures required | `1` |
+| `ADMIN_WALLETS` | Comma-separated list of authorized admin wallets | Required |
+
+#### Action Types
+
+The following admin operations support multi-signature approval:
+
+- `pause_contract` — Emergency pause of platform contracts
+- `unpause_contract` — Resume platform operations  
+- `withdraw_fees` — Withdraw accumulated platform fees
+- `register_validator` — Add new validator to authorized list
+- `revoke_validator` — Remove validator from authorized list
+- `bulk_validator_import` — Import multiple validators (individual actions per validator)
+- `update_platform_fee` — Modify platform fee structure *(future)*
+
+#### Multi-Signature Flow
+
+1. **Propose Action**: First admin calls the operation endpoint (e.g., `POST /api/admin/validators/register`)
+2. **Collect Signatures**: Additional admins approve via `POST /api/admin/actions/{id}/approve`
+3. **Automatic Execution**: When threshold is reached, the real operation executes automatically
+4. **Audit Trail**: All steps are logged with tamper-proof audit records
+
+#### `GET /api/admin/actions`
+
+List all pending multi-signature actions. **Requires Bearer auth (admin role).**
+
+**Response `200`**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "cm123456789",
+      "action_type": "register_validator",
+      "proposer": "GADMIN1...",
+      "payload": "{\"validatorWallet\":\"GVALIDATOR...\"}",
+      "required_signatures": 2,
+      "collected_signatures": 1,
+      "status": "pending",
+      "expires_at": 1735689600000,
+      "created_at": 1735603200000
+    }
+  ]
+}
+```
+
+**Example request**
+
+```bash
+curl -X GET "http://localhost:4000/api/admin/actions" \
+  -H "Authorization: Bearer <admin-jwt>"
+```
+
+---
+
+#### `GET /api/admin/actions/{id}`
+
+Get detailed information about a specific pending action, including all signatures collected. **Requires Bearer auth (admin role).**
+
+**Response `200`**
+
+```json
+{
+  "success": true,
+  "data": {
+    "action": {
+      "id": "cm123456789",
+      "action_type": "register_validator",
+      "proposer": "GADMIN1...",
+      "payload": "{\"validatorWallet\":\"GVALIDATOR...\"}",
+      "required_signatures": 2,
+      "collected_signatures": 1,
+      "status": "pending",
+      "expires_at": 1735689600000,
+      "created_at": 1735603200000
+    },
+    "signatures": [
+      {
+        "signer": "GADMIN1...",
+        "signed_at": 1735603200000
+      }
+    ]
+  }
+}
+```
+
+**Example request**
+
+```bash
+curl -X GET "http://localhost:4000/api/admin/actions/cm123456789" \
+  -H "Authorization: Bearer <admin-jwt>"
+```
+
+---
+
+#### `POST /api/admin/actions/{id}/approve`
+
+Approve a pending multi-signature action. When the signature threshold is reached, the underlying operation executes automatically. **Requires Bearer auth (admin role).**
+
+**Response `202`** — signature recorded, more approvals needed
+
+```json
+{
+  "success": true,
+  "message": "Signature recorded, 1 more signature(s) needed",
+  "data": {
+    "actionId": "cm123456789",
+    "collectedSignatures": 1,
+    "requiredSignatures": 2,
+    "status": "pending"
+  }
+}
+```
+
+**Response `200`** — threshold reached, action executed
+
+```json
+{
+  "success": true,
+  "message": "Approval threshold reached — action executed",
+  "data": {
+    "actionId": "cm123456789",
+    "collectedSignatures": 2,
+    "requiredSignatures": 2,
+    "status": "executed"
+  }
+}
+```
+
+**Response `409`** — duplicate signature
+
+```json
+{
+  "success": false,
+  "error": "Admin has already signed this action",
+  "code": "CONFLICT"
+}
+```
+
+**Response `404`** — action not found
+
+**Response `410`** — action expired
+
+**Response `500`** — execution failed (action remains retryable)
+
+**Example request**
+
+```bash
+curl -X POST "http://localhost:4000/api/admin/actions/cm123456789/approve" \
+  -H "Authorization: Bearer <admin-jwt>"
+```
+
+#### Error Handling and Recovery
+
+- **Execution Failures**: If the underlying operation fails (network error, contract rejection), the action remains in `pending` status and can be retried by approving again
+- **Expiry**: Actions expire after 24 hours (configurable via `ADMIN_ACTION_TTL_MS`)
+- **Atomicity**: Signature collection is atomic — concurrent approvals from the same admin are handled gracefully
+- **Idempotency**: Duplicate approvals return `409 Conflict` without affecting signature count
+
+#### Single-Admin Mode
+
+When `ADMIN_THRESHOLD = 1`, operations execute immediately without creating pending actions. The response format and audit logging remain consistent.
+
+---
+
 ## Server-Sent Events (`GET /api/events/stream`) (#1019)
 
 Long-lived SSE stream of contract events relevant to the authenticated wallet.
