@@ -34,6 +34,8 @@ import {
   scoutRoutes as scoutRoutesV2,
   validatorRoutes as validatorRoutesV2,
   adminRoutes as adminRoutesV2,
+  eventsRoutes as eventsRoutesV2,
+  versioningDemoRoutes as versioningDemoRoutesV2,
 } from './routes/v2';
 
 /** Probe the SQLite database with a lightweight SELECT 1.
@@ -336,6 +338,8 @@ app.use(`${API_V2_PREFIX}/players`, playerRoutesV2);
 app.use(`${API_V2_PREFIX}/scouts`, scoutRoutesV2);
 app.use(`${API_V2_PREFIX}/validators`, validatorRoutesV2);
 app.use(`${API_V2_PREFIX}/admin`, adminRoutesV2);
+app.use(`${API_V2_PREFIX}/events`, eventsRoutesV2);
+app.use(`${API_V2_PREFIX}/versioning`, versioningDemoRoutesV2);
 
 // Header-based v2 routing: when a client sends API-Version: 2 on an unversioned
 // /api/ path, the versionRouting middleware records req.apiVersionOverride = 2 and

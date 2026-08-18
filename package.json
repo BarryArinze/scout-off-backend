@@ -14,7 +14,7 @@
     "build": "tsc",
     "prestart": "node scripts/validate-env.js",
     "start": "node dist/index.js",
-    "test": "node --expose-gc node_modules/jest/bin/jest.js --runInBand",
+    "test": "node scripts/run-tests.js",
     "test:coverage": "node --expose-gc node_modules/jest/bin/jest.js --runInBand --coverage",
     "test:watch": "node node_modules/jest/bin/jest.js --watch",
     "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts' 'scripts/*.ts' --ext .ts",
@@ -42,7 +42,7 @@
     "@opentelemetry/sdk-node": "^0.221.0",
     "@stellar/stellar-sdk": "12.1.0",
     "axios": "1.18.1",
-    "better-sqlite3": "11.10.0",
+    "better-sqlite3": "^11.10.0",
     "compression": "^1.8.1",
     "cors": "2.8.5",
     "dataloader": "2.2.3",
@@ -155,5 +155,8 @@
   },
   "overrides": {
     "brace-expansion": "2.1.4"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true
   }
 }
