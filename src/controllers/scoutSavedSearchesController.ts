@@ -8,8 +8,8 @@
  * player-filter endpoint (region, position, minTier — pagination fields are
  * excluded because they are not meaningful for a stored preset).
  *
- * Ownership is enforced inline via assertWalletOwnership(), consistent with
- * the bookmarks and notes controllers.
+ * Ownership of the :wallet path parameter is enforced by the shared
+ * requireWalletOwner() middleware at the route level (see src/routes/scout.ts).
  */
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
@@ -24,8 +24,6 @@ import {
   countPlayers,
   type SavedSearchRow,
 } from '../db';
-import { isValidStellarAddress } from '../utils/stellarAddress';
-import { sendForbidden } from '../utils/authError';
 import { logger } from '../utils/logger';
 
 // ─── Validation ───────────────────────────────────────────────────────────────
@@ -67,21 +65,6 @@ export const updateSavedSearchSchema = z.object({
 
 export type UpdateSavedSearchRequest = z.infer<typeof updateSavedSearchSchema>;
 
-// ─── Ownership guard ──────────────────────────────────────────────────────────
-
-function assertWalletOwnership(req: Request, res: Response): boolean {
-  const { wallet } = req.params;
-  if (!isValidStellarAddress(wallet)) {
-    res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-    return false;
-  }
-  if (req.account !== wallet) {
-    sendForbidden(res, 'Forbidden: wallet mismatch');
-    return false;
-  }
-  return true;
-}
-
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 /**
@@ -103,8 +86,6 @@ export async function createSavedSearch(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const parsed = createSavedSearchSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -171,8 +152,6 @@ export async function listSavedSearches(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const rows = getSavedSearchesByScout(req.params.wallet);
 
     const data = rows.map((row) => ({
@@ -209,8 +188,6 @@ export async function deleteSavedSearchHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       res.status(400).json({ success: false, error: 'Invalid saved search id' });
@@ -251,8 +228,6 @@ export async function updateSavedSearchHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       res.status(400).json({ success: false, error: 'Invalid saved search id' });
@@ -330,8 +305,6 @@ export async function runSavedSearch(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       res.status(400).json({ success: false, error: 'Invalid saved search id' });

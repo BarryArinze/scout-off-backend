@@ -15,8 +15,6 @@ import {
   getAllActiveApiKeys,
   ApiKeyRow,
 } from '../db';
-import { isValidStellarAddress } from '../utils/stellarAddress';
-import { sendForbidden } from '../utils/authError';
 import { logger } from '../utils/logger';
 import {
   parseApiKeyScopes,
@@ -102,21 +100,6 @@ const issueKeySchema = z.object({
   scopes: z.array(z.string()).optional(),
 });
 
-// ─── Ownership guard ──────────────────────────────────────────────────────────
-
-function assertWalletOwnership(req: Request, res: Response): boolean {
-  const { wallet } = req.params;
-  if (!isValidStellarAddress(wallet)) {
-    res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-    return false;
-  }
-  if (req.account !== wallet) {
-    sendForbidden(res, 'Forbidden: wallet mismatch');
-    return false;
-  }
-  return true;
-}
-
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
 /**
@@ -132,8 +115,6 @@ export async function issueApiKey(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const parsed = issueKeySchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid body' });
@@ -188,8 +169,6 @@ export async function listApiKeys(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const rows: ApiKeyRow[] = listApiKeysByWallet(req.params.wallet);
 
     res.json({
@@ -223,8 +202,6 @@ export async function revokeApiKey(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!assertWalletOwnership(req, res)) return;
-
     const id = parseInt(req.params.id, 10);
     if (isNaN(id)) {
       res.status(400).json({ success: false, error: 'Invalid API key id' });
