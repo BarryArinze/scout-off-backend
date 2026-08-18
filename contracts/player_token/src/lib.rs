@@ -239,7 +239,7 @@ impl PlayerTokenContract {
                     env.storage()
                         .persistent()
                         .set(&DataKey::HolderPage(player_id, last_page_index), &newp);
-                    meta.holder_pages = meta.holder_pages.checked_add(1).unwrap_or(meta.holder_pages);
+                    meta.holder_pages = meta.holder_pages.checked_add(1).ok_or(Error::Overflow)?;
                 } else {
                     pv.push_back(buyer.clone());
                     env.storage()
@@ -289,7 +289,7 @@ impl PlayerTokenContract {
     /// * [`Error::NotInitialized`]  — contract not initialised.
     /// * [`Error::InvalidInput`]    — no tokens issued, sold is zero, or
     ///                                 `transfer_fee_xlm` is zero.
-    /// * [`Error::Overflow`]        — arithmetic overflow in payout calculation.
+    /// * [`Error::Overflow`]        — arithmetic overflow in pagination or payout calculation.
     pub fn distribute_fee(
         env: Env,
         player_id: u64,
@@ -322,6 +322,12 @@ impl PlayerTokenContract {
         }
 
         // Read the requested holder page from persistent storage.
+        // The page index is directly used to fetch a specific page of holders.
+        // Guard against page overflow: page * MAX_HOLDERS_PER_PAGE must not overflow u32.
+        let _start_check = (page as u32)
+            .checked_mul(MAX_HOLDERS_PER_PAGE)
+            .ok_or(Error::Overflow)?;
+
         let holders: Vec<Address> = env
             .storage()
             .persistent()
@@ -331,12 +337,12 @@ impl PlayerTokenContract {
         let mut payouts: Vec<PendingPayout> = Vec::new(&env);
         let total_sold = meta.sold as u128;
 
-        for i in start..end {
+        for i in 0..holders.len() {
             let holder = holders.get_unchecked(i as u32);
             let balance_key = DataKey::HolderBalance(player_id, holder.clone());
             let tokens: u64 = env
                 .storage()
-                .instance()
+                .persistent()
                 .get::<DataKey, HolderBalance>(&balance_key)
                 .map(|b| b.tokens)
                 .unwrap_or(0);
@@ -458,7 +464,7 @@ impl PlayerTokenContract {
                     env.storage()
                         .persistent()
                         .set(&DataKey::HolderPage(player_id, last_page_index), &newp);
-                    meta.holder_pages = meta.holder_pages.checked_add(1).unwrap_or(meta.holder_pages);
+                    meta.holder_pages = meta.holder_pages.checked_add(1).ok_or(Error::Overflow)?;
                 } else {
                     pv.push_back(addr.clone());
                     env.storage()
@@ -467,7 +473,7 @@ impl PlayerTokenContract {
                 }
             }
 
-            migrated = migrated.checked_add(1).unwrap_or(migrated);
+            migrated = migrated.checked_add(1).ok_or(Error::Overflow)?;
         }
 
         // Persist updated meta.
@@ -779,14 +785,13 @@ mod tests {
             .set(&DataKey::LegacyHolderList(player_id), &legacy);
 
         // Admin calls migrate in batches of 20.
-        env.set_source_account(admin.clone());
-        let first = client.migrate_player_step(&player_id, &0u32, &20u32).unwrap();
+        let first = client.migrate_player_step(&player_id, &0u32, &20u32);
         assert_eq!(first, 20);
 
-        let second = client.migrate_player_step(&player_id, &20u32, &20u32).unwrap();
+        let second = client.migrate_player_step(&player_id, &20u32, &20u32);
         assert_eq!(second, 20);
 
-        let third = client.migrate_player_step(&player_id, &40u32, &20u32).unwrap();
+        let third = client.migrate_player_step(&player_id, &40u32, &20u32);
         assert_eq!(third, 5);
 
         // Legacy list should now be empty.
@@ -798,7 +803,7 @@ mod tests {
         assert_eq!(rem.len(), 0);
 
         // TokenMeta holder_pages should reflect the stored pages (45/20 => 3 pages).
-        let meta = client.get_token_meta(&player_id).unwrap();
+        let meta = client.get_token_meta(&player_id);
         assert_eq!(meta.holder_pages, 3);
     }
 
@@ -815,9 +820,78 @@ mod tests {
         let buyer = Address::generate(&env);
         client.issue_tokens(&7u64, &100u64);
         client.buy_token(&7u64, &1u64, &buyer);
-        
+
         // Pass empty auth list to override `env.mock_all_auths()`
         let result = client.mock_auths(&[]).try_distribute_fee(&7u64, &1_000u128, &0u32);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn distribute_fee_with_overflow_page_value_fails() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let buyer = Address::generate(&env);
+        client.issue_tokens(&8u64, &100u64);
+        client.buy_token(&8u64, &1u64, &buyer);
+
+        // Try to call distribute_fee with a page value that would overflow
+        // when multiplied by MAX_HOLDERS_PER_PAGE.
+        // u32::MAX * 20 would overflow, so this should return Error::Overflow.
+        let result = client.try_distribute_fee(&8u64, &1_000u128, &u32::MAX);
+        assert_eq!(result, Err(Ok(Error::Overflow)));
+    }
+
+    #[test]
+    fn distribute_fee_with_large_page_near_boundary() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+        let buyer = Address::generate(&env);
+        client.issue_tokens(&9u64, &100u64);
+        client.buy_token(&9u64, &1u64, &buyer);
+
+        // Try a page value that is close to overflow boundary.
+        // (u32::MAX - 1) * 20 could still overflow depending on the value.
+        // This tests boundary values to ensure proper overflow detection.
+        let large_page = u32::MAX / 2;
+        let result = client.try_distribute_fee(&9u64, &1_000u128, &large_page);
+        // Should either succeed (if the page is beyond holders) or fail with Overflow.
+        // The important thing is that it doesn't panic.
+        assert!(result.is_ok() || result == Err(Ok(Error::Overflow)));
+    }
+
+    #[test]
+    fn distribute_fee_normal_page_values() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+
+        let player_id = 10u64;
+        client.issue_tokens(&player_id, &1000u64);
+
+        // Create 50 buyers spread across multiple pages
+        let mut buyers = Vec::new(&env);
+        for _ in 0..50 {
+            buyers.push_back(Address::generate(&env));
+        }
+
+        for i in 0..buyers.len() {
+            client.buy_token(&player_id, &1u64, &buyers.get_unchecked(i).clone());
+        }
+
+        // Distribute across normal page values (0, 1, 2)
+        // Page 0: holders 0-19
+        let page0_queued = client.distribute_fee(&player_id, &1_000_000u128, &0u32);
+        assert_eq!(page0_queued, 20);
+
+        // Page 1: holders 20-39
+        let page1_queued = client.distribute_fee(&player_id, &1_000_000u128, &1u32);
+        assert_eq!(page1_queued, 20);
+
+        // Page 2: holders 40-49 (only 10 holders)
+        let page2_queued = client.distribute_fee(&player_id, &1_000_000u128, &2u32);
+        assert_eq!(page2_queued, 10);
+
+        // Page 3: beyond holders, should return 0
+        let page3_queued = client.distribute_fee(&player_id, &1_000_000u128, &3u32);
+        assert_eq!(page3_queued, 0);
     }
 }
