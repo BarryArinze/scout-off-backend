@@ -25,6 +25,7 @@ import {
   cancelSubscriptionOnChain,
 } from '../services/stellar';
 import { isValidStellarAddress } from '../utils/stellarAddress';
+import { invalidatePlayerCache } from '../services/cache';
 import { logger } from '../utils/logger';
 import { broadcaster } from '../services/eventBroadcaster';
 import config from '../config';
@@ -437,6 +438,9 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
       tx_hash: result.transactionId,
       unlocked_at: Math.floor(Date.now() / 1000),
     });
+    // Player state changed (contact_unlocked) — invalidate player-list caches
+    // after the persistence succeeded so subsequent list queries stay fresh.
+    await invalidatePlayerCache();
     res.json({ success: true, data: result });
   } catch (err) {
     if (err instanceof PaymentError) {
