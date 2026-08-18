@@ -437,7 +437,14 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
   }
 }
 
-/** POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally */
+/**
+ * POST /api/scouts/:wallet/trial-offers — submit a trial offer on-chain and index it locally.
+ *
+ * This is the **canonical** implementation of "a scout submits a trial offer for a player".
+ * The legacy `POST /api/scouts/:wallet/trial-offer` route (`submitTrialOffer` below)
+ * delegates here, so both routes share one code path — validation, on-chain submission,
+ * `trial_offer_events` + `trial_offers` persistence, Elite Tier promotion and SSE broadcast.
+ */
 export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
@@ -535,9 +542,21 @@ export async function createTrialOffer(req: Request, res: Response, next: NextFu
   }
 }
 
-// ─── POST /api/scouts/:wallet/trial-offer ─────────────────────────────────────
+// ─── POST /api/scouts/:wallet/trial-offer (deprecated alias) ──────────────────
 
-/** POST /api/scouts/:wallet/trial-offer */
+/**
+ * POST /api/scouts/:wallet/trial-offer — **deprecated** alias of
+ * `POST /api/scouts/:wallet/trial-offers` (`createTrialOffer`).
+ *
+ * Both paths describe the same business operation, so this handler owns no logic
+ * of its own: it delegates to the canonical implementation, which means it now
+ * performs the full flow (Zod validation, player/access checks, on-chain submission,
+ * `trial_offer_events` + `trial_offers` persistence, Elite Tier promotion and SSE
+ * broadcast) instead of the partial one it used to run.
+ *
+ * Kept reachable because it is published in `openapi.json` and covered by the
+ * `write:trial_offers` API-key scope; clients should migrate to the plural path.
+ */
 export async function submitTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { wallet } = req.params;
