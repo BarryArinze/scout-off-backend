@@ -15,3 +15,7 @@ export { default as playerRoutes } from '../player';
 export { default as scoutRoutes } from '../scout';
 export { default as validatorRoutes } from '../validator';
 export { default as adminRoutes } from '../admin';
+export { default as eventsRoutes } from '../events';
+
+// v2-only routes can be exported here to be mounted under /api/v2.
+export { default as versioningDemoRoutes } from './versioning';

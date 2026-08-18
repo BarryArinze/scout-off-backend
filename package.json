@@ -14,7 +14,7 @@
     "build": "tsc",
     "prestart": "node scripts/validate-env.js",
     "start": "node dist/index.js",
-    "test": "node --expose-gc node_modules/jest/bin/jest.js --runInBand",
+    "test": "node scripts/run-tests.js",
     "test:coverage": "node --expose-gc node_modules/jest/bin/jest.js --runInBand --coverage",
     "test:postgres": "DB_DRIVER=postgres node --expose-gc node_modules/jest/bin/jest.js --runInBand --testPathIgnorePatterns=\"/node_modules/\" --testPathIgnorePatterns=\"tests/controllers/webhookAdminController.test.ts\" --testPathIgnorePatterns=\"tests/db/backfill.test.ts\" --testPathIgnorePatterns=\"tests/db/sqlInjectionRegression.test.ts\" --testPathIgnorePatterns=\"tests/e2e/milestonePromotion.e2e.test.ts\" --testPathIgnorePatterns=\"tests/e2e/scoutUnlock.e2e.test.ts\" --testPathIgnorePatterns=\"tests/routes/adminAuditTrail.test.ts\" --testPathIgnorePatterns=\"tests/routes/adminExport.test.ts\" --testPathIgnorePatterns=\"tests/routes/adminPagination.test.ts\" --testPathIgnorePatterns=\"tests/routes/adminQuerySchema.test.ts\" --testPathIgnorePatterns=\"tests/routes/exportStreaming.test.ts\" --testPathIgnorePatterns=\"tests/routes/reindex.test.ts\" --testPathIgnorePatterns=\"tests/routes/playerListFreshness.test.ts\" --testPathIgnorePatterns=\"tests/routes/trialOffers.test.ts\" --testPathIgnorePatterns=\"tests/services/indexer.test.ts\" --testPathIgnorePatterns=\"tests/services/indexerDispatch.test.ts\" --testPathIgnorePatterns=\"tests/services/tierPromotion.test.ts\" --testPathIgnorePatterns=\"tests/services/webhooks.test.ts\"",
     "test:watch": "node node_modules/jest/bin/jest.js --watch",
@@ -43,7 +43,7 @@
     "@opentelemetry/sdk-node": "^0.221.0",
     "@stellar/stellar-sdk": "12.1.0",
     "axios": "1.18.1",
-    "better-sqlite3": "11.10.0",
+    "better-sqlite3": "^11.10.0",
     "compression": "^1.8.1",
     "cors": "2.8.5",
     "dataloader": "2.2.3",
@@ -156,5 +156,8 @@
   },
   "overrides": {
     "brace-expansion": "2.1.4"
+  },
+  "allowScripts": {
+    "better-sqlite3@11.10.0": true
   }
 }
