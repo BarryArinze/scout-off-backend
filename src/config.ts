@@ -112,6 +112,36 @@ if (!sep10ServerSecretValue) {
   }
 }
 
+// Validate API_KEY_LOOKUP_SECRET.
+// This is the server-side pepper used to derive the indexed, deterministic
+// lookup value stored in api_keys.lookup_hash (#1033).  It must be identical
+// on every backend instance, otherwise a key issued by instance A cannot be
+// located by instance B.  It is a *lookup* secret only — possession of a raw
+// API key is still proven against the salted key_hash — but it must never be
+// rotated casually: doing so orphans the stored lookup values (see
+// docs/auth.md).  Production refuses to start without it; staging warns;
+// development/test falls back to a fixed, insecure value at the derivation
+// layer so the test suite runs without extra config.
+const apiKeyLookupSecretValue = process.env.API_KEY_LOOKUP_SECRET ?? '';
+if (!apiKeyLookupSecretValue) {
+  if (nodeEnv === 'production') {
+    throw new Error(
+      'API_KEY_LOOKUP_SECRET is required in production but is not set. ' +
+      'Generate one with `openssl rand -hex 32` and set this variable. ' +
+      'All backend instances must share the same value, otherwise X-API-Key ' +
+      'authentication will fail behind a load balancer. ' +
+      'See docs/auth.md for rotation guidance.',
+    );
+  }
+  if (nodeEnv === 'staging') {
+    console.warn(
+      '[config] WARNING: API_KEY_LOOKUP_SECRET is not set in staging. ' +
+      'A fixed, insecure development-only pepper will be used to derive ' +
+      'api_keys.lookup_hash. Set API_KEY_LOOKUP_SECRET to suppress this warning.',
+    );
+  }
+}
+
 // Validate PINATA_GATEWAY when set — it must be a valid HTTPS URL. An invalid
 // gateway would otherwise only surface as a runtime failure when resolving
 // IPFS content, with no clear indication of the misconfiguration.
@@ -192,6 +222,14 @@ const config = {
    * configuration details and key-rotation guidance.
    */
   sep10ServerSecret: sep10ServerSecretValue,
+  /**
+   * Server-side pepper (32-byte hex, e.g. `openssl rand -hex 32`) used to
+   * derive `api_keys.lookup_hash`, the indexed deterministic value that lets
+   * X-API-Key authentication find a candidate row without scanning the table
+   * (#1033).  Must be identical on every backend instance.  See
+   * src/utils/apiKeyLookup.ts and docs/auth.md.
+   */
+  apiKeyLookupSecret: apiKeyLookupSecretValue,
   platformSecret: process.env.PLATFORM_SECRET ?? '',
   pinata: {
     apiKey: process.env.PINATA_API_KEY ?? '',

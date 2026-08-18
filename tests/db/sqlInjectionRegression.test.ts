@@ -13,7 +13,9 @@ import {
   getTrialOfferById, insertTrialOffer, respondToTrialOffer,
   insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts,
   upsertScoutNote, getScoutNote, getScoutNotes,
-  insertApiKey, listApiKeysByWallet, revokeApiKeyById, getApiKeyByHash, getAllActiveApiKeys, touchApiKeyLastUsed,
+  insertApiKey, listApiKeysByWallet, revokeApiKeyById, getApiKeyByHash,
+  getActiveApiKeyByLookupHash, getActiveApiKeysAwaitingLookupHash, setApiKeyLookupHash,
+  touchApiKeyLastUsed,
   insertBookmark, deleteBookmark, getBookmarksByScout,
   insertSavedSearch, getSavedSearchesByScout, deleteSavedSearch,
   getAllFeatureFlags, getFeatureFlag, upsertFeatureFlag,
@@ -393,9 +395,18 @@ describe('all DB functions - SQL injection resistance (comprehensive)', () => {
     expect(key === null || typeof key === 'object').toBe(true);
   });
 
-  it('getAllActiveApiKeys is safe', () => {
-    const keys = getAllActiveApiKeys();
+  it('getActiveApiKeyByLookupHash with injection payload', () => {
+    const key = getActiveApiKeyByLookupHash(inj);
+    expect(key === null || typeof key === 'object').toBe(true);
+  });
+
+  it('getActiveApiKeysAwaitingLookupHash is safe', () => {
+    const keys = getActiveApiKeysAwaitingLookupHash();
     expect(Array.isArray(keys)).toBe(true);
+  });
+
+  it('setApiKeyLookupHash with injection payload', () => {
+    setApiKeyLookupHash(9999, inj);
   });
 
   it('touchApiKeyLastUsed with injection payload', () => {

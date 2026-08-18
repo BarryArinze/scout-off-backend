@@ -49,7 +49,9 @@ jest.mock('../../src/db', () => ({
   listApiKeysByWallet: jest.fn().mockReturnValue([]),
   revokeApiKeyById: jest.fn(),
   getApiKeyByHash: jest.fn().mockReturnValue(null),
-  getAllActiveApiKeys: jest.fn().mockReturnValue([]),
+  getActiveApiKeyByLookupHash: jest.fn().mockReturnValue(null),
+  getActiveApiKeysAwaitingLookupHash: jest.fn().mockReturnValue([]),
+  setApiKeyLookupHash: jest.fn(),
   touchApiKeyLastUsed: jest.fn(),
   // bookmarks
   insertBookmark: jest.fn(),
@@ -80,7 +82,7 @@ jest.mock('../../src/services/indexer', () => ({
 }));
 
 import {
-  getAllActiveApiKeys,
+  getActiveApiKeyByLookupHash,
   insertApiKey,
   revokeApiKeyById,
   createWebhookSubscription,
@@ -91,7 +93,7 @@ import {
 } from '../../src/db';
 import { submitContactPayment } from '../../src/services/stellar';
 
-const mockGetAllActive = getAllActiveApiKeys as jest.Mock;
+const mockGetByLookup = getActiveApiKeyByLookupHash as jest.Mock;
 const mockInsertApiKey = insertApiKey as jest.Mock;
 const mockRevokeApiKey = revokeApiKeyById as jest.Mock;
 const mockCreateWebhook = createWebhookSubscription as jest.Mock;
@@ -110,22 +112,28 @@ function makeToken(wallet: string, role = 'scout'): string {
   return jwt.sign({ sub: wallet, role }, SECRET, { expiresIn: '1h' });
 }
 
-/** Seed getAllActiveApiKeys with one key for `scopes` and return its raw key. */
+/**
+ * Seed the indexed lookup (#1033) with one key for `scopes` and return its raw
+ * key. Mirrors the UNIQUE idx_api_keys_lookup_hash: the row is returned only
+ * for its own derived lookup hash, never for an arbitrary one.
+ */
 function seedKey(scopes: string[] | null): { id: number; key: string } {
-  const { key, keyHash } = generateApiKey();
-  mockGetAllActive.mockReturnValue([
-    {
-      id: 77,
-      key_hash: keyHash,
-      scout_wallet: SCOUT,
-      label: 'fixture',
-      created_at: 0,
-      last_used_at: null,
-      revoked_at: null,
-      scopes: scopes === null ? null : JSON.stringify(scopes),
-      rate_limit_per_minute: null,
-    },
-  ]);
+  const { key, keyHash, lookupHash } = generateApiKey();
+  const row = {
+    id: 77,
+    key_hash: keyHash,
+    scout_wallet: SCOUT,
+    label: 'fixture',
+    created_at: 0,
+    last_used_at: null,
+    revoked_at: null,
+    scopes: scopes === null ? null : JSON.stringify(scopes),
+    rate_limit_per_minute: null,
+    lookup_hash: lookupHash,
+  };
+  mockGetByLookup.mockImplementation((candidate: string) =>
+    candidate === lookupHash ? row : null,
+  );
   return { id: 77, key };
 }
 

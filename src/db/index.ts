@@ -1674,6 +1674,13 @@ export interface ApiKeyRow {
   /** JSON-encoded scope list (db/014_api_key_scopes.sql). NULL/empty = legacy key. */
   scopes: string | null;
   rate_limit_per_minute: number | null;
+  /**
+   * Indexed deterministic lookup value (db/024_api_key_lookup_hash.sql, #1033).
+   * NULL on rows issued before that migration — those are healed lazily on
+   * first successful authentication. Never the authentication proof: see
+   * src/utils/apiKeyLookup.ts.
+   */
+  lookup_hash: string | null;
 }
 
 /**
@@ -1685,6 +1692,11 @@ export interface ApiKeyRow {
  * which the authorization layer treats as a legacy key with unrestricted
  * scout-level access (backward compatible with keys issued before scope
  * enforcement existed).
+ *
+ * `lookup_hash` is the indexed deterministic lookup value (#1033). It is
+ * optional only so that callers predating it still compile; every production
+ * issuance path must supply it, otherwise the new key lands on the slow
+ * transitional scan path until its first successful authentication.
  */
 export function insertApiKey(p: {
   key_hash: string;
@@ -1692,10 +1704,11 @@ export function insertApiKey(p: {
   label: string;
   created_at: number;
   scopes?: string[];
+  lookup_hash?: string;
 }): number {
   const sql = `
-    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at, scopes)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at, scopes, lookup_hash)
+    VALUES (?, ?, ?, ?, ?, ?)
   `;
   return timedQuery(sql, () => {
     const info = getDb().prepare(sql).run(
@@ -1704,6 +1717,7 @@ export function insertApiKey(p: {
       p.label,
       p.created_at,
       p.scopes ? JSON.stringify(p.scopes) : null,
+      p.lookup_hash ?? null,
     );
     return info.lastInsertRowid as number;
   });
@@ -1752,12 +1766,46 @@ export function getApiKeyByHash(keyHash: string): ApiKeyRow | null {
 }
 
 /**
- * Return all active (non-revoked) API keys across all scouts.
- * Used by auth middleware to verify an incoming X-API-Key header.
+ * Locate the single active (non-revoked) API key row carrying `lookupHash`.
+ *
+ * This is the hot path for X-API-Key authentication (#1033): one indexed
+ * equality lookup against the UNIQUE idx_api_keys_lookup_hash, replacing the
+ * former "load every active key and re-hash each one" scan.
+ *
+ * Returning a row proves nothing on its own — the caller must still verify the
+ * presented raw key against `key_hash`. See src/utils/apiKeyLookup.ts.
  */
-export function getAllActiveApiKeys(): ApiKeyRow[] {
-  const sql = `SELECT * FROM api_keys WHERE revoked_at IS NULL`;
+export function getActiveApiKeyByLookupHash(lookupHash: string): ApiKeyRow | null {
+  const sql = `SELECT * FROM api_keys WHERE lookup_hash = ? AND revoked_at IS NULL LIMIT 1`;
+  return timedQuery(sql, () =>
+    (getDb().prepare(sql).get(lookupHash) as ApiKeyRow | undefined) ?? null,
+  );
+}
+
+/**
+ * Return the active API keys that predate db/024_api_key_lookup_hash.sql and
+ * therefore have no lookup_hash yet.
+ *
+ * TRANSITIONAL — not the normal authentication path. Keys issued before that
+ * migration cannot have their lookup_hash computed in SQL (only a one-way
+ * salted hash of each key is stored), so they are healed lazily: this set is
+ * consulted only when the indexed lookup above misses, and each row leaves the
+ * set permanently on its first successful authentication. Backed by the
+ * partial index idx_api_keys_lookup_pending, so once every active key has been
+ * healed this returns an empty result without touching the table.
+ */
+export function getActiveApiKeysAwaitingLookupHash(): ApiKeyRow[] {
+  const sql = `SELECT * FROM api_keys WHERE revoked_at IS NULL AND lookup_hash IS NULL`;
   return timedQuery(sql, () => getDb().prepare(sql).all() as ApiKeyRow[]);
+}
+
+/**
+ * Persist the derived lookup_hash for a pre-migration API key (#1033).
+ * Only ever fills a NULL — an existing lookup value is never overwritten.
+ */
+export function setApiKeyLookupHash(id: number, lookupHash: string): void {
+  const sql = `UPDATE api_keys SET lookup_hash = ? WHERE id = ? AND lookup_hash IS NULL`;
+  timedQuery(sql, () => getDb().prepare(sql).run(lookupHash, id));
 }
 
 /**

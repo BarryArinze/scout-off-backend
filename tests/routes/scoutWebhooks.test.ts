@@ -48,7 +48,9 @@ jest.mock('../../src/db', () => ({
   listApiKeysByWallet: jest.fn().mockReturnValue([]),
   revokeApiKeyById: jest.fn(),
   getApiKeyByHash: jest.fn().mockReturnValue(null),
-  getAllActiveApiKeys: jest.fn().mockReturnValue([]),
+  getActiveApiKeyByLookupHash: jest.fn().mockReturnValue(null),
+  getActiveApiKeysAwaitingLookupHash: jest.fn().mockReturnValue([]),
+  setApiKeyLookupHash: jest.fn(),
   touchApiKeyLastUsed: jest.fn(),
   // bookmarks
   insertBookmark: jest.fn(),
