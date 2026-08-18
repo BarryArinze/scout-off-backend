@@ -160,6 +160,7 @@ dependencies = [
 name = "connection"
 version = "0.1.0"
 dependencies = [
+ "progress",
  "proptest",
  "register",
  "scout-off-shared",
