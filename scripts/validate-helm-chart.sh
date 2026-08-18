@@ -54,13 +54,10 @@ render() {
 }
 
 # Renders manifests + NOTES.txt via a client-side dry-run (no cluster needed).
-# --debug puts NOTES.txt on stdout but also emits DEBUG logs on stderr; drop
-# the latter so CI logs stay clean.
-# Note: --dry-run (without =client) is used for compatibility with both Helm
-# 3.x and Helm 4.x; --dry-run=client was introduced in Helm 3.13 but behaves
-# differently across versions when no kubeconfig is present.
+# --debug puts NOTES.txt on stdout alongside DEBUG logs; stderr is kept visible
+# so any helm error surfaces in CI rather than being silently swallowed.
 render_with_notes() {
-  helm install "${RELEASE}" "${CHART_DIR}" --dry-run --debug "$@" 2>/dev/null
+  helm install "${RELEASE}" "${CHART_DIR}" --dry-run --debug "$@"
 }
 
 # ─── 1. Chart lints cleanly ───────────────────────────────────────────────────
