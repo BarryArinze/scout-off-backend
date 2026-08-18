@@ -875,8 +875,6 @@ mod tests {
         client.subscribe(&scout, &1u32, &30u32);
         let balance = client.get_fee_balance();
         assert!(balance > 0);
-        // withdraw_fees takes an explicit amount (admin-withdrawal PR #1053);
-        // withdraw the full balance to drain the vault.
         client.withdraw_fees(&admin, &balance);
         assert_eq!(client.get_fee_balance(), 0i128);
     }

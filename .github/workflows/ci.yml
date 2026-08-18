@@ -76,6 +76,14 @@ jobs:
       - name: Validate OpenAPI spec
         run: npm run validate:openapi
 
+      # The Helm chart's defaults must stay internally consistent: SQLite is
+      # single-process, so the default topology is one replica with HPA/PDB
+      # disabled, and the SQLite + multi-replica combination must be loudly
+      # flagged in NOTES.txt. Runs on every Node version in the matrix; helm
+      # is preinstalled on ubuntu-latest runners.
+      - name: Validate Helm chart topology defaults
+        run: bash scripts/validate-helm-chart.sh
+
       - name: Type check (src)
         run: node node_modules/.bin/tsc --noEmit
 

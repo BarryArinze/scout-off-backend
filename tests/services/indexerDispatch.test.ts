@@ -11,9 +11,18 @@ jest.mock('../../src/services/webhooks', () => ({
   dispatchEventWebhook: jest.fn().mockResolvedValue(undefined),
 }));
 
+jest.mock('../../src/services/cache', () => ({
+  invalidatePlayerCache: jest.fn().mockResolvedValue(undefined),
+}));
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { server } = require('../../src/services/stellar') as { server: { getEvents: jest.Mock } };
 const mockedDispatch = dispatchEventWebhook as jest.MockedFunction<typeof dispatchEventWebhook>;
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { invalidatePlayerCache: mockedInvalidatePlayerCache } = require('../../src/services/cache') as {
+  invalidatePlayerCache: jest.Mock;
+};
 
 function makeEvent(type: string, payload: Record<string, unknown>, txHash: string, ledger = 100) {
   return {
@@ -170,5 +179,113 @@ describe('indexEvents — milestone_approved webhook dispatch', () => {
     expect(afterCount).toBe(beforeCount);
 
     expect(fetchLastIndexedLedger()).toBe(beforeLedger);
+  });
+});
+
+describe('indexEvents — player cache invalidation (#763)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it('invalidates the player cache after successfully indexing a player_registered event', async () => {
+    server.getEvents.mockResolvedValue({
+      latestLedger: 100,
+      events: [
+        makeEvent(
+          'player_registered',
+          { player_id: 'P1', wallet: 'GWALLETP1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', position: 'striker', region: 'EU' },
+          'hash-inv-1',
+          100,
+        ),
+      ],
+    });
+
+    await indexEvents();
+
+    expect(mockedInvalidatePlayerCache).toHaveBeenCalledTimes(1);
+    expect(mockedInvalidatePlayerCache).toHaveBeenCalledWith('P1');
+  });
+
+  it('invalidates the player cache after successfully indexing a milestone_approved event', async () => {
+    server.getEvents.mockResolvedValue({
+      latestLedger: 101,
+      events: [makeEvent('milestone_approved', { player_id: 'P2' }, 'hash-inv-2', 101)],
+    });
+
+    await indexEvents();
+
+    expect(mockedInvalidatePlayerCache).toHaveBeenCalledTimes(1);
+    expect(mockedInvalidatePlayerCache).toHaveBeenCalledWith('P2');
+  });
+
+  it('invalidates only after the player row has been persisted (ordering guarantee)', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const dbModule = require('../../src/db');
+    const order: string[] = [];
+    const original = dbModule.insertOrUpdatePlayer;
+    jest.spyOn(dbModule, 'insertOrUpdatePlayer').mockImplementation((p: any) => {
+      order.push('persist');
+      return original(p);
+    });
+    mockedInvalidatePlayerCache.mockImplementation(() => {
+      order.push('invalidate');
+      return Promise.resolve(undefined);
+    });
+
+    server.getEvents.mockResolvedValue({
+      latestLedger: 102,
+      events: [
+        makeEvent(
+          'player_registered',
+          { player_id: 'P3', wallet: 'GWALLETP3AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+          'hash-inv-3',
+          102,
+        ),
+      ],
+    });
+
+    await indexEvents();
+
+    expect(order).toEqual(['persist', 'invalidate']);
+    dbModule.insertOrUpdatePlayer.mockRestore();
+  });
+
+  it('does not invalidate the cache when the database write fails', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const dbModule = require('../../src/db');
+    jest.spyOn(dbModule, 'insertOrUpdatePlayer').mockImplementation(() => {
+      throw new Error('disk full');
+    });
+
+    server.getEvents.mockResolvedValue({
+      latestLedger: 103,
+      events: [
+        makeEvent(
+          'player_registered',
+          { player_id: 'P4', wallet: 'GWALLETP4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+          'hash-inv-4',
+          103,
+        ),
+      ],
+    });
+
+    await expect(indexEvents()).rejects.toThrow('disk full');
+    expect(mockedInvalidatePlayerCache).not.toHaveBeenCalled();
+
+    dbModule.insertOrUpdatePlayer.mockRestore();
+  });
+
+  it('does not invalidate the cache for unrelated events', async () => {
+    server.getEvents.mockResolvedValue({
+      latestLedger: 104,
+      events: [
+        makeEvent('scout_subscribed', { scout: 'G' + 'S'.repeat(55) }, 'hash-inv-5', 104),
+        makeEvent('milestone_submitted', { player_id: 'P5', milestone_id: 'm1', validator: 'G' + 'V'.repeat(55) }, 'hash-inv-6', 104),
+      ],
+    });
+
+    await indexEvents();
+
+    expect(mockedInvalidatePlayerCache).not.toHaveBeenCalled();
   });
 });

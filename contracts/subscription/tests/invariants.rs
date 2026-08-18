@@ -507,7 +507,6 @@ mod subscription_lifecycle_invariants {
             let balance = client.get_fee_balance();
             prop_assert!(balance > 0, "fee balance must be positive after {n} subscriptions");
 
-            // withdraw_fees takes an explicit amount; withdraw the full balance.
             client.withdraw_fees(&admin, &balance);
             prop_assert_eq!(
                 client.get_fee_balance(), 0i128,

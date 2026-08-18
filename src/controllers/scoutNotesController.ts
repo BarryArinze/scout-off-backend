@@ -9,9 +9,7 @@ import {
   updateScoutPlayerNote,
   deleteScoutPlayerNote,
 } from '../db';
-import { isValidStellarAddress } from '../utils/stellarAddress';
 import { sanitizeInput } from '../utils/sanitizer';
-import { sendForbidden } from '../utils/authError';
 import { logger } from '../utils/logger';
 
 // ─── Validation ────────────────────────────────────────────────────────────────
@@ -19,26 +17,6 @@ import { logger } from '../utils/logger';
 export const upsertNoteSchema = z.object({
   note: z.string().min(1, 'Note text is required').max(10_000, 'Note must be 10 000 characters or fewer'),
 });
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Validate that the authenticated account owns the wallet param and that the
- * wallet address is a valid Stellar address.  Returns false and sends the
- * appropriate error response when validation fails.
- */
-function validateWalletOwnership(req: Request, res: Response): boolean {
-  const { wallet } = req.params;
-  if (!isValidStellarAddress(wallet)) {
-    res.status(400).json({ success: false, error: 'Invalid Stellar address' });
-    return false;
-  }
-  if (req.account !== wallet) {
-    sendForbidden(res, 'Forbidden: wallet mismatch');
-    return false;
-  }
-  return true;
-}
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -56,8 +34,6 @@ export async function putScoutNote(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!validateWalletOwnership(req, res)) return;
-
     const { playerId } = req.params;
     const parsed = upsertNoteSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -108,8 +84,6 @@ export async function getScoutNoteHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!validateWalletOwnership(req, res)) return;
-
     const { playerId } = req.params;
     const row = getScoutNote(req.params.wallet, playerId);
 
@@ -145,8 +119,6 @@ export async function listScoutNotesHandler(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!validateWalletOwnership(req, res)) return;
-
     const rows = getScoutNotes(req.params.wallet);
 
     res.json({
@@ -195,8 +167,6 @@ export async function createPlayerNote(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!validateWalletOwnership(req, res)) return;
-
     const parsed = noteContentSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -252,8 +222,6 @@ export async function listPlayerNotes(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!validateWalletOwnership(req, res)) return;
-
     const { playerId } = req.params;
     const rows = getScoutPlayerNotes(req.params.wallet, playerId);
 
@@ -292,8 +260,6 @@ export async function updatePlayerNote(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!validateWalletOwnership(req, res)) return;
-
     const { playerId, noteId } = req.params;
     const id = parseInt(noteId, 10);
     if (isNaN(id)) {
@@ -359,8 +325,6 @@ export async function deletePlayerNote(
   next: NextFunction,
 ): Promise<void> {
   try {
-    if (!validateWalletOwnership(req, res)) return;
-
     const { playerId, noteId } = req.params;
     const id = parseInt(noteId, 10);
     if (isNaN(id)) {
