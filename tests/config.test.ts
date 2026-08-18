@@ -130,28 +130,20 @@ describe('config required env vars', () => {
     jest.resetModules();
   });
 
-  it('throws mentioning CONTRACT_ID when CONTRACT_ID is not set', async () => {
-    delete process.env.CONTRACT_ID;
-    jest.resetModules();
-    await expect(import('../src/config')).rejects.toThrow('CONTRACT_ID');
-  });
-
   it('throws mentioning JWT_SECRET when JWT_SECRET is not set', async () => {
     delete process.env.JWT_SECRET;
     jest.resetModules();
     await expect(import('../src/config')).rejects.toThrow('JWT_SECRET');
   });
 
-  it('error message clearly identifies the missing CONTRACT_ID variable', async () => {
+  it('does not throw when CONTRACT_ID is not set (optional legacy ID)', async () => {
+    // CONTRACT_ID is intentionally optional since the multi-contract
+    // migration: per-contract IDs (REGISTER/PROGRESS/SUBSCRIPTION/…)
+    // fall back to it, and a deployment may set none of them.
     delete process.env.CONTRACT_ID;
     jest.resetModules();
-    let message = '';
-    try {
-      await import('../src/config');
-    } catch (err) {
-      message = err instanceof Error ? err.message : String(err);
-    }
-    expect(message).toContain('CONTRACT_ID');
+    const cfg = await import('../src/config');
+    expect(cfg.default.contractId).toBe('');
   });
 
   it('error message clearly identifies the missing JWT_SECRET variable', async () => {
