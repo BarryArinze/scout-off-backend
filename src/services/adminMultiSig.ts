@@ -14,7 +14,7 @@ import {
   insertValidator,
   revokeValidatorRow,
   insertFeeWithdrawal,
-  getDb,
+  getDriver,
 } from '../db';
 import { logAuditEvent } from './audit';
 import { logger } from '../utils/logger';
@@ -368,7 +368,7 @@ export async function approveAction(
   let thresholdReached = false;
   
   try {
-    const result = getDb().transaction(() => {
+    const result = getDriver().transaction(() => {
       // Check for duplicate signer within the transaction
       const existingSig = getAdminActionSignature(actionId, signer);
       if (existingSig) {

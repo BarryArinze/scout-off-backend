@@ -2269,8 +2269,12 @@ export function insertAdminActionSignature(p: {
   signer: string;
   signed_at: number;
 }): boolean {
-  const sql = `INSERT OR IGNORE INTO admin_action_signatures (action_id, signer, signed_at) VALUES (?, ?, ?)`;
-  const info = timedQuery(sql, () => getDb().prepare(sql).run(p.action_id, p.signer, p.signed_at));
+  // Use driver-specific INSERT OR IGNORE syntax
+  const sql = config.dbDriver === 'postgres' 
+    ? `INSERT INTO admin_action_signatures (action_id, signer, signed_at) VALUES (?, ?, ?) ON CONFLICT(action_id, signer) DO NOTHING`
+    : `INSERT OR IGNORE INTO admin_action_signatures (action_id, signer, signed_at) VALUES (?, ?, ?)`;
+  
+  const info = timedQuery(sql, () => getDriver().run(sql, [p.action_id, p.signer, p.signed_at]));
   return info.changes > 0;
 }
 
