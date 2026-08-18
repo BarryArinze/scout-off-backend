@@ -40,6 +40,8 @@ pub struct TokenMeta {
     pub sold: u64,
     /// Cumulative XLM (in stroops) distributed to all holders to date.
     pub total_distributed: u128,
+    /// Number of holder pages currently stored for this player.
+    pub holder_pages: u32,
 }
 
 /// A single holder's balance entry stored under `HolderBalance(player_id, holder)`.
@@ -65,8 +67,10 @@ pub enum DataKey {
     Admin,
     /// TokenMeta for a given player.
     TokenMeta(u64),
-    /// Ordered list of holder addresses for a given player.
-    HolderList(u64),
+    /// A paginated list page of holder addresses for a given player.
+    HolderPage(u64, u32),
+    /// Legacy monolithic holder list stored in instance storage (used only for migration).
+    LegacyHolderList(u64),
     /// Balance entry for a specific (player, holder) pair.
     HolderBalance(u64, Address),
     /// Pending payouts queued by `distribute_fee` for a player (page-keyed).
@@ -126,11 +130,7 @@ impl PlayerTokenContract {
         if total_supply == 0 {
             return Err(Error::InvalidInput);
         }
-        if env
-            .storage()
-            .instance()
-            .has(&DataKey::TokenMeta(player_id))
-        {
+        if env.storage().persistent().has(&DataKey::TokenMeta(player_id)) {
             return Err(Error::AlreadyVerified); // already issued
         }
 
@@ -138,13 +138,11 @@ impl PlayerTokenContract {
             total_supply,
             sold: 0,
             total_distributed: 0,
+            holder_pages: 0,
         };
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::TokenMeta(player_id), &meta);
-        env.storage()
-            .instance()
-            .set(&DataKey::HolderList(player_id), &Vec::<Address>::new(&env));
 
         env.events().publish(
             (symbol_short!("tok_iss"), player_id),
@@ -182,7 +180,7 @@ impl PlayerTokenContract {
 
         let mut meta: TokenMeta = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::TokenMeta(player_id))
             .ok_or(Error::InvalidInput)?; // no tokens issued
 
@@ -195,7 +193,7 @@ impl PlayerTokenContract {
         let balance_key = DataKey::HolderBalance(player_id, buyer.clone());
         let prev: u64 = env
             .storage()
-            .instance()
+            .persistent()
             .get::<DataKey, HolderBalance>(&balance_key)
             .map(|b| b.tokens)
             .unwrap_or(0);
@@ -205,31 +203,64 @@ impl PlayerTokenContract {
             .ok_or(Error::Overflow)?;
 
         env.storage()
-            .instance()
+            .persistent()
             .set(&balance_key, &HolderBalance { tokens: new_balance });
 
         // Append to holder list only on first purchase.
         if prev == 0 {
-            let list_key = DataKey::HolderList(player_id);
-            let mut list: Vec<Address> = env
-                .storage()
-                .instance()
-                .get(&list_key)
-                .unwrap_or_else(|| Vec::new(&env));
-            list.push_back(buyer.clone());
-            env.storage().instance().set(&list_key, &list);
+            // Append to the last holder page, creating a new page when needed.
+            let mut last_page_index: u32 = if meta.holder_pages == 0 {
+                0
+            } else {
+                meta.holder_pages - 1
+            };
+
+            // If there are no pages yet, create first page.
+            if meta.holder_pages == 0 {
+                let mut pv: Vec<Address> = Vec::new(&env);
+                pv.push_back(buyer.clone());
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::HolderPage(player_id, 0u32), &pv);
+                meta.holder_pages = 1;
+            } else {
+                let mut pv: Vec<Address> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::HolderPage(player_id, last_page_index))
+                    .unwrap_or_else(|| Vec::new(&env));
+                if pv.len() as u32 >= MAX_HOLDERS_PER_PAGE {
+                    // create a new page
+                    last_page_index = meta.holder_pages;
+                    let mut newp: Vec<Address> = Vec::new(&env);
+                    newp.push_back(buyer.clone());
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::HolderPage(player_id, last_page_index), &newp);
+                    meta.holder_pages = meta.holder_pages.checked_add(1).unwrap_or(meta.holder_pages);
+                } else {
+                    pv.push_back(buyer.clone());
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::HolderPage(player_id, last_page_index), &pv);
+                }
+            }
+            // persist updated meta (holder_pages may have changed below)
+            env.storage()
+                .persistent()
+                .set(&DataKey::TokenMeta(player_id), &meta);
         }
 
         meta.sold = meta.sold.checked_add(amount).ok_or(Error::Overflow)?;
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::TokenMeta(player_id), &meta);
 
         env.events().publish(
             (symbol_short!("tok_buy"), player_id),
             (buyer, amount),
         );
-        bump_instance(&env);
+        // No instance growth — changes are persisted per-key.
         Ok(())
     }
 
@@ -280,7 +311,7 @@ impl PlayerTokenContract {
 
         let meta: TokenMeta = env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::TokenMeta(player_id))
             .ok_or(Error::InvalidInput)?;
 
@@ -288,22 +319,13 @@ impl PlayerTokenContract {
             return Err(Error::InvalidInput);
         }
 
+        // Read the requested holder page from persistent storage.
         let holders: Vec<Address> = env
             .storage()
-            .instance()
-            .get(&DataKey::HolderList(player_id))
+            .persistent()
+            .get(&DataKey::HolderPage(player_id, page))
             .unwrap_or_else(|| Vec::new(&env));
 
-        let start = (page * MAX_HOLDERS_PER_PAGE) as usize;
-        let end = ((page + 1) * MAX_HOLDERS_PER_PAGE) as usize;
-        let total_holders = holders.len() as usize;
-
-        if start >= total_holders {
-            // No holders on this page — nothing to queue.
-            return Ok(0);
-        }
-
-        let end = end.min(total_holders);
         let mut payouts: Vec<PendingPayout> = Vec::new(&env);
         let total_sold = meta.sold as u128;
 
@@ -341,7 +363,7 @@ impl PlayerTokenContract {
         let queued = payouts.len();
         if queued > 0 {
             env.storage()
-                .instance()
+                .persistent()
                 .set(&DataKey::PendingPayouts(player_id, page), &payouts);
         }
 
@@ -354,15 +376,117 @@ impl PlayerTokenContract {
             .total_distributed
             .saturating_add(page_total);
         env.storage()
-            .instance()
+            .persistent()
             .set(&DataKey::TokenMeta(player_id), &updated_meta);
-
         env.events().publish(
             (Symbol::new(&env, "fee_dist"), player_id, page),
             (transfer_fee_xlm, queued),
         );
-        bump_instance(&env);
+        // No instance bump required — persistent storage used for large data.
         Ok(queued)
+    }
+
+    /// Migrate a batch of holders from a legacy per-player monolithic holder
+    /// list (stored in instance storage under `LegacyHolderList(player_id)`) into
+    /// the new persistent paginated `HolderPage(player_id, page)` layout.
+    ///
+    /// This is an admin-only helper intended to be called iteratively to avoid
+    /// gas exhaustion when migrating very large holder lists.
+    ///
+    /// Arguments:
+    /// * `player_id` — target player whose legacy list will be migrated.
+    /// * `start`     — 0-indexed starting index in the legacy list for this step.
+    /// * `count`     — maximum number of holders to migrate in this call.
+    ///
+    /// Returns the number of holders migrated in this step.
+    pub fn migrate_player_step(env: Env, player_id: u64, start: u32, count: u32) -> Result<u32, Error> {
+        // Only admin may perform migration.
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        // Read legacy list from instance storage.
+        let legacy: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::LegacyHolderList(player_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total: u32 = legacy.len();
+        if total == 0 || start >= total {
+            return Ok(0);
+        }
+
+        let end = core::cmp::min(total, start.saturating_add(count));
+        let mut migrated: u32 = 0;
+
+        // Ensure TokenMeta exists (migration assumes tokens were issued previously).
+        let mut meta: TokenMeta = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenMeta(player_id))
+            .ok_or(Error::InvalidInput)?;
+
+        // Append each legacy holder to persistent pages.
+        for i in start..end {
+            let addr = legacy.get_unchecked(i);
+
+            // Append to last page or create a new one when full.
+            let mut last_page_index: u32 = if meta.holder_pages == 0 { 0 } else { meta.holder_pages - 1 };
+            if meta.holder_pages == 0 {
+                let mut pv: Vec<Address> = Vec::new(&env);
+                pv.push_back(addr.clone());
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::HolderPage(player_id, 0u32), &pv);
+                meta.holder_pages = 1;
+            } else {
+                let mut pv: Vec<Address> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::HolderPage(player_id, last_page_index))
+                    .unwrap_or_else(|| Vec::new(&env));
+                if pv.len() as u32 >= MAX_HOLDERS_PER_PAGE {
+                    last_page_index = meta.holder_pages;
+                    let mut newp: Vec<Address> = Vec::new(&env);
+                    newp.push_back(addr.clone());
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::HolderPage(player_id, last_page_index), &newp);
+                    meta.holder_pages = meta.holder_pages.checked_add(1).unwrap_or(meta.holder_pages);
+                } else {
+                    pv.push_back(addr.clone());
+                    env.storage()
+                        .persistent()
+                        .set(&DataKey::HolderPage(player_id, last_page_index), &pv);
+                }
+            }
+
+            migrated = migrated.checked_add(1).unwrap_or(migrated);
+        }
+
+        // Persist updated meta.
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenMeta(player_id), &meta);
+
+        // Rebuild leftover legacy list (elements before `start`, and after `end`).
+        let mut new_legacy: Vec<Address> = Vec::new(&env);
+        for i in 0..start {
+            new_legacy.push_back(legacy.get_unchecked(i).clone());
+        }
+        for i in end..total {
+            new_legacy.push_back(legacy.get_unchecked(i).clone());
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::LegacyHolderList(player_id), &new_legacy);
+
+        Ok(migrated)
     }
 
     // ── Queries ────────────────────────────────────────────────────────────
@@ -372,7 +496,7 @@ impl PlayerTokenContract {
     /// Returns 0 if no tokens have been purchased.
     pub fn get_balance(env: Env, player_id: u64, holder: Address) -> u64 {
         env.storage()
-            .instance()
+            .persistent()
             .get::<DataKey, HolderBalance>(&DataKey::HolderBalance(player_id, holder))
             .map(|b| b.tokens)
             .unwrap_or(0)
@@ -384,23 +508,34 @@ impl PlayerTokenContract {
     /// * [`Error::InvalidInput`] — no tokens issued for this player.
     pub fn get_token_meta(env: Env, player_id: u64) -> Result<TokenMeta, Error> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::TokenMeta(player_id))
             .ok_or(Error::InvalidInput)
     }
 
     /// Return the ordered list of holder addresses for a player.
     pub fn get_holders(env: Env, player_id: u64) -> Vec<Address> {
-        env.storage()
-            .instance()
-            .get(&DataKey::HolderList(player_id))
-            .unwrap_or_else(|| Vec::new(&env))
+        // Reconstruct full holder list by concatenating stored pages.
+        let mut out: Vec<Address> = Vec::new(&env);
+        if let Some(meta) = env.storage().persistent().get::<DataKey, TokenMeta>(&DataKey::TokenMeta(player_id)) {
+            for i in 0..meta.holder_pages {
+                let page: Vec<Address> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::HolderPage(player_id, i))
+                    .unwrap_or_else(|| Vec::new(&env));
+                for j in 0..page.len() {
+                    out.push_back(page.get_unchecked(j).clone());
+                }
+            }
+        }
+        out
     }
 
     /// Return the pending payouts queued for a given `(player_id, page)`.
     pub fn get_pending_payouts(env: Env, player_id: u64, page: u32) -> Vec<PendingPayout> {
         env.storage()
-            .instance()
+            .persistent()
             .get(&DataKey::PendingPayouts(player_id, page))
             .unwrap_or_else(|| Vec::new(&env))
     }
@@ -564,6 +699,86 @@ mod tests {
         client.buy_token(&6u64, &10u64, &b2);
         let holders = client.get_holders(&6u64);
         assert_eq!(holders.len(), 2);
+    }
+
+    #[test]
+    fn storage_growth_mitigation_pages_and_persistent_storage() {
+        let env = Env::default();
+        let (client, _admin) = setup(&env);
+
+        let player_id = 42u64;
+        client.issue_tokens(&player_id, &100_000u64);
+
+        // Create 200 unique buyers (10 pages at MAX_HOLDERS_PER_PAGE=20)
+        let mut buyers: Vec<Address> = Vec::new(&env);
+        for _ in 0..200 {
+            buyers.push_back(Address::generate(&env));
+        }
+
+        for i in 0..buyers.len() {
+            client.buy_token(&player_id, &1u64, &buyers.get_unchecked(i).clone());
+        }
+
+        // Distribute fees across several pages
+        for p in 0u32..10u32 {
+            let queued = client.distribute_fee(&player_id, &1_000_000u128, &p);
+            assert!(queued <= MAX_HOLDERS_PER_PAGE);
+        }
+
+        // Ensure we do not have a monolithic HolderList stored in instance storage
+        assert!(!env.storage().instance().has(&DataKey::HolderPage(player_id, 0u32)));
+
+        // TokenMeta should be in persistent storage, not instance storage.
+        assert!(!env.storage().instance().has(&DataKey::TokenMeta(player_id)));
+
+        // Pending payouts should be stored in persistent storage per page.
+        let p0: Vec<PendingPayout> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingPayouts(player_id, 0u32))
+            .unwrap_or_else(|| Vec::new(&env));
+        assert!(p0.len() > 0);
+    }
+
+    #[test]
+    fn migrate_player_step_batches_and_finalises() {
+        let env = Env::default();
+        let (client, admin) = setup(&env);
+
+        let player_id = 99u64;
+        client.issue_tokens(&player_id, &1_000u64);
+
+        // Create a legacy in-instance holder list of 45 addresses.
+        let mut legacy: Vec<Address> = Vec::new(&env);
+        for _ in 0..45 {
+            legacy.push_back(Address::generate(&env));
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::LegacyHolderList(player_id), &legacy);
+
+        // Admin calls migrate in batches of 20.
+        env.set_source_account(admin.clone());
+        let first = client.migrate_player_step(&player_id, &0u32, &20u32).unwrap();
+        assert_eq!(first, 20);
+
+        let second = client.migrate_player_step(&player_id, &20u32, &20u32).unwrap();
+        assert_eq!(second, 20);
+
+        let third = client.migrate_player_step(&player_id, &40u32, &20u32).unwrap();
+        assert_eq!(third, 5);
+
+        // Legacy list should now be empty.
+        let rem: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&DataKey::LegacyHolderList(player_id))
+            .unwrap_or_else(|| Vec::new(&env));
+        assert_eq!(rem.len(), 0);
+
+        // TokenMeta holder_pages should reflect the stored pages (45/20 => 3 pages).
+        let meta = client.get_token_meta(&player_id).unwrap();
+        assert_eq!(meta.holder_pages, 3);
     }
 
     #[test]
