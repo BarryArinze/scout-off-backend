@@ -873,8 +873,11 @@ mod tests {
         let scout = Address::generate(&env);
         fund(&env, &token, &admin, &scout, 1_000_000_000_000i128);
         client.subscribe(&scout, &1u32, &30u32);
-        assert!(client.get_fee_balance() > 0);
-        client.withdraw_fees(&admin);
+        let balance = client.get_fee_balance();
+        assert!(balance > 0);
+        // withdraw_fees takes an explicit amount (admin-withdrawal PR #1053);
+        // withdraw the full balance to drain the vault.
+        client.withdraw_fees(&admin, &balance);
         assert_eq!(client.get_fee_balance(), 0i128);
     }
 
