@@ -150,6 +150,7 @@ router.route('/audit')
  * created_at, hash }. Accepts ?eventType=, ?from=, ?to= (ISO 8601),
  * ?page=, ?pageSize= (#832).
  *
+ * @summary Returns a paginated, event-type-filtered audit trail.
  * @response 200 { success: true, data: AuditEntry[], total, page, pageSize }
  * @response 400 { success: false, error: string } - Invalid eventType or date range
  * @auth Bearer (admin role required)
@@ -176,6 +177,7 @@ router.route('/audit/verify')
  * Returns the full list of registered validator wallets from the local DB,
  * including their registration timestamp, revocation timestamp (if any), and tx_hash.
  *
+ * @summary Returns the full list of registered validator wallets.
  * @response 200 { success: true, data: ValidatorRow[] }
  * @auth Bearer (admin role required)
  */
@@ -361,6 +363,7 @@ router.route('/introspect')
  * Adds a JWT's jti claim to the revocation blocklist so requireAuth/requireRole
  * reject it on subsequent requests, even if it has not yet expired.
  *
+ * @summary Revoke a JWT by jti so it is rejected even before it expires.
  * @body { jti?: string, token?: string } - Provide either the jti directly or a
  *   full token to extract it from.
  * @response 200 { success: true, data: { jti } }
@@ -379,6 +382,7 @@ router.route('/tokens/revoke')
  * Resets the indexer's stored last_ledger to the given fromLedger value,
  * causing the next poll cycle to replay all events from that ledger onward.
  *
+ * @summary Reset the indexer's last_ledger so the next poll replays from fromLedger.
  * @body fromLedger {number} - Ledger sequence number to replay from
  * @response 200 { success: true, data: { fromLedger, previous } }
  * @response 400 { success: false, error: string } - Invalid fromLedger
@@ -388,6 +392,17 @@ router.route('/indexer/reindex')
   .post(requireRole('admin'), reindex)
   .all(methodNotAllowed(['POST']));
 
+/**
+ * GET /api/admin/validators/:wallet/stats
+ *
+ * Returns a validator's lifetime milestone approval/rejection counts.
+ * Unknown wallets return zeroed counts rather than 404.
+ *
+ * @param wallet {string} - Validator's Stellar public key
+ * @response 200 { success: true, data: { wallet, milestones_approved, milestones_rejected } }
+ * @response 400 { success: false, error: string } - Invalid Stellar address
+ * @auth Bearer (admin role required)
+ */
 router.route('/validators/:wallet/stats')
   .get(requireRole('admin'), getValidatorStatsEndpoint)
   .all(methodNotAllowed(['GET', 'HEAD']));
@@ -397,6 +412,9 @@ router.route('/validators/:wallet/stats')
  *
  * Returns all runtime feature flags and their current enabled state.
  * Cache is cleared before reading so the response always reflects DB state.
+ *
+ * @response 200 { success: true, data: FeatureFlag[] }
+ * @auth Bearer (admin role required)
  *
  * PUT /api/admin/feature-flags
  *
@@ -437,31 +455,43 @@ router.route('/feature-flags/:name')
  * Results may be stale if an action expired between the listing and the next
  * sweep, but approval of an expired action is rejected at the service layer.
  *
+ * @response 200 { success: true, data: PendingAction[] }
+ * @auth Bearer (admin role required)
+ */
+router.route('/actions/pending')
+  .get(requireRole('admin'), getPendingActions)
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
  * GET /api/admin/actions/:id
  *
  * Returns details of a specific action proposal including collected signers.
  *
+ * @param id {string} - Action proposal ID
+ * @response 200 { success: true, data: PendingActionDetail }
+ * @response 404 { success: false, error: string } - Action not found
+ * @auth Bearer (admin role required)
+ */
+router.route('/actions/:id')
+  .get(requireRole('admin'), getPendingActionById)
+  .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
  * POST /api/admin/actions/:id/approve
  *
  * Co-signs (approves) an existing pending action. Requires the caller to be
  * a distinct admin wallet that has not already signed. When the threshold of
  * distinct signatures is met, the action is executed automatically.
  *
+ * @param id {string} - Action proposal ID
  * @response 200 { success: true, message, data } - Threshold met, action executed
  * @response 202 { success: true, message, data } - Signature recorded, more needed
  * @response 403 { success: false, error } - Not an admin wallet
  * @response 404 { success: false, error } - Action not found
  * @response 409 { success: false, error } - Duplicate signer
  * @response 410 { success: false, error } - Action expired
+ * @auth Bearer (admin role required)
  */
-router.route('/actions/pending')
-  .get(requireRole('admin'), getPendingActions)
-  .all(methodNotAllowed(['GET', 'HEAD']));
-
-router.route('/actions/:id')
-  .get(requireRole('admin'), getPendingActionById)
-  .all(methodNotAllowed(['GET', 'HEAD']));
-
 router.route('/actions/:id/approve')
   .post(requireRole('admin'), approvePendingAction)
   .all(methodNotAllowed(['POST']));
@@ -514,12 +544,17 @@ router.route('/reindex/status')
  * Paginated list of dead-lettered webhook deliveries.
  * Each entry includes url, payload_preview, retry_count, last_error, created_at.
  *
+ * @response 200 { success: true, data: DeadLetterView[], total, page, pageSize }
+ * @response 400 { success: false, error: string } - Invalid page/pageSize
+ * @auth Bearer (admin role required)
+ *
  * DELETE /api/admin/webhooks/dead-letters
  *
  * Purge all dead letters older than `olderThanDays` query param (default: 7 days).
  *
- * @response 200 { success: true, data: DeadLetterView[], total, page, pageSize }
- * @response 400 { success: false, error: string } - Invalid page/pageSize
+ * @query olderThanDays {integer} - Minimum age in days to purge (default: 7)
+ * @response 200 { success: true, message: string, data: { deleted, olderThanDays } }
+ * @response 400 { success: false, error: string } - Invalid olderThanDays
  * @auth Bearer (admin role required)
  */
 router.route('/webhooks/dead-letters')
@@ -530,28 +565,50 @@ router.route('/webhooks/dead-letters')
 /**
  * POST /api/admin/webhooks/dead-letters/:id/requeue
  *
- * Manually trigger an immediate retry of a specific dead-lettered webhook.
+ * Manually trigger an immediate retry of a specific dead-lettered webhook,
+ * re-signing the payload with the subscription's current secret.
  *
- * DELETE /api/admin/webhooks/dead-letters/:id
- *
- * Purge a specific dead-letter row.
- *
- * @response 200 { success: true, message, data: { id, status } }
+ * @param id {integer} - Dead letter row ID
+ * @response 200 { success: true, message, data: { id, status: 'replayed' } }
+ * @response 400 { success: false, error: string } - Invalid id
  * @response 404 { success: false, error } - Not found
  * @response 409 { success: false, error } - Already replayed
- * @response 502 { success: false, error } - Delivery failed
+ * @response 502 { success: false, message, error, data: { id, status: 'pending', retryCount } } - Delivery failed
  * @auth Bearer (admin role required)
  */
 router.route('/webhooks/dead-letters/:id/requeue')
   .post(requireRole('admin'), requeueDeadLetter)
   .all(methodNotAllowed(['POST']));
 
+/**
+ * DELETE /api/admin/webhooks/dead-letters/:id
+ *
+ * Purge a specific dead-letter row.
+ *
+ * @param id {integer} - Dead letter row ID
+ * @response 200 { success: true, message: string, data: { id } }
+ * @response 400 { success: false, error: string } - Invalid id
+ * @response 404 { success: false, error: string } - Not found
+ * @auth Bearer (admin role required)
+ */
 router.route('/webhooks/dead-letters/:id')
   .delete(requireRole('admin'), purgeDeadLetter)
   .all(methodNotAllowed(['DELETE']));
 
 /**
- * POST /api/admin/webhooks/:id/replay  (legacy alias — kept for backwards compat)
+ * POST /api/admin/webhooks/:id/replay
+ *
+ * Legacy alias — kept for backwards compatibility. Delegates to the same
+ * handler as POST /api/admin/webhooks/dead-letters/:id/requeue.
+ *
+ * @deprecated Use POST /api/admin/webhooks/dead-letters/:id/requeue instead.
+ * @param id {integer} - Dead letter row ID
+ * @response 200 { success: true, message, data: { id, status: 'replayed' } }
+ * @response 400 { success: false, error: string } - Invalid id
+ * @response 404 { success: false, error } - Not found
+ * @response 409 { success: false, error } - Already replayed
+ * @response 502 { success: false, message, error, data: { id, status: 'pending', retryCount } } - Delivery failed
+ * @auth Bearer (admin role required)
  */
 router.route('/webhooks/:id/replay')
   .post(requireRole('admin'), replayDeadLetter)

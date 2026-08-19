@@ -33,11 +33,28 @@ const router = Router();
 /**
  * GET /api/players
  * optionalAuth so req.account is set when a Bearer token is present (for audit logging)
+ *
+ * @response 200 { success: true, data: PlayerSummary[], total, page, pageSize, pages }
+ * @response 400 { success: false, error: string } - Invalid query parameters
+ * @response 422 { success: false, error: string } - minTier out of range
  */
 router.route("/")
   .get(optionalAuth, validateQuery(filterSchema), filterPlayers)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
+/**
+ * POST /api/players/register
+ *
+ * Register a new player profile. `wallet` must match the authenticated
+ * account. Metadata is pinned to IPFS on the caller's behalf unless a
+ * pre-pinned `metadataUri` is supplied instead.
+ *
+ * @body { wallet: string, position: string, region: string, metadata?: object } | { wallet, position, region, metadataUri: string }
+ * @response 201 { success: true, data: { playerId, metadataUri, gatewayUrl } }
+ * @response 400 { success: false, error: string } - Invalid body
+ * @response 403 { success: false, error: string } - wallet does not match authenticated account
+ * @auth Bearer (player role required)
+ */
 router.route("/register")
   .post(
     requireRole("player"),
@@ -46,6 +63,34 @@ router.route("/register")
   )
   .all(methodNotAllowed(['POST']));
 
+/**
+ * GET /api/players/:playerId
+ *
+ * Fetch a single player profile, including a live `offerCount`. Deactivated
+ * profiles return 404 to non-owners/non-admins. Supports conditional
+ * requests via ETag (304 when `If-None-Match` matches).
+ *
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @response 200 { success: true, data: PlayerDetail }
+ * @response 304 Not Modified (when If-None-Match matches the current ETag)
+ * @response 400 { success: false, error: string } - Invalid playerId
+ * @response 404 { success: false, error: string } - Player not found or not visible to caller
+ * @auth optional (public read)
+ *
+ * PUT /api/players/:playerId
+ *
+ * Update a player's profile metadata. Owner-only. Accepts either a raw
+ * `metadata` object (pinned to IPFS by the backend) or a pre-pinned
+ * `metadataUri`.
+ *
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @body { metadata: object } | { metadataUri: string }
+ * @response 200 { success: true, data: { metadataUri, playerId } }
+ * @response 400 { success: false, error: string } - Invalid playerId or body
+ * @response 403 { success: false, error: string } - Not the profile owner
+ * @response 404 { success: false, error: string } - Player not found
+ * @auth Bearer (player role required, profile owner only)
+ */
 router.route("/:playerId")
   .get(optionalAuth, getPlayer)
   .put(
@@ -56,10 +101,33 @@ router.route("/:playerId")
   )
   .all(methodNotAllowed(['GET', 'PUT', 'HEAD']));
 
+/**
+ * GET /api/players/:playerId/milestones
+ *
+ * List a player's milestones, merging on-chain milestone events with
+ * pending/approved submission events. Supports `status` (pending|approved|all),
+ * `sortBy`, `order`/`sort`, and `limit` (max 50) query params.
+ *
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @response 200 { success: true, data: Milestone[] }
+ * @response 400 { success: false, error: string } - Invalid playerId, limit, or query params
+ * @response 404 { success: false, error: string } - Player not found or not visible to caller
+ */
 router.route("/:playerId/milestones")
   .get(optionalAuth, getPlayerMilestones)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
+/**
+ * POST /api/players/:playerId/deactivate
+ *
+ * Self-service soft-delete of the caller's own player profile. Owner-only.
+ *
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @response 200 { success: true, message: string }
+ * @response 400 { success: false, error: string } - Invalid playerId
+ * @response 404 { success: false, error: string } - Player not found
+ * @auth Bearer (player role required, profile owner only)
+ */
 router.route("/:playerId/deactivate")
   .post(
     requireRole("player"),
@@ -68,6 +136,17 @@ router.route("/:playerId/deactivate")
   )
   .all(methodNotAllowed(['POST']));
 
+/**
+ * POST /api/players/:playerId/reactivate
+ *
+ * Restore a previously self-deactivated player profile. Owner-only.
+ *
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @response 200 { success: true, message: string }
+ * @response 400 { success: false, error: string } - Invalid playerId
+ * @response 404 { success: false, error: string } - Player not found
+ * @auth Bearer (player role required, profile owner only)
+ */
 router.route("/:playerId/reactivate")
   .post(
     requireRole("player"),
@@ -76,6 +155,22 @@ router.route("/:playerId/reactivate")
   )
   .all(methodNotAllowed(['POST']));
 
+/**
+ * POST /api/players/:playerId/anonymize
+ *
+ * GDPR right-to-erasure: scrubs PII from every off-chain store this backend
+ * controls (profile fields, history, views, contact unlocks, trial offers),
+ * unpins the player's IPFS content, and deactivates the profile. Does NOT
+ * erase on-chain Soroban contract state, which is immutable by design — see
+ * docs/data-privacy.md.
+ *
+ * @summary GDPR right-to-erasure: scrub all off-chain PII for this player.
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @response 200 { success: true, data: { playerId } }
+ * @response 400 { success: false, error: string } - Invalid playerId
+ * @response 404 { success: false, error: string } - Player not found
+ * @auth Bearer (player role required, profile owner only)
+ */
 router.route("/:playerId/anonymize")
   .post(
     requireRole("player"),
@@ -87,6 +182,11 @@ router.route("/:playerId/anonymize")
 /**
  * GET /api/players/:playerId/history
  * Admin or profile owner only.
+ *
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @response 200 { success: true, data: PlayerProfileHistoryItem[] } - Newest first
+ * @response 400 { success: false, error: string } - Invalid playerId
+ * @response 404 { success: false, error: string } - Player not found
  */
 router.route("/:playerId/history")
   .get(
@@ -101,8 +201,14 @@ router.route("/:playerId/history")
 
 /**
  * GET /api/players/:playerId/history/:version
- * Returns the full profile snapshot at the given version number.
+ * Returns the full profile snapshot at the given 1-based version number.
  * Admin or profile owner only.
+ *
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @param version {integer} - 1-based version number (1 = oldest snapshot)
+ * @response 200 { success: true, data: PlayerProfileHistoryItem }
+ * @response 400 { success: false, error: string } - Invalid playerId or version
+ * @response 404 { success: false, error: string } - Player not found or version out of range
  */
 router.route("/:playerId/history/:version")
   .get(
@@ -119,6 +225,12 @@ router.route("/:playerId/history/:version")
  * GET /api/players/:playerId/history/:version/diff
  * Returns a field-level diff between version N and N-1.
  * Admin or profile owner only.
+ *
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @param version {integer} - 1-based version number (1 = oldest snapshot, has no diff predecessor)
+ * @response 200 { success: true, data: { version, previousVersion, diff: { field: { from, to } } } }
+ * @response 400 { success: false, error: string } - Invalid playerId or version
+ * @response 404 { success: false, error: string } - Player not found or version out of range
  */
 router.route("/:playerId/history/:version/diff")
   .get(
@@ -134,6 +246,11 @@ router.route("/:playerId/history/:version/diff")
 /**
  * GET /api/players/:playerId/analytics
  * Return profile view and contact unlock analytics (owner-only).
+ *
+ * @param playerId {string} - Player's unique identifier (cuid2)
+ * @response 200 { success: true, data: { view_count, viewer_count, contact_unlock_count, lastUpdated } }
+ * @response 400 { success: false, error: string } - Invalid playerId
+ * @response 404 { success: false, error: string } - Player not found
  */
 router.route("/:playerId/analytics")
   .get(

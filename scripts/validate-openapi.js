@@ -2,15 +2,22 @@
 /**
  * validate-openapi.js
  *
- * Validates src/openapi.yaml:
- *   1. Parses the YAML without error (well-formed)
- *   2. Checks required top-level OpenAPI 3.0 fields (openapi, info, paths)
- *   3. Verifies that src/openapi.json is in sync with src/openapi.yaml
- *      (fails if openapi.json is stale — run `npm run build:openapi` to fix)
+ * Validates the committed OpenAPI spec against the canonical source (the
+ * route files), not just against a second hand-maintained file:
+ *
+ *   1. Parses src/openapi.yaml and checks required OpenAPI 3.x fields.
+ *   2. Regenerates the spec from src/routes/*.ts in memory (the same
+ *      generator scripts/generate-openapi-json.js uses) and deep-compares
+ *      it against the committed src/openapi.yaml. A mismatch means the
+ *      spec drifted from the routes — exactly the failure mode this whole
+ *      pipeline exists to make impossible — and fails the build with
+ *      instructions to regenerate.
+ *   3. Verifies src/openapi.json is byte-for-byte in sync with
+ *      src/openapi.yaml (catches a stale JSON file after a manual YAML edit).
  *
  * Usage (CI):
  *   node scripts/validate-openapi.js
- * Exit 0 = valid, Exit 1 = invalid (error message on stderr).
+ * Exit 0 = valid and in sync, Exit 1 = invalid or stale (message on stderr).
  *
  * The spec file locations can be overridden with OPENAPI_YAML_PATH /
  * OPENAPI_JSON_PATH (used by tests to run the check against fixture files).
@@ -45,12 +52,10 @@ try {
  * - plain objects: canonicalise each value, then sort the keys
  * - primitives (string / number / boolean / null): returned unchanged
  *
- * Keys are sorted at EVERY nesting level. The previous implementation
- * passed the top-level key list to JSON.stringify as a replacer ARRAY,
- * which JSON.stringify treats as an allow-list applied at every depth —
- * so any property whose name was not a top-level key (e.g.
- * paths./a.get.summary) was silently stripped at every level, collapsing
- * deep drift into "identical" specs.
+ * Keys are sorted at EVERY nesting level — a shallow, top-level-only sort
+ * would silently treat deeply-nested content differences (e.g.
+ * paths./a.get.summary) as equal, which previously let real spec drift
+ * pass this check undetected.
  */
 function canonicalise(value) {
   if (Array.isArray(value)) {
@@ -119,7 +124,33 @@ function main() {
     process.exit(1);
   }
 
-  // ── Step 3: Check JSON is in sync ────────────────────────────────────────
+  // ── Step 3: Regenerate from the canonical source and diff ─────────────────
+  // This is the check that actually enforces "one source of truth": it does
+  // not compare the spec against another hand-maintained file, it compares
+  // the spec against what the route source files themselves say.
+  if (YAML_PATH === path.join(__dirname, '..', 'src', 'openapi.yaml')) {
+    const { generateSpec } = require('./generate-openapi-json');
+    let regenerated;
+    try {
+      regenerated = generateSpec();
+    } catch (err) {
+      console.error('[validate-openapi] Failed to regenerate spec from route sources:', err.message);
+      process.exit(1);
+    }
+
+    if (!specsAreEqual(spec, regenerated)) {
+      console.error(
+        '[validate-openapi] src/openapi.yaml is out of sync with the route source files ' +
+        '(src/routes/*.ts).\n' +
+        'A route, its auth requirement, or its request/response schema changed without ' +
+        'regenerating the spec.\n' +
+        'Run: npm run build:openapi   then commit the updated openapi.yaml/openapi.json',
+      );
+      process.exit(1);
+    }
+  }
+
+  // ── Step 4: Check JSON is in sync with YAML ────────────────────────────────
   if (!fs.existsSync(JSON_PATH)) {
     console.error(
       '[validate-openapi] src/openapi.json does not exist.\n' +
@@ -138,7 +169,8 @@ function main() {
   }
 
   console.log(
-    `[validate-openapi] ✓ OpenAPI ${spec.openapi} spec valid — ${pathCount} paths, info.version=${spec.info.version}`,
+    `[validate-openapi] OK — OpenAPI ${spec.openapi} spec valid and in sync with route sources ` +
+    `(${pathCount} paths, info.version=${spec.info.version})`,
   );
   process.exit(0);
 }
