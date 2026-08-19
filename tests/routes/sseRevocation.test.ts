@@ -120,9 +120,9 @@ beforeEach(() => {
   _resetWalletBlocklistForTests();
 });
 
-afterEach(() => {
-  unblocklistWallet(WALLET_A);
-  unblocklistWallet(WALLET_B);
+afterEach(async () => {
+  await unblocklistWallet(WALLET_A);
+  await unblocklistWallet(WALLET_B);
 });
 
 /** Wait until the connection's collected frames contain `session_ended`. */
@@ -247,7 +247,7 @@ describe('SSE — wallet blocklisting terminates the stream', () => {
 
     // Block the wallet → immediate termination.
     const startedAt = Date.now();
-    blocklistWallet(WALLET_A, 'abuse');
+    await blocklistWallet(WALLET_A, 'abuse');
     await waitForSessionEnded(conn, 1500);
     expect(Date.now() - startedAt).toBeLessThan(1000);
 
@@ -267,7 +267,7 @@ describe('SSE — wallet blocklisting terminates the stream', () => {
   });
 
   it('denies a new connection from a blocklisted wallet (403)', async () => {
-    blocklistWallet(WALLET_A, 'abuse');
+    await blocklistWallet(WALLET_A, 'abuse');
 
     const { statusCode, conn } = await openSseConnection(
       server,
@@ -279,8 +279,8 @@ describe('SSE — wallet blocklisting terminates the stream', () => {
   });
 
   it('allows the wallet again after it is unblocked', async () => {
-    blocklistWallet(WALLET_A, 'abuse');
-    unblocklistWallet(WALLET_A);
+    await blocklistWallet(WALLET_A, 'abuse');
+    await unblocklistWallet(WALLET_A);
 
     const { statusCode, conn } = await openSseConnection(
       server,
@@ -307,7 +307,7 @@ describe('SSE — wallet blocklisting terminates the stream', () => {
       connB.waitForChunks(1, 1000).catch(() => {}),
     ]);
 
-    blocklistWallet(WALLET_A, 'abuse');
+    await blocklistWallet(WALLET_A, 'abuse');
 
     await waitForSessionEnded(connA, 1500);
     expect(connA.chunks.join('')).toContain('event: session_ended');

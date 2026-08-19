@@ -75,7 +75,7 @@ export async function adminDeactivatePlayer(
     const { reason } = bodyResult.data;
 
     // ── Fetch player ─────────────────────────────────────────────────────────
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({
         success: false,
@@ -94,10 +94,10 @@ export async function adminDeactivatePlayer(
     }
 
     // ── Soft-delete ──────────────────────────────────────────────────────────
-    deactivatePlayerWithReason(playerId, reason);
+    await deactivatePlayerWithReason(playerId, reason);
 
     // ── Cancel pending milestones ────────────────────────────────────────────
-    const cancelledCount = cancelPendingMilestonesForPlayer(playerId);
+    const cancelledCount = await cancelPendingMilestonesForPlayer(playerId);
     logger.info(
       `[adminDeactivate] cancelled ${cancelledCount} pending milestone(s) for player=${playerId}`,
     );
@@ -108,7 +108,7 @@ export async function adminDeactivatePlayer(
     // ── SSE: notify connected scouts who unlocked this player ─────────────────
     // Each unlock row carries the scout_wallet; we broadcast individually so
     // the relevance filter in eventBroadcaster routes to the right subscriber.
-    const unlocks = getContactUnlocksByPlayer(playerId);
+    const unlocks = await getContactUnlocksByPlayer(playerId);
     const notifiedScouts = new Set<string>();
 
     for (const unlock of unlocks) {
@@ -138,7 +138,7 @@ export async function adminDeactivatePlayer(
 
     // ── Audit log ────────────────────────────────────────────────────────────
     const adminWallet = req.account ?? 'unknown';
-    logAuditEvent({
+    await logAuditEvent({
       action: 'player_deactivated',
       adminWallet,
       timestamp: new Date().toISOString(),
@@ -148,7 +148,7 @@ export async function adminDeactivatePlayer(
         cancelled_milestones: cancelledCount,
         notified_scouts: notifiedScouts.size,
       },
-    });
+    }).catch(() => {});
 
     logger.info(
       `[adminDeactivate] player=${playerId} deactivated by admin=${adminWallet} ` +
@@ -190,7 +190,7 @@ export async function adminReactivatePlayer(
     const playerId = sanitizeInput(req.params.playerId);
 
     // ── Fetch player ─────────────────────────────────────────────────────────
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({
         success: false,
@@ -209,7 +209,7 @@ export async function adminReactivatePlayer(
     }
 
     // ── Reactivate ───────────────────────────────────────────────────────────
-    reactivatePlayerWithReason(playerId);
+    await reactivatePlayerWithReason(playerId);
 
     // ── Invalidate player cache ──────────────────────────────────────────────
     await invalidatePlayerCache(playerId);
@@ -226,12 +226,12 @@ export async function adminReactivatePlayer(
 
     // ── Audit log ────────────────────────────────────────────────────────────
     const adminWallet = req.account ?? 'unknown';
-    logAuditEvent({
+    await logAuditEvent({
       action: 'player_reactivated',
       adminWallet,
       timestamp: new Date().toISOString(),
       queryParams: { player_id: playerId },
-    });
+    }).catch(() => {});
 
     logger.info(
       `[adminReactivate] player=${playerId} reactivated by admin=${adminWallet}`,

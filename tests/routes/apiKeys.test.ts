@@ -37,10 +37,8 @@ jest.mock('../../src/db', () => ({
   listApiKeysByWallet: jest.fn().mockReturnValue([]),
   revokeApiKeyById: jest.fn(),
   getApiKeyByHash: jest.fn().mockReturnValue(null),
-  getActiveApiKeyByLookupHash: jest.fn().mockReturnValue(null),
-  getActiveApiKeysAwaitingLookupHash: jest.fn().mockReturnValue([]),
-  setApiKeyLookupHash: jest.fn(),
-  touchApiKeyLastUsed: jest.fn(),
+  getAllActiveApiKeys: jest.fn().mockReturnValue([]),
+  touchApiKeyLastUsed: jest.fn().mockResolvedValue(undefined),
   // bookmarks
   insertBookmark: jest.fn(),
   deleteBookmark: jest.fn(),
@@ -151,36 +149,38 @@ describe('generateApiKey / verifyApiKey (unit)', () => {
 describe('resolveApiKey (unit)', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('returns null when the indexed lookup finds nothing and no legacy keys remain', () => {
-    mockGetByLookup.mockReturnValueOnce(null);
-    mockGetPending.mockReturnValueOnce([]);
-    expect(resolveApiKey('somekey')).toBeNull();
+  it('returns null when getAllActiveApiKeys returns empty array', async () => {
+    mockGetAllActive.mockReturnValueOnce([]);
+    expect(await resolveApiKey('somekey')).toBeNull();
   });
 
-  it('returns scout_wallet, id, and parsed scopes when key matches', () => {
-    const { key, keyHash, lookupHash } = generateApiKey();
-    seedIndexedKey({ id: 42, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'test', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null, lookup_hash: lookupHash });
-    const result = resolveApiKey(key);
+  it('returns scout_wallet, id, and parsed scopes when key matches', async () => {
+    const { key, keyHash } = generateApiKey();
+    mockGetAllActive.mockReturnValueOnce([
+      { id: 42, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'test', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null },
+    ]);
+    const result = await resolveApiKey(key);
     // Legacy key: null scopes → parsed as null (unrestricted) for the shared
     // scope contract (#1019).
     expect(result).toEqual({ scout_wallet: SCOUT_A, id: 42, scopes: null });
   });
 
-  it('resolves the parsed scope list for a restricted key', () => {
-    const { key, keyHash, lookupHash } = generateApiKey();
-    seedIndexedKey({
-      id: 43,
-      key_hash: keyHash,
-      scout_wallet: SCOUT_A,
-      label: 'restricted',
-      created_at: 0,
-      last_used_at: null,
-      revoked_at: null,
-      scopes: JSON.stringify(['read:milestones', 'write:contacts']),
-      rate_limit_per_minute: null,
-      lookup_hash: lookupHash,
-    });
-    const result = resolveApiKey(key);
+  it('resolves the parsed scope list for a restricted key', async () => {
+    const { key, keyHash } = generateApiKey();
+    mockGetAllActive.mockReturnValueOnce([
+      {
+        id: 43,
+        key_hash: keyHash,
+        scout_wallet: SCOUT_A,
+        label: 'restricted',
+        created_at: 0,
+        last_used_at: null,
+        revoked_at: null,
+        scopes: JSON.stringify(['read:milestones', 'write:contacts']),
+        rate_limit_per_minute: null,
+      },
+    ]);
+    const result = await resolveApiKey(key);
     expect(result).toEqual({
       scout_wallet: SCOUT_A,
       id: 43,
@@ -188,11 +188,12 @@ describe('resolveApiKey (unit)', () => {
     });
   });
 
-  it('returns null when no key matches', () => {
-    const { keyHash, lookupHash } = generateApiKey();
-    seedIndexedKey({ id: 1, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null, lookup_hash: lookupHash });
-    mockGetPending.mockReturnValue([]);
-    expect(resolveApiKey('completely-different-key')).toBeNull();
+  it('returns null when no key matches', async () => {
+    const { keyHash } = generateApiKey();
+    mockGetAllActive.mockReturnValueOnce([
+      { id: 1, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null },
+    ]);
+    expect(await resolveApiKey('completely-different-key')).toBeNull();
   });
 
   // ── #1033: the lookup value must not become the authentication proof ───────

@@ -119,47 +119,15 @@ function toResolvedApiKey(row: ApiKeyRow): ResolvedApiKey {
  * circular dependency — auth.ts calls this function only at runtime via a
  * lazy require so the module graph stays acyclic at load time.
  */
-export function resolveApiKey(rawKey: string): ResolvedApiKey | null {
-  if (!rawKey || typeof rawKey !== 'string') return null;
-
-  const lookupHash = deriveApiKeyLookupHash(rawKey);
-
-  // ── 1. Indexed lookup ──────────────────────────────────────────────────────
-  const candidate = getActiveApiKeyByLookupHash(lookupHash);
-  if (candidate) {
-    // ── 2. Cryptographic verification against the salted stored hash ─────────
-    return verifyApiKey(rawKey, candidate.key_hash) ? toResolvedApiKey(candidate) : null;
-  }
-
-  return resolvePreMigrationApiKey(rawKey, lookupHash);
-}
-
-/**
- * TRANSITIONAL fallback for keys issued before db/024_api_key_lookup_hash.sql.
- *
- * Those rows have `lookup_hash IS NULL` and cannot be backfilled in SQL: only
- * a one-way salted hash of each key is stored, so the raw key needed to derive
- * the lookup value simply does not exist server-side. Rather than force every
- * scout to rotate, such a key is verified the old way *once* — against the
- * strictly-shrinking set of not-yet-migrated rows, never the full table — and
- * its lookup_hash is written on that first successful authentication, moving
- * it onto the indexed path for good.
- *
- * The set is backed by the partial index idx_api_keys_lookup_pending, so once
- * every active key has been healed this costs one empty indexed read. It is
- * deliberately not a general-purpose fallback: a wrong or revoked key never
- * reaches the full-table scan the old implementation performed.
- */
-function resolvePreMigrationApiKey(rawKey: string, lookupHash: string): ResolvedApiKey | null {
-  const pending: ApiKeyRow[] = getActiveApiKeysAwaitingLookupHash();
-  for (const row of pending) {
-    if (!verifyApiKey(rawKey, row.key_hash)) continue;
-    try {
-      setApiKeyLookupHash(row.id, lookupHash);
-      logger.info({ action: 'api_key_lookup_hash_backfilled', keyId: row.id });
-    } catch {
-      // Best-effort: failing to persist the lookup value must never fail an
-      // otherwise valid authentication. The row is simply retried next time.
+export async function resolveApiKey(rawKey: string): Promise<{ scout_wallet: string; id: number; scopes: string[] | null } | null> {
+  const rows: ApiKeyRow[] = await getAllActiveApiKeys();
+  for (const row of rows) {
+    if (verifyApiKey(rawKey, row.key_hash)) {
+      return {
+        scout_wallet: row.scout_wallet,
+        id: row.id,
+        scopes: parseApiKeyScopes(row.scopes, (message) => logger.warn(message)),
+      };
     }
     return toResolvedApiKey(row);
   }
@@ -209,7 +177,7 @@ export async function issueApiKey(
     const now = Math.floor(Date.now() / 1000);
 
     const grantedScopes = scopesResult.scopes;
-    const id = insertApiKey({
+    const id = await insertApiKey({
       key_hash: keyHash,
       scout_wallet: req.params.wallet,
       label: parsed.data.label,
@@ -251,7 +219,7 @@ export async function listApiKeys(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const rows: ApiKeyRow[] = listApiKeysByWallet(req.params.wallet);
+    const rows: ApiKeyRow[] = await listApiKeysByWallet(req.params.wallet);
 
     res.json({
       success: true,
@@ -290,7 +258,7 @@ export async function revokeApiKey(
       return;
     }
 
-    const revoked = revokeApiKeyById(id, req.params.wallet);
+    const revoked = await revokeApiKeyById(id, req.params.wallet);
     if (!revoked) {
       res.status(404).json({ success: false, error: 'API key not found' });
       return;

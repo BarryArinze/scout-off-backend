@@ -73,7 +73,10 @@ jobs:
       - name: Validate env example
         run: node scripts/validate-env.js
 
-      - name: Validate OpenAPI spec
+      - name: Check every route has canonical-source documentation
+        run: npm run docs:check
+
+      - name: Validate OpenAPI spec is in sync with route sources
         run: npm run validate:openapi
 
       # The Helm chart's defaults must stay internally consistent: SQLite is
@@ -116,6 +119,71 @@ jobs:
         with:
           name: coverage-report
           path: coverage/
+
+  # Runs the same suite as `test` above but against a real PostgreSQL service
+  # container with DB_DRIVER=postgres, so the Postgres driver path (#1014)
+  # can never silently regress. Excludes only the test files that exercise
+  # the events/indexer_state, admin-multisig (pending_admin_actions), and
+  # webhook-delivery subsystems — those are explicitly out of scope for
+  # #1014 (owned by separate issues) and still use SQLite's raw getDb()
+  # handle by design, so they're expected to fail under DB_DRIVER=postgres
+  # rather than being converted here.
+  postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scout_off_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Type check (src)
+        run: node node_modules/.bin/tsc --noEmit
+
+      - name: Run test suite against DB_DRIVER=postgres
+        run: >
+          node node_modules/jest/bin/jest.js --runInBand
+          --testPathIgnorePatterns="/node_modules/"
+          --testPathIgnorePatterns="tests/controllers/webhookAdminController.test.ts"
+          --testPathIgnorePatterns="tests/db/backfill.test.ts"
+          --testPathIgnorePatterns="tests/db/sqlInjectionRegression.test.ts"
+          --testPathIgnorePatterns="tests/e2e/milestonePromotion.e2e.test.ts"
+          --testPathIgnorePatterns="tests/e2e/scoutUnlock.e2e.test.ts"
+          --testPathIgnorePatterns="tests/routes/adminAuditTrail.test.ts"
+          --testPathIgnorePatterns="tests/routes/adminExport.test.ts"
+          --testPathIgnorePatterns="tests/routes/adminPagination.test.ts"
+          --testPathIgnorePatterns="tests/routes/adminQuerySchema.test.ts"
+          --testPathIgnorePatterns="tests/routes/exportStreaming.test.ts"
+          --testPathIgnorePatterns="tests/routes/reindex.test.ts"
+          --testPathIgnorePatterns="tests/services/indexer.test.ts"
+          --testPathIgnorePatterns="tests/services/indexerDispatch.test.ts"
+          --testPathIgnorePatterns="tests/services/tierPromotion.test.ts"
+          --testPathIgnorePatterns="tests/services/webhooks.test.ts"
+        env:
+          DB_DRIVER: postgres
+          DATABASE_URL: postgres://postgres:postgres@localhost:5432/scout_off_ci
+          POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/scout_off_ci
+          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
 
   audit:
     runs-on: ubuntu-latest

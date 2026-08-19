@@ -46,6 +46,7 @@ jest.mock('../../src/db', () => ({
   hasContactUnlock: jest.fn().mockReturnValue(true),
   insertContactUnlock: jest.fn(),
   getLatestSubscription: jest.fn().mockReturnValue(null),
+  getSubscriptionsByScout: jest.fn().mockReturnValue([]),
   insertSubscription: jest.fn(),
   dbRenewSubscription: jest.fn(),
   dbCancelSubscription: jest.fn(),
@@ -60,7 +61,10 @@ jest.mock('../../src/db', () => ({
   insertAdminActionSignature: jest.fn(),
   getAdminActionSignature: jest.fn().mockReturnValue(null),
   getAdminActionSignatures: jest.fn().mockReturnValue([]),
-  insertAuditLog: jest.fn().mockReturnValue({
+  // src/utils/audit.ts's recordAudit (used by filterPlayers, milestone
+  // submission/listing) calls this directly — not mocked via
+  // services/audit's logAuditEvent below.
+  insertAuditLog: jest.fn().mockResolvedValue({
     id: 1,
     action: 'player_search',
     admin_wallet: '',
@@ -69,6 +73,11 @@ jest.mock('../../src/db', () => ({
     prev_hash: '0'.repeat(64),
     hash: 'mock-hash-1',
     event_source: 'app_event',
+  }),
+  // src/app.ts's /health and /ready probes go through getDriver().
+  getDriver: jest.fn().mockReturnValue({
+    get: jest.fn().mockResolvedValue({ '?column?': 1 }),
+    run: jest.fn().mockResolvedValue({ changes: 1, lastId: 0 }),
   }),
 }));
 
@@ -145,7 +154,7 @@ jest.mock('../../src/services/stellar', () => ({
 }));
 
 jest.mock('../../src/services/audit', () => ({
-  logAuditEvent: jest.fn(),
+  logAuditEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
 // ─── Shape helpers ────────────────────────────────────────────────────────────

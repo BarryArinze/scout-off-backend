@@ -110,7 +110,7 @@ export async function registerPlayer(
     // waiting for the indexer to process the blockchain event (#282).
     const playerId = createId();
     const now = Date.now();
-    insertOrUpdatePlayer({
+    await insertOrUpdatePlayer({
       player_id: playerId,
       wallet: parsed.wallet,
       position: canonicalPosition,
@@ -161,7 +161,7 @@ export async function getPlayer(
     const cacheKey = `players:${playerId}`;
     let data = await cacheGet<Record<string, unknown>>(cacheKey);
     if (!data) {
-      const row = getPlayerById(playerId);
+      const row = await getPlayerById(playerId);
       if (!row) {
         res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
         return;
@@ -200,12 +200,11 @@ export async function getPlayer(
     // deliberately excluded from the ETag digest above so submitting a new
     // offer doesn't bust the cache / invalidate conditional GETs for the
     // rest of the (slower-changing) profile fields.
-    const offerCount = countTrialOffersByPlayer(String(data.player_id));
+    const offerCount = await countTrialOffersByPlayer(String(data.player_id));
     res.json({ success: true, data: { ...data, offerCount } });
 
     // Record profile view (non-blocking, after response is sent)
-    // This is synchronous but happens after the response is queued
-    recordProfileViewForRequest(req);
+    recordProfileViewForRequest(req).catch(() => {});
   } catch (err) {
     next(err);
   }
@@ -287,7 +286,7 @@ export async function filterPlayers(
     let nextCursor: string | null;
 
     if (cursor) {
-      const searchResult = searchPlayers({
+      const searchResult = await searchPlayers({
         region: sanitizedRegion,
         position: normalizedPosition,
         minTier,
@@ -299,7 +298,7 @@ export async function filterPlayers(
       rows = searchResult.data;
       nextCursor = searchResult.nextCursor;
     } else {
-      const searchResult = searchPlayers({
+      const searchResult = await searchPlayers({
         region: sanitizedRegion,
         position: normalizedPosition,
         minTier,
@@ -312,7 +311,7 @@ export async function filterPlayers(
       nextCursor = searchResult.nextCursor;
     }
 
-    const total = countPlayers({
+    const total = await countPlayers({
       region: sanitizedRegion,
       position: normalizedPosition,
       minTier,
@@ -343,7 +342,7 @@ export async function filterPlayers(
     await cacheSet(cacheKey, result);
 
     const scoutWallet = req.account ?? 'anonymous';
-    recordAudit(scoutWallet, 'player_search', {
+    await recordAudit(scoutWallet, 'player_search', {
       region: sanitizedRegion ?? null,
       position: normalizedPosition ?? null,
       minTier: minTier ?? null,
@@ -385,7 +384,7 @@ export async function updatePlayer(
     const result = await updateProfile(playerId, metadataUri);
 
     // Append a profile version history row after the on-chain update succeeds.
-    insertPlayerProfileHistory({
+    await insertPlayerProfileHistory({
       player_id: playerId,
       metadata_uri: result.metadataUri,
       changed_at: Date.now(),
@@ -435,7 +434,7 @@ export async function getPlayerMilestones(
     }
     const playerId = sanitizeInput(req.params.playerId);
 
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
       return;
@@ -523,7 +522,7 @@ export async function getPlayerMilestones(
  * Checks for self-views and deduplicates rapid consecutive views within a 5-minute window.
  * Errors are logged but do not interfere with the response.
  */
-function recordProfileViewForRequest(req: Request): void {
+async function recordProfileViewForRequest(req: Request): Promise<void> {
   try {
     // Only record views from authenticated scouts
     if (!req.account) {
@@ -534,7 +533,7 @@ function recordProfileViewForRequest(req: Request): void {
     const scoutWallet = req.account as string;
 
     // Get player to check for self-view
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       // Player doesn't exist, skip recording
       return;
@@ -546,7 +545,7 @@ function recordProfileViewForRequest(req: Request): void {
     }
 
     // Check dedup window: 5 minutes (300 seconds)
-    const lastViewAt = getLastProfileView(scoutWallet, playerId);
+    const lastViewAt = await getLastProfileView(scoutWallet, playerId);
     const now = Math.floor(Date.now() / 1000);
 
     if (lastViewAt !== null && (now - lastViewAt) < 300) {
@@ -555,7 +554,7 @@ function recordProfileViewForRequest(req: Request): void {
     }
 
     // Record the view
-    recordProfileView({
+    await recordProfileView({
       scout_wallet: scoutWallet,
       player_id: playerId,
       viewed_at: now,
@@ -585,12 +584,12 @@ export async function deactivatePlayerEndpoint(
       return;
     }
     const playerId = sanitizeInput(req.params.playerId);
-    const row = getPlayerById(playerId);
+    const row = await getPlayerById(playerId);
     if (!row) {
       res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
       return;
     }
-    deactivatePlayer(playerId);
+    await deactivatePlayer(playerId);
     await invalidatePlayerCache(playerId);
     res.json({ success: true, message: "Player profile deactivated successfully" });
   } catch (err) {
@@ -611,12 +610,12 @@ export async function reactivatePlayerEndpoint(
       return;
     }
     const playerId = sanitizeInput(req.params.playerId);
-    const row = getPlayerById(playerId);
+    const row = await getPlayerById(playerId);
     if (!row) {
       res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
       return;
     }
-    reactivatePlayer(playerId);
+    await reactivatePlayer(playerId);
     await invalidatePlayerCache(playerId);
     res.json({ success: true, message: "Player profile reactivated successfully" });
   } catch (err) {
@@ -648,7 +647,7 @@ export async function getPlayerAnalytics(
 
     const playerId = sanitizeInput(req.params.playerId);
 
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({
         success: false,
@@ -658,9 +657,9 @@ export async function getPlayerAnalytics(
       return;
     }
 
-    const viewCount = getProfileViewCount(playerId);
-    const viewerCount = getUniqueViewerCount(playerId);
-    const contactUnlockCount = getContactUnlockCount(playerId);
+    const viewCount = await getProfileViewCount(playerId);
+    const viewerCount = await getUniqueViewerCount(playerId);
+    const contactUnlockCount = await getContactUnlockCount(playerId);
     const lastUpdated = Math.floor(Date.now() / 1000);
 
     res.json({

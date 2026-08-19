@@ -305,6 +305,13 @@ const config = {
     if (raw === 'no-verify') return 'no-verify' as const;
     return false as const;
   })(),
+  /**
+   * Max concurrent connections in the PostgreSQL connection pool. Each
+   * connection can run one query at a time, so this is effectively the
+   * PostgresDriver's concurrency ceiling — requests beyond this queue for a
+   * free connection rather than failing. Ignored when DB_DRIVER=sqlite.
+   */
+  databasePoolSize: parseInt(process.env.DATABASE_POOL_SIZE ?? '10', 10),
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),
@@ -353,6 +360,14 @@ const config = {
   playerImportRateLimit: {
     windowMs: parseNumericEnv('PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS', process.env.PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
     max: parseNumericEnv('PLAYER_IMPORT_RATE_LIMIT_MAX', process.env.PLAYER_IMPORT_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
+  },
+  // Stricter than the default walletRateLimit() pool (#1037): this endpoint's
+  // entire purpose is to make the backend issue an outbound HTTP request to a
+  // caller-supplied URL, so its per-wallet cost is much higher than a normal
+  // write. Tuned to the same 5/min ceiling as admin bulk-import.
+  webhookTestRateLimit: {
+    windowMs: parseNumericEnv('WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS', process.env.WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
+    max: parseNumericEnv('WEBHOOK_TEST_RATE_LIMIT_MAX', process.env.WEBHOOK_TEST_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
   },
   bodyLimit: {
     // Maximum JSON payload size (default: 1MB)

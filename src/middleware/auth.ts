@@ -33,22 +33,22 @@ interface ResolvedApiKey {
  * Keeping this in one place guarantees REST and GraphQL (which uses the same
  * resolveApiKey) can never drift apart on API-key semantics (#1019).
  */
-export function authenticateApiKey(
+export async function authenticateApiKey(
   req: Request,
   res: Response,
   requiredRole?: string,
-): 'ok' | 'forbidden' | 'unauthorized' {
+): Promise<'ok' | 'forbidden' | 'unauthorized'> {
   try {
     // Lazy require avoids a circular module dependency at load time.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { resolveApiKey } = require('../controllers/apiKeyController') as {
-      resolveApiKey: (rawKey: string) => ResolvedApiKey | null;
+      resolveApiKey: (rawKey: string) => Promise<ResolvedApiKey | null>;
     };
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { touchApiKeyLastUsed } = require('../db') as {
-      touchApiKeyLastUsed: (id: number) => void;
+      touchApiKeyLastUsed: (id: number) => Promise<void>;
     };
-    const resolved = resolveApiKey(req.headers['x-api-key'] as string);
+    const resolved = await resolveApiKey(req.headers['x-api-key'] as string);
     if (!resolved) {
       logger.warn({ method: req.method, path: req.path, error: 'Invalid or revoked API key' });
       sendUnauthorized(res, 'Invalid or revoked API key');
@@ -62,11 +62,11 @@ export function authenticateApiKey(
         requiredRole,
         providedRole: 'scout',
       });
-      logAuditEvent({ action: 'auth_forbidden', path: req.path, reason: 'Insufficient permissions', requiredRole, timestamp: new Date().toISOString() });
+      logAuditEvent({ action: 'auth_forbidden', path: req.path, reason: 'Insufficient permissions', requiredRole, timestamp: new Date().toISOString() }).catch(() => {});
       sendForbidden(res, 'Insufficient permissions', { requiredRole, providedRole: 'scout' });
       return 'forbidden';
     }
-    try { touchApiKeyLastUsed(resolved.id); } catch { /* best-effort */ }
+    Promise.resolve(touchApiKeyLastUsed(resolved.id)).catch(() => { /* best-effort */ });
     req.account = resolved.scout_wallet;
     req.role = 'scout';
     req.apiKeyScopes = resolved.scopes;
@@ -88,11 +88,11 @@ export function authenticateApiKey(
  * associated scout wallet, req.role is set to 'scout', and req.apiKeyScopes
  * is set to the key's parsed scopes (null = legacy/unrestricted).
  */
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   // ── X-API-Key path ──────────────────────────────────────────────────────────
   const apiKeyHeader = req.headers['x-api-key'];
   if (apiKeyHeader && typeof apiKeyHeader === 'string') {
-    if (authenticateApiKey(req, res) !== 'ok') return;
+    if ((await authenticateApiKey(req, res)) !== 'ok') return;
     next();
     return;
   }
@@ -101,7 +101,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
   const header = req.headers.authorization;
   if (!header?.startsWith('Bearer ')) {
     logger.warn({ method: req.method, path: req.path, error: 'Missing auth token' });
-    logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Missing auth token', timestamp: new Date().toISOString() });
+    logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Missing auth token', timestamp: new Date().toISOString() }).catch(() => {});
     sendUnauthorized(res, 'Missing auth token');
     return;
   }
@@ -130,7 +130,7 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     });
   } catch {
     logger.warn({ method: req.method, path: req.path, error: 'Invalid or expired token' });
-    logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Invalid or expired token', timestamp: new Date().toISOString() });
+    logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Invalid or expired token', timestamp: new Date().toISOString() }).catch(() => {});
     sendUnauthorized(res, 'Invalid or expired token');
   }
 }
@@ -145,11 +145,11 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
  * All 401 and 403 responses are persisted to the audit trail.
  */
 export function requireRole(role: string) {
-  return (req: Request, res: Response, next: NextFunction): void => {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     // ── X-API-Key path ──────────────────────────────────────────────────────────
     const apiKeyHeader = req.headers['x-api-key'];
     if (apiKeyHeader && typeof apiKeyHeader === 'string') {
-      if (authenticateApiKey(req, res, role) !== 'ok') return;
+      if ((await authenticateApiKey(req, res, role)) !== 'ok') return;
       next();
       return;
     }
@@ -158,7 +158,7 @@ export function requireRole(role: string) {
     const header = req.headers.authorization;
     if (!header?.startsWith('Bearer ')) {
       logger.warn({ method: req.method, path: req.path, error: 'Missing auth token', requiredRole: role });
-      logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Missing auth token', requiredRole: role, timestamp: new Date().toISOString() });
+      logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Missing auth token', requiredRole: role, timestamp: new Date().toISOString() }).catch(() => {});
       sendUnauthorized(res, 'Missing auth token');
       return;
     }
@@ -175,7 +175,7 @@ export function requireRole(role: string) {
           requiredRole: role,
           providedRole: payload.role,
         });
-        logAuditEvent({ action: 'auth_forbidden', path: req.path, reason: 'Insufficient permissions', requiredRole: role, timestamp: new Date().toISOString() });
+        logAuditEvent({ action: 'auth_forbidden', path: req.path, reason: 'Insufficient permissions', requiredRole: role, timestamp: new Date().toISOString() }).catch(() => {});
         sendForbidden(res, 'Insufficient permissions', { requiredRole: role, providedRole: payload.role });
         return;
       }
@@ -198,7 +198,7 @@ export function requireRole(role: string) {
       });
     } catch {
       logger.warn({ method: req.method, path: req.path, error: 'Invalid or expired token', requiredRole: role });
-      logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Invalid or expired token', requiredRole: role, timestamp: new Date().toISOString() });
+      logAuditEvent({ action: 'auth_failed', path: req.path, reason: 'Invalid or expired token', requiredRole: role, timestamp: new Date().toISOString() }).catch(() => {});
       sendUnauthorized(res, 'Invalid or expired token');
     }
   };
@@ -261,7 +261,7 @@ export function requireApiKeyScope(scope: ApiKeyScope) {
       reason: 'Missing API key scope',
       requiredScope: scope,
       timestamp: new Date().toISOString(),
-    });
+    }).catch(() => {});
     sendForbidden(res, 'Insufficient permissions', {
       requiredScope: scope,
       providedScopes: req.apiKeyScopes,

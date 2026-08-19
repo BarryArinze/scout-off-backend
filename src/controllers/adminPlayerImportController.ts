@@ -189,17 +189,22 @@ export async function processPlayerImportBatch(
     // All valid — insert inside one transaction.
     const goodRows = phaseOne as PreparedRow[];
     try {
-      getDriver().transaction(() => {
+      // Use tx.run() directly rather than insertOrUpdatePlayer(): that
+      // helper goes through the outer pooled driver, not this transaction's
+      // dedicated connection — calling it from inside transaction() would
+      // run each insert outside the transaction (breaking atomicity) and
+      // can deadlock against it on PostgreSQL. See DbDriver.transaction()'s
+      // doc comment in src/db/driver.ts.
+      const sql = `INSERT INTO players (player_id, wallet, position, region, metadata_uri, created_at, registered_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(player_id) DO UPDATE SET
+             wallet       = excluded.wallet,
+             position     = excluded.position,
+             region       = excluded.region,
+             metadata_uri = excluded.metadata_uri`;
+      await getDriver().transaction(async (tx) => {
         for (const p of goodRows) {
-          insertOrUpdatePlayer({
-            player_id: p.playerId,
-            wallet: p.wallet,
-            position: p.position,
-            region: p.region,
-            metadata_uri: p.metadataUri,
-            created_at: now,
-            registered_at: now,
-          });
+          await tx.run(sql, [p.playerId, p.wallet, p.position ?? null, p.region ?? null, p.metadataUri ?? null, now, now]);
         }
       });
     } catch (err) {
@@ -234,7 +239,7 @@ export async function processPlayerImportBatch(
       continue;
     }
     try {
-      insertOrUpdatePlayer({
+      await insertOrUpdatePlayer({
         player_id: p.playerId, wallet: p.wallet,
         position: p.position, region: p.region,
         metadata_uri: p.metadataUri, created_at: now, registered_at: now,
@@ -341,12 +346,12 @@ export async function importPlayers(req: Request, res: Response, next: NextFunct
     );
 
     // Single audit event per import attempt — rows_attempted, rows_inserted, rows_failed.
-    logAuditEvent({
+    await logAuditEvent({
       action: 'bulk_player_import',
       adminWallet,
       queryParams: { rows_attempted: results.length, rows_inserted: succeeded, rows_failed: failed, allowPartial },
       timestamp: new Date().toISOString(),
-    });
+    }).catch(() => {});
 
     // HTTP status rules:
     //   allowPartial (default) → 200, regardless of per-row failures

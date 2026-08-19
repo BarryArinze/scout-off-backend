@@ -19,9 +19,8 @@
 import { Request, Response, NextFunction } from 'express';
 import {
   getPlayerById,
-  cancelPendingMilestonesForPlayer,
   getPlayerProfileHistory,
-  getDb,
+  getDriver,
 } from '../db';
 import { invalidatePlayerCache } from '../services/cache';
 import { unpinCid } from '../services/ipfs';
@@ -53,7 +52,7 @@ export async function anonymizePlayer(
     const playerId = req.params.playerId;
 
     // ── Fetch player ─────────────────────────────────────────────────────────
-    const player = getPlayerById(playerId);
+    const player = await getPlayerById(playerId);
     if (!player) {
       res.status(404).json({
         success: false,
@@ -66,16 +65,21 @@ export async function anonymizePlayer(
     // ── Collect CIDs to unpin ────────────────────────────────────────────────
     const cidsToUnpin: string[] = [];
     if (player.metadata_uri) cidsToUnpin.push(player.metadata_uri);
-    const historyRows = getPlayerProfileHistory(playerId);
+    const historyRows = await getPlayerProfileHistory(playerId);
     for (const row of historyRows) {
       if (row.metadata_uri) cidsToUnpin.push(row.metadata_uri);
     }
 
     // ── Scrub DB PII (single transaction for consistency) ────────────────────
-    const db = getDb();
-    db.transaction(() => {
+    // Uses tx.run() directly for every statement rather than calling helpers
+    // like cancelPendingMilestonesForPlayer(): those go through the outer
+    // pooled driver, not this transaction's dedicated connection, so calling
+    // them from inside transaction() would run outside the transaction
+    // (breaking atomicity) and can deadlock against it on PostgreSQL. See
+    // DbDriver.transaction()'s doc comment in src/db/driver.ts.
+    await getDriver().transaction(async (tx) => {
       // Anonymize the players row (keep player_id + progress_level for aggregate stats)
-      db.prepare(
+      await tx.run(
         `UPDATE players
          SET wallet = ?,
              position = NULL,
@@ -83,27 +87,28 @@ export async function anonymizePlayer(
              metadata_uri = NULL,
              is_active = 0,
              deactivation_reason = ?
-         WHERE player_id = ?`
-      ).run(ANONYMIZED_PLACEHOLDER, 'GDPR anonymization request', playerId);
+         WHERE player_id = ?`,
+        [ANONYMIZED_PLACEHOLDER, 'GDPR anonymization request', playerId],
+      );
 
       // Delete profile history (contains metadata_uri + tx_hash — PII)
-      db.prepare('DELETE FROM player_profile_history WHERE player_id = ?').run(playerId);
+      await tx.run('DELETE FROM player_profile_history WHERE player_id = ?', [playerId]);
 
       // Cancel pending milestones (evidence_uri — PII)
-      cancelPendingMilestonesForPlayer(playerId);
+      await tx.run('DELETE FROM pending_milestones WHERE player_id = ?', [playerId]);
 
       // Delete profile views (behavioral PII linking scouts → player)
-      db.prepare('DELETE FROM profile_views WHERE player_id = ?').run(playerId);
+      await tx.run('DELETE FROM profile_views WHERE player_id = ?', [playerId]);
 
       // Delete contact unlocks referencing this player
-      db.prepare('DELETE FROM contact_unlocks WHERE player_id = ?').run(playerId);
+      await tx.run('DELETE FROM contact_unlocks WHERE player_id = ?', [playerId]);
 
       // Delete trial offers
-      db.prepare('DELETE FROM trial_offers WHERE player_id = ?').run(playerId);
+      await tx.run('DELETE FROM trial_offers WHERE player_id = ?', [playerId]);
 
       // Delete scout bookmarks referencing this player
-      db.prepare('DELETE FROM scout_bookmarks WHERE player_id = ?').run(playerId);
-    })();
+      await tx.run('DELETE FROM scout_bookmarks WHERE player_id = ?', [playerId]);
+    });
 
     // ── Invalidate caches ────────────────────────────────────────────────────
     await invalidatePlayerCache(playerId);
@@ -120,7 +125,7 @@ export async function anonymizePlayer(
     }
 
     // ── Audit log (append-only; does not contain PII — only player_id) ──────
-    logAuditEvent({
+    await logAuditEvent({
       action: 'player_anonymized',
       timestamp: new Date().toISOString(),
       queryParams: {
@@ -128,7 +133,7 @@ export async function anonymizePlayer(
         cids_unpinned: uniqueCids.length,
         requester: req.account ?? 'unknown',
       },
-    });
+    }).catch(() => {});
 
     logger.info('[anonymize] Player data anonymized', { playerId, cidsUnpinned: uniqueCids.length });
 
