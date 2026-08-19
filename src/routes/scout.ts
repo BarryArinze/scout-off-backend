@@ -47,8 +47,22 @@ import { idempotency } from '../middleware/idempotency';
 import { validateBody } from '../middleware/validate';
 import { walletRateLimit } from '../middleware/rateLimit';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
+import config from '../config';
 
 const router = Router();
+
+/**
+ * Stricter, purpose-tuned limit for the webhook test-delivery route (#1037):
+ * unlike a normal write, each call makes the backend issue an outbound HTTP
+ * request to a caller-supplied URL, so it's rate limited separately from —
+ * and more tightly than — the shared default walletRateLimit() pool used by
+ * the other scout write endpoints below.
+ */
+const webhookTestRateLimit = walletRateLimit({
+  name: 'webhook-test',
+  windowMs: config.webhookTestRateLimit.windowMs,
+  max: config.webhookTestRateLimit.max,
+});
 
 /**
  * GET /api/scouts/:wallet/subscription
@@ -613,13 +627,12 @@ router.route('/:wallet/saved-searches/:id/run')
  * GET /api/scouts/:wallet/webhooks
  * List all active subscriptions (secrets masked — only the last 4 hex chars visible).
  *
- * @param wallet {string} - Scout's Stellar public key
- * @response 200 { success: true, data: Array<{ id, url, secret, eventTypes, createdAt }> }
- * @response 403 { success: false, error: string } - Wallet mismatch
+ * Registration is subject to the default per-wallet rate limit (#1037).
+ *
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/webhooks')
-  .post(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:webhooks'), registerWebhook)
+  .post(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:webhooks'), walletRateLimit(), registerWebhook)
   .get(requireRole('scout'), requireWalletOwner(), listWebhooks)
   .all(methodNotAllowed(['POST', 'GET', 'HEAD']));
 
@@ -644,17 +657,16 @@ router.route('/:wallet/webhooks/:id')
  * Send a test ping to the registered URL, signed with the subscription secret.
  * Returns 502 when the remote server does not respond with 2xx or is unreachable.
  *
- * @param wallet {string} - Scout's Stellar public key
- * @param id {integer} - Webhook subscription row ID
- * @response 200 { success: true, data: { id, url, statusCode } }
- * @response 400 { success: false, error: string } - Invalid subscription id
- * @response 403 { success: false, error: string } - Wallet mismatch or subscription belongs to another scout
- * @response 404 { success: false, error: string } - Subscription not found
- * @response 502 { success: false, error: string, data: { id, url, statusCode? } } - Remote server returned non-2xx or was unreachable
+ * Rate limited separately from — and more tightly than — other scout write
+ * endpoints (#1037), since each call makes the backend issue an outbound
+ * HTTP request to a caller-supplied URL. Default: 5 requests/minute per
+ * wallet (WEBHOOK_TEST_RATE_LIMIT_MAX / WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS).
+ * Exceeding it returns 429 before any outbound request is attempted.
+ *
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/webhooks/:id/test')
-  .post(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:webhooks'), testWebhook)
+  .post(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:webhooks'), webhookTestRateLimit, testWebhook)
   .all(methodNotAllowed(['POST']));
 
 export default router;

@@ -95,12 +95,20 @@ export function rateLimit(options: RateLimitOptions = {}) {
  * Configurable via windowMs and max; excess requests return HTTP 429.
  * If req.account is not present, it calls next().
  *
+ * Like `rateLimit`, counters are namespaced via `options.name` so that
+ * differently-configured limiters don't share a counter — e.g. a
+ * purpose-tuned limiter guarding an outbound-request endpoint stays
+ * isolated from the general per-wallet write limit shared by routes that
+ * call `walletRateLimit()` with no `name`. Defaults to 'default', which
+ * keeps every un-named caller pooled into the same shared bucket as before.
+ *
  * Inherits the same fail-open policy as `rateLimit` — see above.
  */
 export function walletRateLimit(options: RateLimitOptions = {}) {
   const windowMs = options.windowMs ?? config.rateLimit.windowMs;
   const max = options.max ?? config.rateLimit.max;
   const store = options.store ?? defaultStore;
+  const namespace = options.name ?? 'default';
 
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     if (!config.rateLimit.enabled) {
@@ -114,7 +122,7 @@ export function walletRateLimit(options: RateLimitOptions = {}) {
     }
 
     try {
-      const { count } = await store.increment(`wallet:${wallet}`, windowMs);
+      const { count } = await store.increment(`${namespace}:wallet:${wallet}`, windowMs);
 
       if (count > max) {
         res.status(429).json({ success: false, error: 'Too many requests, please try again later' });

@@ -323,6 +323,14 @@ const config = {
     windowMs: parseNumericEnv('PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS', process.env.PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
     max: parseNumericEnv('PLAYER_IMPORT_RATE_LIMIT_MAX', process.env.PLAYER_IMPORT_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
   },
+  // Stricter than the default walletRateLimit() pool (#1037): this endpoint's
+  // entire purpose is to make the backend issue an outbound HTTP request to a
+  // caller-supplied URL, so its per-wallet cost is much higher than a normal
+  // write. Tuned to the same 5/min ceiling as admin bulk-import.
+  webhookTestRateLimit: {
+    windowMs: parseNumericEnv('WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS', process.env.WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
+    max: parseNumericEnv('WEBHOOK_TEST_RATE_LIMIT_MAX', process.env.WEBHOOK_TEST_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
+  },
   bodyLimit: {
     // Maximum JSON payload size (default: 1MB)
     json: process.env.JSON_PAYLOAD_LIMIT ?? '1mb',

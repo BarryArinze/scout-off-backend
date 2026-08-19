@@ -191,6 +191,29 @@ The following routes currently return data sourced entirely from indexed on-chai
 
 ---
 
+## Rate Limiting
+
+Most scout write endpoints (`subscribe`, `unlockContact`, `createTrialOffer`,
+webhook registration, etc.) apply `walletRateLimit()`, which pools requests
+per authenticated wallet into a shared default counter
+(`RATE_LIMIT_WINDOW_MS` / `RATE_LIMIT_MAX`, default **60 s / 60 requests**,
+per wallet). Exceeding it returns:
+
+```json
+{
+  "success": false,
+  "error": "Too many requests, please try again later"
+}
+```
+
+with HTTP status **429**.
+
+### Per-route overrides
+
+| Route | Limit | Reason |
+|-------|-------|--------|
+| `POST /api/scouts/:wallet/webhooks/:id/test` | **5 requests/minute** per wallet (`WEBHOOK_TEST_RATE_LIMIT_MAX` / `WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS`), isolated from the shared default pool | Unlike a normal write, each call makes the backend issue an outbound HTTP request to a caller-supplied URL — an abuse surface a shared 60/min pool doesn't adequately bound (#1037). The 429 is returned before the outbound request is attempted. |
+
 ## Request Timeouts
 
 A global request timeout (`REQUEST_TIMEOUT_MS`, default **30 s**) is applied to all routes via the `requestTimeout` middleware in `app.ts`. When a response has not been sent within the configured window, the middleware writes:
