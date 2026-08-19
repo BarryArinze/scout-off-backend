@@ -288,6 +288,58 @@ used in place of a Bearer JWT for server-to-server integrations:
 X-API-Key: <raw-key>
 ```
 
+### How a key is stored and resolved (#1033)
+
+The raw key is returned once at issuance and never persisted. Two *derived*
+representations are stored per row, and they have deliberately different jobs:
+
+| Column | Construction | Job |
+|--------|--------------|-----|
+| `key_hash` | `salt:sha256(salt + raw_key)`, random per-row salt | **The authentication proof.** Compared timing-safely against the presented key. Salted, therefore not searchable. |
+| `lookup_hash` | `v1:HMAC-SHA256(API_KEY_LOOKUP_SECRET, domain ‖ raw_key)` | **A locator only.** Deterministic, so it can carry a UNIQUE index and be matched with a single equality predicate. |
+
+Authentication is therefore two steps, and the first one never authenticates
+anything on its own:
+
+```
+raw X-API-Key
+   → derive lookup_hash            (src/utils/apiKeyLookup.ts)
+   → SELECT … WHERE lookup_hash = ? AND revoked_at IS NULL LIMIT 1
+   → verify raw key against that row's salted key_hash
+   → authenticated
+```
+
+Previously there was no deterministic column to search, so resolution loaded
+every active key and re-hashed the presented key against each row — cost grew
+linearly with the number of issued keys, on the hot path of every request.
+
+`lookup_hash` is never returned by any API response; `GET .../api-keys` still
+exposes only a truncated `key_prefix` display hint.
+
+**Why the HMAC pepper.** A bare digest of the raw key would let anyone holding
+a read-only copy of the database (leaked backup, replica, over-broad analytics
+grant) confirm a guessed or intercepted key offline and correlate the same key
+across environments. `API_KEY_LOOKUP_SECRET` is held outside the database, so
+the column is inert on its own. It is **required in production** (the process
+refuses to start without it) and must be identical on every instance — a key
+issued by one instance is otherwise unfindable by another.
+
+**Rotating `API_KEY_LOOKUP_SECRET`.** Every stored `lookup_hash` is derived
+from it, and the raw keys needed to re-derive them do not exist server-side.
+To rotate: set the new secret, then `UPDATE api_keys SET lookup_hash = NULL`.
+Every key falls back to the transitional path below and re-derives its lookup
+value under the new pepper on its next successful use. Expect a temporary
+scan cost while that drains. Do not rotate casually.
+
+**Keys issued before this change.** They have `lookup_hash IS NULL` and cannot
+be backfilled in SQL — only the one-way salted hash is stored. They keep
+working and heal themselves: when the indexed lookup misses, resolution checks
+*only* the not-yet-migrated rows (a partial index, so it costs nothing once
+that set is empty) and writes the derived `lookup_hash` on the first
+successful authentication, moving the key onto the indexed path permanently.
+**No scout has to rotate a key.** This transitional path is not a general
+fallback — a wrong or revoked key never triggers a full-table scan.
+
 ### Scope semantics
 
 Every API key carries an optional `scopes` list. Authorization is enforced

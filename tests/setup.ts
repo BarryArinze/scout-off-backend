@@ -34,6 +34,14 @@ process.env.ADMIN_WALLET =
 process.env.WEBHOOK_SECRET_ENCRYPTION_KEY =
   process.env.WEBHOOK_SECRET_ENCRYPTION_KEY ??
   "0".repeat(63) + "1";
+// Deterministic 32-byte hex pepper for api_keys.lookup_hash (#1033). Set here
+// (before src/config is first imported) so tests exercise the real HMAC
+// derivation instead of the insecure dev-only fallback, and so the suites that
+// reload config with NODE_ENV=production do not trip the startup guard that
+// requires this variable in production.
+process.env.API_KEY_LOOKUP_SECRET =
+  process.env.API_KEY_LOOKUP_SECRET ??
+  "a".repeat(63) + "b";
 
 import { initDb } from "../src/db";
 

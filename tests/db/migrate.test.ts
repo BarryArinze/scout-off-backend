@@ -782,6 +782,35 @@ describe('full migration sequence from scratch (#885)', () => {
     expect(cols).toContain('revoked_at');
   });
 
+  it("api_keys table has the lookup_hash column added by migration 024_api_key_lookup_hash (#1033)", () => {
+    expect(columns('api_keys')).toContain('lookup_hash');
+  });
+
+  it("migration 024 creates the api_keys lookup indexes on both driver variants", () => {
+    // Both 024_api_key_lookup_hash.sql and its _postgres twin are applied
+    // (runMigrations converts cross-driver rather than skipping), and the pair
+    // must be idempotent — the second must not fail or duplicate the indexes.
+    const indexNames = (
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'api_keys'",
+        )
+        .all() as { name: string }[]
+    ).map((r) => r.name);
+
+    expect(indexNames).toContain('idx_api_keys_lookup_hash');
+    expect(indexNames).toContain('idx_api_keys_lookup_pending');
+    expect(indexNames.filter((n) => n === 'idx_api_keys_lookup_hash')).toHaveLength(1);
+
+    const applied = (
+      db.prepare("SELECT id FROM migrations WHERE id LIKE '024_%'").all() as { id: string }[]
+    ).map((r) => r.id);
+    expect(applied.sort()).toEqual([
+      '024_api_key_lookup_hash.sql',
+      '024_api_key_lookup_hash_postgres.sql',
+    ]);
+  });
+
   it("webhook_subscriptions table has expected columns from migration 012_webhook_subscriptions", () => {
     const cols = columns('webhook_subscriptions');
     expect(cols).toContain('id');

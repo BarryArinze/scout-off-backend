@@ -6,6 +6,7 @@ describe('config NODE_ENV toggles', () => {
   const originalAdminWallet = process.env.ADMIN_WALLET;
   const originalPlatformSecretKey = process.env.PLATFORM_SECRET_KEY;
   const originalSep10ServerSecret = process.env.SEP10_SERVER_SECRET;
+  const originalApiKeyLookupSecret = process.env.API_KEY_LOOKUP_SECRET;
 
   afterEach(() => {
     process.env.NODE_ENV = originalEnv;
@@ -24,6 +25,11 @@ describe('config NODE_ENV toggles', () => {
     } else {
       delete process.env.SEP10_SERVER_SECRET;
     }
+    if (originalApiKeyLookupSecret !== undefined) {
+      process.env.API_KEY_LOOKUP_SECRET = originalApiKeyLookupSecret;
+    } else {
+      delete process.env.API_KEY_LOOKUP_SECRET;
+    }
     jest.resetModules();
   });
 
@@ -40,6 +46,8 @@ describe('config NODE_ENV toggles', () => {
     // SEP10_SERVER_SECRET is required in production
     if (env === 'production') {
       process.env.SEP10_SERVER_SECRET = 'SSEP10SERVERSECRET1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+      // API_KEY_LOOKUP_SECRET is required in production (#1033)
+      process.env.API_KEY_LOOKUP_SECRET = 'a'.repeat(64);
     }
     jest.resetModules();
     const mod = await import('../src/config');
@@ -56,6 +64,8 @@ describe('config NODE_ENV toggles', () => {
     }
     if (env === 'production') {
       process.env.SEP10_SERVER_SECRET = 'SSEP10SERVERSECRET1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+      // API_KEY_LOOKUP_SECRET is required in production (#1033)
+      process.env.API_KEY_LOOKUP_SECRET = 'a'.repeat(64);
     }
     jest.resetModules();
     return import('../src/config');

@@ -1701,6 +1701,13 @@ export interface ApiKeyRow {
   /** JSON-encoded scope list (db/014_api_key_scopes.sql). NULL/empty = legacy key. */
   scopes: string | null;
   rate_limit_per_minute: number | null;
+  /**
+   * Indexed deterministic lookup value (db/024_api_key_lookup_hash.sql, #1033).
+   * NULL on rows issued before that migration — those are healed lazily on
+   * first successful authentication. Never the authentication proof: see
+   * src/utils/apiKeyLookup.ts.
+   */
+  lookup_hash: string | null;
 }
 
 /**
@@ -1712,6 +1719,11 @@ export interface ApiKeyRow {
  * which the authorization layer treats as a legacy key with unrestricted
  * scout-level access (backward compatible with keys issued before scope
  * enforcement existed).
+ *
+ * `lookup_hash` is the indexed deterministic lookup value (#1033). It is
+ * optional only so that callers predating it still compile; every production
+ * issuance path must supply it, otherwise the new key lands on the slow
+ * transitional scan path until its first successful authentication.
  */
 export async function insertApiKey(p: {
   key_hash: string;
@@ -1780,12 +1792,27 @@ export async function getApiKeyByHash(keyHash: string): Promise<ApiKeyRow | null
 }
 
 /**
- * Return all active (non-revoked) API keys across all scouts.
- * Used by auth middleware to verify an incoming X-API-Key header.
+ * Locate the single active (non-revoked) API key row carrying `lookupHash`.
+ *
+ * This is the hot path for X-API-Key authentication (#1033): one indexed
+ * equality lookup against the UNIQUE idx_api_keys_lookup_hash, replacing the
+ * former "load every active key and re-hash each one" scan.
+ *
+ * Returning a row proves nothing on its own — the caller must still verify the
+ * presented raw key against `key_hash`. See src/utils/apiKeyLookup.ts.
  */
 export async function getAllActiveApiKeys(): Promise<ApiKeyRow[]> {
   const sql = `SELECT * FROM api_keys WHERE revoked_at IS NULL`;
   return timedQueryAsync(sql, () => getDriver().all<ApiKeyRow>(sql));
+}
+
+/**
+ * Persist the derived lookup_hash for a pre-migration API key (#1033).
+ * Only ever fills a NULL — an existing lookup value is never overwritten.
+ */
+export function setApiKeyLookupHash(id: number, lookupHash: string): void {
+  const sql = `UPDATE api_keys SET lookup_hash = ? WHERE id = ? AND lookup_hash IS NULL`;
+  timedQuery(sql, () => getDb().prepare(sql).run(lookupHash, id));
 }
 
 /**
