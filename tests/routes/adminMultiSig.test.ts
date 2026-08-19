@@ -61,11 +61,25 @@ function resetStore(): void {
   store.admin_action_signatures = [];
 }
 
+// In-memory transaction: just runs the callback synchronously (SQLite semantics)
+function mockTransaction<T>(fn: () => T): T {
+  return fn();
+}
+
 jest.mock('../../src/db', () => {
   const actual = jest.requireActual('../../src/db');
   return {
     ...actual,
     queryEvents: jest.fn().mockReturnValue([]),
+    getDriver: jest.fn(() => ({
+      transaction: mockTransaction,
+      run: jest.fn(),
+      get: jest.fn(),
+      all: jest.fn(),
+      value: jest.fn(),
+      exec: jest.fn(),
+      close: jest.fn().mockResolvedValue(undefined),
+    })),
     insertPendingAdminAction: jest.fn((p: Record<string, unknown>) => {
       store.pending_admin_actions.push({
         ...p,
@@ -132,6 +146,23 @@ jest.mock('../../src/utils/logger', () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() },
 }));
 
+// Mock stellar calls so quorum-reached tests don't hit the network
+jest.mock('../../src/services/stellar', () => ({
+  pauseContractOnChain: jest.fn().mockResolvedValue({ transactionId: 'tx_pause_mock' }),
+  unpauseContractOnChain: jest.fn().mockResolvedValue({ transactionId: 'tx_unpause_mock' }),
+  withdrawFees: jest.fn().mockResolvedValue({ transactionId: 'tx_withdraw_mock', amount: 0, recipient: '', token: 'XLM' }),
+  registerValidatorOnChain: jest.fn().mockResolvedValue({ transactionId: 'tx_register_mock' }),
+  revokeValidatorOnChain: jest.fn().mockResolvedValue({ transactionId: 'tx_revoke_mock' }),
+}));
+
+// Mock indexer so validator DB writes don't blow up
+jest.mock('../../src/services/indexer', () => ({
+  insertValidator: jest.fn(),
+  revokeValidatorRow: jest.fn(),
+  getAllValidators: jest.fn().mockReturnValue([]),
+  getValidatorByWallet: jest.fn().mockReturnValue(null),
+}));
+
 import {
   proposeAction,
   approveAction,
@@ -139,8 +170,10 @@ import {
   getActionDetails,
 } from '../../src/services/adminMultiSig';
 import { logAuditEvent } from '../../src/services/audit';
+import * as stellarService from '../../src/services/stellar';
 
 const mockLogAuditEvent = logAuditEvent as jest.Mock;
+const mockPauseContractOnChain = stellarService.pauseContractOnChain as jest.Mock;
 
 const ADMIN_1 = 'GADMIN1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 const ADMIN_2 = 'GADMIN2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
@@ -150,6 +183,8 @@ const OUTSIDER = 'GOUTSIDERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 beforeEach(() => {
   jest.clearAllMocks();
   resetStore();
+  // Re-apply default resolved value after clearAllMocks
+  mockPauseContractOnChain.mockResolvedValue({ transactionId: 'tx_pause_mock' });
 });
 
 afterAll(() => {
@@ -214,6 +249,7 @@ describe('approveAction()', () => {
   beforeEach(async () => {
     actionId = (await proposeAction('pause_contract', {}, ADMIN_1)).actionId;
     jest.clearAllMocks();
+    mockPauseContractOnChain.mockResolvedValue({ transactionId: 'tx_pause_mock' });
   });
 
   it('records a co-signature and returns pending when below threshold', async () => {
@@ -289,6 +325,7 @@ describe('approveAction()', () => {
   it('logs threshold_met when threshold is reached', async () => {
     await approveAction(actionId, ADMIN_2);
     jest.clearAllMocks();
+    mockPauseContractOnChain.mockResolvedValue({ transactionId: 'tx_pause_mock' });
 
     await approveAction(actionId, ADMIN_3);
 
@@ -297,6 +334,137 @@ describe('approveAction()', () => {
         queryParams: expect.objectContaining({ outcome: 'threshold_met' }),
       }),
     );
+  });
+
+  it('reverts to pending and throws when on-chain execution fails', async () => {
+    mockPauseContractOnChain.mockRejectedValue(new Error('network error'));
+
+    await approveAction(actionId, ADMIN_2);
+    await expect(approveAction(actionId, ADMIN_3)).rejects.toThrow('network error');
+
+    // Action must be reverted to pending so it can be retried
+    const a = store.pending_admin_actions[0];
+    expect(a.status).toBe('pending');
+  });
+});
+
+// ─── Execution dispatch per action type ──────────────────────────────────────
+
+describe('Execution dispatch — each AdminActionType fires the correct stellar call', () => {
+  const threshold2Config = {
+    adminThreshold: 2,
+    adminWallets: [ADMIN_1, ADMIN_2],
+  };
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    const stellar = jest.requireMock('../../src/services/stellar');
+    stellar.pauseContractOnChain.mockResolvedValue({ transactionId: 'tx_pause_mock' });
+    stellar.unpauseContractOnChain.mockResolvedValue({ transactionId: 'tx_unpause_mock' });
+    stellar.withdrawFees.mockResolvedValue({ transactionId: 'tx_withdraw_mock', amount: 0, recipient: '', token: 'XLM' });
+    stellar.registerValidatorOnChain.mockResolvedValue({ transactionId: 'tx_register_mock' });
+    stellar.revokeValidatorOnChain.mockResolvedValue({ transactionId: 'tx_revoke_mock' });
+    resetStore();
+  });
+
+  it('pause_contract calls pauseContractOnChain', async () => {
+    const stellar = jest.requireMock('../../src/services/stellar');
+    const mockConfig = jest.requireMock('../../src/config').default;
+    const orig = { adminThreshold: mockConfig.adminThreshold, adminWallets: [...mockConfig.adminWallets] };
+    Object.assign(mockConfig, threshold2Config);
+
+    try {
+      const { actionId } = proposeAction('pause_contract', {}, ADMIN_1);
+      const result = await approveAction(actionId, ADMIN_2);
+      expect(result.status).toBe('approved');
+      expect(stellar.pauseContractOnChain).toHaveBeenCalledWith(ADMIN_1);
+    } finally {
+      Object.assign(mockConfig, orig);
+    }
+  });
+
+  it('unpause_contract calls unpauseContractOnChain', async () => {
+    const stellar = jest.requireMock('../../src/services/stellar');
+    const mockConfig = jest.requireMock('../../src/config').default;
+    const orig = { adminThreshold: mockConfig.adminThreshold, adminWallets: [...mockConfig.adminWallets] };
+    Object.assign(mockConfig, threshold2Config);
+
+    try {
+      const { actionId } = proposeAction('unpause_contract', {}, ADMIN_1);
+      const result = await approveAction(actionId, ADMIN_2);
+      expect(result.status).toBe('approved');
+      expect(stellar.unpauseContractOnChain).toHaveBeenCalledWith(ADMIN_1);
+    } finally {
+      Object.assign(mockConfig, orig);
+    }
+  });
+
+  it('register_validator calls registerValidatorOnChain', async () => {
+    const stellar = jest.requireMock('../../src/services/stellar');
+    const mockConfig = jest.requireMock('../../src/config').default;
+    const orig = { adminThreshold: mockConfig.adminThreshold, adminWallets: [...mockConfig.adminWallets] };
+    Object.assign(mockConfig, threshold2Config);
+
+    try {
+      const validatorWallet = 'GVAL123XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+      const { actionId } = proposeAction('register_validator', { validatorWallet }, ADMIN_1);
+      const result = await approveAction(actionId, ADMIN_2);
+      expect(result.status).toBe('approved');
+      expect(stellar.registerValidatorOnChain).toHaveBeenCalledWith(validatorWallet);
+    } finally {
+      Object.assign(mockConfig, orig);
+    }
+  });
+
+  it('revoke_validator calls revokeValidatorOnChain', async () => {
+    const stellar = jest.requireMock('../../src/services/stellar');
+    const mockConfig = jest.requireMock('../../src/config').default;
+    const orig = { adminThreshold: mockConfig.adminThreshold, adminWallets: [...mockConfig.adminWallets] };
+    Object.assign(mockConfig, threshold2Config);
+
+    try {
+      const validatorWallet = 'GVAL123XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+      const { actionId } = proposeAction('revoke_validator', { validatorWallet }, ADMIN_1);
+      const result = await approveAction(actionId, ADMIN_2);
+      expect(result.status).toBe('approved');
+      expect(stellar.revokeValidatorOnChain).toHaveBeenCalledWith(validatorWallet);
+    } finally {
+      Object.assign(mockConfig, orig);
+    }
+  });
+
+  it('withdraw_fees calls withdrawFees with the recipient', async () => {
+    const stellar = jest.requireMock('../../src/services/stellar');
+    const mockConfig = jest.requireMock('../../src/config').default;
+    const orig = { adminThreshold: mockConfig.adminThreshold, adminWallets: [...mockConfig.adminWallets] };
+    Object.assign(mockConfig, threshold2Config);
+
+    try {
+      const recipient = 'GTREASURY123XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+      const { actionId } = proposeAction('withdraw_fees', { recipient }, ADMIN_1);
+      const result = await approveAction(actionId, ADMIN_2);
+      expect(result.status).toBe('approved');
+      expect(stellar.withdrawFees).toHaveBeenCalledWith(recipient);
+    } finally {
+      Object.assign(mockConfig, orig);
+    }
+  });
+
+  it('bulk_validator_import calls registerValidatorOnChain', async () => {
+    const stellar = jest.requireMock('../../src/services/stellar');
+    const mockConfig = jest.requireMock('../../src/config').default;
+    const orig = { adminThreshold: mockConfig.adminThreshold, adminWallets: [...mockConfig.adminWallets] };
+    Object.assign(mockConfig, threshold2Config);
+
+    try {
+      const wallet = 'GVAL123XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+      const { actionId } = proposeAction('bulk_validator_import', { wallet, label: 'Test', region: 'US' }, ADMIN_1);
+      const result = await approveAction(actionId, ADMIN_2);
+      expect(result.status).toBe('approved');
+      expect(stellar.registerValidatorOnChain).toHaveBeenCalledWith(wallet);
+    } finally {
+      Object.assign(mockConfig, orig);
+    }
   });
 });
 
@@ -383,5 +551,26 @@ describe('Below-threshold: 2 of 3 signatures', () => {
 
     const result = await approveAction(actionId, ADMIN_3);
     expect(result.status).toBe('approved');
+  });
+});
+
+// ─── Concurrency: same signer submits twice simultaneously ───────────────────
+
+describe('Concurrent same-signer approval atomicity', () => {
+  it('counts a signer at most once even with simultaneous calls', async () => {
+    const actionId = proposeAction('pause_contract', {}, ADMIN_1).actionId;
+
+    // Fire two approvals from ADMIN_2 simultaneously
+    const [r1, r2] = await Promise.all([
+      approveAction(actionId, ADMIN_2),
+      approveAction(actionId, ADMIN_2),
+    ]);
+
+    // One must be counted, the other must be a duplicate
+    const statuses = [r1.status, r2.status].sort();
+    expect(statuses).toEqual(['duplicate', 'pending']);
+
+    // Only two signatures total: ADMIN_1 (proposer) + ADMIN_2 (once)
+    expect(store.admin_action_signatures).toHaveLength(2);
   });
 });

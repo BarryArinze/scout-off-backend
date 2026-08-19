@@ -143,6 +143,190 @@ npm run docs:check        # confirm every route has a documented summary + respo
 
 ---
 
+### Admin Multi-Signature Actions
+
+High-value admin operations require M-of-N approval when `ADMIN_THRESHOLD > 1`. The multi-signature system provides atomic execution and tamper-proof audit trails for critical platform operations.
+
+#### Configuration
+
+| Environment Variable | Description | Default |
+|---------------------|-------------|---------|
+| `ADMIN_THRESHOLD` | Minimum signatures required | `1` |
+| `ADMIN_WALLETS` | Comma-separated list of authorized admin wallets | Required |
+
+`pending_admin_actions` and `admin_action_signatures` (the tables backing this subsystem) work under both `DB_DRIVER=sqlite` and `DB_DRIVER=postgres` — the two migrations (`db/011_pending_admin_actions.sql` / `db/011_pending_admin_actions_postgres.sql`) declare equivalent columns, including `proposer` and the signer-uniqueness table. Duplicate-signature detection uses `INSERT OR IGNORE` on SQLite and `INSERT ... ON CONFLICT(action_id, signer) DO NOTHING` on Postgres, both driven by a single atomic statement rather than a racy check-then-insert.
+
+#### Action Types
+
+The following admin operations support multi-signature approval:
+
+- `pause_contract` — Emergency pause of platform contracts
+- `unpause_contract` — Resume platform operations  
+- `withdraw_fees` — Withdraw accumulated platform fees
+- `register_validator` — Add new validator to authorized list
+- `revoke_validator` — Remove validator from authorized list
+- `bulk_validator_import` — Import multiple validators (individual actions per validator)
+- `update_platform_fee` — Modify platform fee structure *(future)*
+
+#### Multi-Signature Flow
+
+1. **Propose Action**: First admin calls the operation endpoint (e.g., `POST /api/admin/validators/register`)
+2. **Collect Signatures**: Additional admins approve via `POST /api/admin/actions/{id}/approve`
+3. **Automatic Execution**: When threshold is reached, the real operation executes automatically — the same on-chain call the single-admin (`ADMIN_THRESHOLD = 1`) immediate path uses, so behavior is identical between threshold=1 and threshold>1 deployments
+4. **Audit Trail**: All steps are logged with tamper-proof audit records
+
+Every `action_type` maps to exactly one execution handler (`pause_contract` → `pauseContractOnChain`, `unpause_contract` → `unpauseContractOnChain`, `withdraw_fees` → `withdrawFees`, `register_validator` / `bulk_validator_import` → `registerValidatorOnChain`, `revoke_validator` → `revokeValidatorOnChain`); the dispatcher routes purely on `action_type`, never on payload contents. `withdraw_fees` is proposed from two call sites with different payload shapes — the legacy `POST /api/admin/fees` endpoint sends `{ recipient }`, the fully-specified `POST /api/admin/fees/withdraw` (v2) endpoint sends `{ treasuryAddress, amountStroops }` — the dispatcher accepts either.
+
+#### `GET /api/admin/actions/pending`
+
+List all pending multi-signature actions (expired ones are purged on read). **Requires Bearer auth (admin role).**
+
+**Response `200`**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "cm123456789",
+      "actionType": "register_validator",
+      "proposer": "GADMIN1...",
+      "payload": { "validatorWallet": "GVALIDATOR..." },
+      "collectedSignatures": 1,
+      "requiredSignatures": 2,
+      "expiresAt": 1735689600000,
+      "createdAt": 1735603200000
+    }
+  ]
+}
+```
+
+**Example request**
+
+```bash
+curl -X GET "http://localhost:4000/api/admin/actions/pending" \
+  -H "Authorization: Bearer <admin-jwt>"
+```
+
+---
+
+#### `GET /api/admin/actions/{id}`
+
+Get detailed information about a specific action, including all signers collected so far. **Requires Bearer auth (admin role).**
+
+**Response `200`**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "cm123456789",
+    "actionType": "register_validator",
+    "proposer": "GADMIN1...",
+    "payload": { "validatorWallet": "GVALIDATOR..." },
+    "status": "pending",
+    "collectedSignatures": 1,
+    "requiredSignatures": 2,
+    "expiresAt": 1735689600000,
+    "createdAt": 1735603200000,
+    "signers": [
+      { "wallet": "GADMIN1...", "signedAt": 1735603200000 }
+    ]
+  }
+}
+```
+
+**Response `404`** — action not found
+
+**Example request**
+
+```bash
+curl -X GET "http://localhost:4000/api/admin/actions/cm123456789" \
+  -H "Authorization: Bearer <admin-jwt>"
+```
+
+---
+
+#### `POST /api/admin/actions/{id}/approve`
+
+Approve a pending multi-signature action. When the signature threshold is reached, the underlying operation executes automatically. **Requires Bearer auth (admin role).**
+
+**Response `202`** — signature recorded, more approvals needed
+
+```json
+{
+  "success": true,
+  "message": "Signature recorded, 1 more signature(s) needed",
+  "data": {
+    "actionId": "cm123456789",
+    "collectedSignatures": 1,
+    "requiredSignatures": 2,
+    "status": "pending"
+  }
+}
+```
+
+**Response `200`** — threshold reached, action executed
+
+```json
+{
+  "success": true,
+  "message": "Approval threshold reached — action executed",
+  "data": {
+    "actionId": "cm123456789",
+    "collectedSignatures": 2,
+    "requiredSignatures": 2,
+    "status": "executed"
+  }
+}
+```
+
+**Response `409`** — duplicate signature (same admin signing the same still-pending action twice)
+
+```json
+{
+  "success": false,
+  "error": "Admin has already signed this action",
+  "code": "CONFLICT"
+}
+```
+
+**Response `409`** — action already executed (approving an action a second time after it already reached quorum)
+
+```json
+{
+  "success": false,
+  "error": "Action has already been executed",
+  "code": "ACTION_EXECUTED"
+}
+```
+
+**Response `404`** — action not found
+
+**Response `410`** — action expired
+
+**Response `500`** — execution failed (action reverts to `pending` and remains retryable — see below)
+
+**Example request**
+
+```bash
+curl -X POST "http://localhost:4000/api/admin/actions/cm123456789/approve" \
+  -H "Authorization: Bearer <admin-jwt>"
+```
+
+#### Error Handling and Recovery
+
+- **Execution Failures**: If the underlying operation fails (network error, contract rejection), the action remains in `pending` status and can be retried by approving again
+- **Expiry**: Actions expire after 24 hours (configurable via `ADMIN_ACTION_TTL_MS`)
+- **Atomicity**: Signature collection is atomic — concurrent approvals from the same admin are handled gracefully
+- **Idempotency**: Duplicate approvals return `409 Conflict` without affecting signature count
+
+#### Single-Admin Mode
+
+When `ADMIN_THRESHOLD = 1`, operations execute immediately without creating pending actions. The response format and audit logging remain consistent.
+
+---
+
 ## Server-Sent Events (`GET /api/events/stream`) (#1019)
 
 Long-lived SSE stream of contract events relevant to the authenticated wallet.
