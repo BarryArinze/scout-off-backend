@@ -48,9 +48,9 @@ const BLOCKED_EVENT = 'wallet_blocked';
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-function refreshWallet(wallet: string): boolean {
+async function refreshWallet(wallet: string): Promise<boolean> {
   try {
-    const blocked = isWalletBlocklistedDb(wallet);
+    const blocked = await isWalletBlocklistedDb(wallet);
     if (blocked) {
       blockedCache.set(wallet, Date.now());
     } else {
@@ -71,9 +71,9 @@ function refreshWallet(wallet: string): boolean {
  * Blocklist a wallet. Persists immediately and notifies local subscribers
  * (SSE connections) synchronously.
  */
-export function blocklistWallet(wallet: string, reason: string | null = null): void {
+export async function blocklistWallet(wallet: string, reason: string | null = null): Promise<void> {
   try {
-    blockWalletDb(wallet, reason);
+    await blockWalletDb(wallet, reason);
     blockedCache.set(wallet, Date.now());
     emitter.emit(BLOCKED_EVENT, wallet);
     logger.warn(`[walletBlocklist] wallet blocked: ${wallet}`);
@@ -84,9 +84,9 @@ export function blocklistWallet(wallet: string, reason: string | null = null): v
 }
 
 /** Remove a wallet from the blocklist. Returns true if it was blocked. */
-export function unblocklistWallet(wallet: string): boolean {
+export async function unblocklistWallet(wallet: string): Promise<boolean> {
   try {
-    const removed = unblockWalletDb(wallet);
+    const removed = await unblockWalletDb(wallet);
     blockedCache.delete(wallet);
     if (removed) {
       logger.info(`[walletBlocklist] wallet unblocked: ${wallet}`);
@@ -102,7 +102,7 @@ export function unblocklistWallet(wallet: string): boolean {
  * Cache-first blocklist check. At most one fresh DB read per wallet per
  * CACHE_TTL_MS — safe to call on connection setup, never on keep-alive ticks.
  */
-export function isWalletBlocklisted(wallet: string): boolean {
+export async function isWalletBlocklisted(wallet: string): Promise<boolean> {
   const lastChecked = blockedCache.get(wallet);
   const cacheFresh = lastChecked !== undefined && Date.now() - lastChecked < CACHE_TTL_MS;
   if (cacheFresh) return true; // cached as blocked
@@ -114,9 +114,9 @@ export function isWalletBlocklisted(wallet: string): boolean {
  * that are currently blocked. Called by the SSE route on its shared sweep
  * interval so cross-process blocks are picked up within the sweep bound.
  */
-export function refreshBlockedWallets(): string[] {
+export async function refreshBlockedWallets(): Promise<string[]> {
   try {
-    const wallets = listBlockedWalletsDb();
+    const wallets = await listBlockedWalletsDb();
     const now = Date.now();
     blockedCache.clear();
     for (const w of wallets) blockedCache.set(w, now);

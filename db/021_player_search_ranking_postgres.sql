@@ -6,13 +6,15 @@ ALTER TABLE players ADD COLUMN IF NOT EXISTS registered_at BIGINT;
 -- Backfill: HTTP-registered rows (created_at > 10B = Unix seconds)
 UPDATE players SET registered_at = created_at * 1000 WHERE created_at > 10000000000;
 
--- Backfill: Indexer-created rows — get ledger close timestamp from events table
-UPDATE players SET registered_at = (
-  SELECT COALESCE(MAX(e.created_at), 0)
-  FROM events e
-  WHERE e.type = 'player_registered'
-    AND e.payload::json->>'player_id' = players.player_id
-) WHERE created_at <= 10000000000 AND created_at IS NOT NULL;
+-- Unlike the SQLite version, there is no indexer-created-rows backfill step
+-- here: the event indexer (src/services/indexer.ts) is a separate,
+-- out-of-scope subsystem that talks to the events table exclusively through
+-- the raw synchronous SQLite handle (getDb()), so it cannot run at all under
+-- DB_DRIVER=postgres — the events table stays permanently empty on a
+-- PostgreSQL deployment, and player rows only ever arrive via the
+-- HTTP/API-key registration path already backfilled above. A query joining
+-- against events here would just be dead code (and events.created_at
+-- doesn't even exist under PostgreSQL — see 010_admin_indexes_postgres.sql).
 
 -- Remaining rows default to 0
 UPDATE players SET registered_at = 0 WHERE registered_at IS NULL;

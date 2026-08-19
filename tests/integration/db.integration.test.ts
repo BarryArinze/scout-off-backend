@@ -14,7 +14,7 @@ import { SqliteDriver } from '../../src/db/sqlite-driver';
 
 let db: Database.Database;
 
-beforeEach(() => {
+beforeEach(async () => {
   db = new Database(':memory:');
   db.exec(`
     CREATE TABLE IF NOT EXISTS events (
@@ -70,7 +70,7 @@ beforeEach(() => {
   // .run()/.transaction()), not a raw better-sqlite3 Database instance —
   // wrap it the same way tests/db/migrate.test.ts and
   // tests/db/compositeIndex.test.ts do.
-  runMigrations(new SqliteDriver(db));
+  await runMigrations(new SqliteDriver(db));
 });
 
 afterEach(() => {
@@ -234,9 +234,9 @@ describe('Migration runner (real DB)', () => {
     }
   });
 
-  it('is idempotent — running migrations twice does not error or duplicate', () => {
+  it('is idempotent — running migrations twice does not error or duplicate', async () => {
     const before = db.prepare('SELECT COUNT(*) as count FROM migrations').get() as any;
-    expect(() => runMigrations(new SqliteDriver(db))).not.toThrow();
+    await expect(runMigrations(new SqliteDriver(db))).resolves.not.toThrow();
     const after = db.prepare('SELECT COUNT(*) as count FROM migrations').get() as any;
     expect(after.count).toBe(before.count);
   });

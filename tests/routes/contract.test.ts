@@ -24,7 +24,17 @@ jest.mock('../../src/db', () => ({
   getEventsPage: jest.fn().mockReturnValue([]),
   getSavedSearchesByScout: jest.fn().mockReturnValue([]),
   getBookmarksByScout: jest.fn().mockReturnValue([]),
-  getPlayerById: jest.fn().mockReturnValue(null),
+  getPlayerById: jest.fn().mockReturnValue({
+    player_id: 'b8e1a1d3',
+    wallet: 'GDUP7WH3BJ3S3RGDQO5T2D3B4QN6P2ZJ3F5D6K7L8M9N0P1Q2R3S4T5U6V',
+    position: 'Forward',
+    region: 'West Africa',
+    metadata_uri: null,
+    progress_level: 1,
+    created_at: 1700000000,
+    registered_at: 1700000000,
+    is_active: 1,
+  }),
   getEventsCount: jest.fn().mockReturnValue(0),
   fetchLastIndexedLedger: jest.fn().mockReturnValue(0),
   persistLastIndexedLedger: jest.fn(),
@@ -36,6 +46,7 @@ jest.mock('../../src/db', () => ({
   hasContactUnlock: jest.fn().mockReturnValue(true),
   insertContactUnlock: jest.fn(),
   getLatestSubscription: jest.fn().mockReturnValue(null),
+  getSubscriptionsByScout: jest.fn().mockReturnValue([]),
   insertSubscription: jest.fn(),
   dbRenewSubscription: jest.fn(),
   dbCancelSubscription: jest.fn(),
@@ -50,7 +61,10 @@ jest.mock('../../src/db', () => ({
   insertAdminActionSignature: jest.fn(),
   getAdminActionSignature: jest.fn().mockReturnValue(null),
   getAdminActionSignatures: jest.fn().mockReturnValue([]),
-  insertAuditLog: jest.fn().mockReturnValue({
+  // src/utils/audit.ts's recordAudit (used by filterPlayers, milestone
+  // submission/listing) calls this directly — not mocked via
+  // services/audit's logAuditEvent below.
+  insertAuditLog: jest.fn().mockResolvedValue({
     id: 1,
     action: 'player_search',
     admin_wallet: '',
@@ -59,6 +73,11 @@ jest.mock('../../src/db', () => ({
     prev_hash: '0'.repeat(64),
     hash: 'mock-hash-1',
     event_source: 'app_event',
+  }),
+  // src/app.ts's /health and /ready probes go through getDriver().
+  getDriver: jest.fn().mockReturnValue({
+    get: jest.fn().mockResolvedValue({ '?column?': 1 }),
+    run: jest.fn().mockResolvedValue({ changes: 1, lastId: 0 }),
   }),
 }));
 
@@ -135,7 +154,7 @@ jest.mock('../../src/services/stellar', () => ({
 }));
 
 jest.mock('../../src/services/audit', () => ({
-  logAuditEvent: jest.fn(),
+  logAuditEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
 // ─── Shape helpers ────────────────────────────────────────────────────────────
@@ -238,6 +257,9 @@ describe('GET /api/players — envelope shape', () => {
 
 describe('GET /api/players/:playerId — envelope shape', () => {
   it('error: { success: false, error: string } for non-existent player', async () => {
+    // The default mock returns a player row (needed by the unlock envelope
+    // test above); this route test requires a missing player.
+    (require('../../src/db').getPlayerById as jest.Mock).mockReturnValueOnce(null);
     const res = await request(app).get(`/api/players/${PLAYER_WALLET}`);
     expect(res.status).toBe(404);
     assertErrorEnvelope(res.body);

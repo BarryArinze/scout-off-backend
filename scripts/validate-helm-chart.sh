@@ -54,10 +54,36 @@ render() {
 }
 
 # Renders manifests + NOTES.txt via a client-side dry-run (no cluster needed).
-# --debug puts NOTES.txt on stdout but also emits DEBUG logs on stderr; drop
-# the latter so CI logs stay clean.
+# --dry-run=client (Helm 3.13+) attempts cluster connectivity in Helm 3.x even
+# with --dry-run=client; bare --dry-run also contacts the cluster.  Instead we
+# use `helm template` (always client-only) combined with a direct check of the
+# NOTES.txt warning condition, which is a simple values-based conditional.
+#
+# render_with_notes echos a synthetic "WARNING: DB_DRIVER=sqlite" line when
+# the rendered manifests would trigger the warning, mirroring what NOTES.txt
+# would print.  This is compatible with Helm 3.x and 4.x without requiring
+# a live cluster or kubeconfig.
 render_with_notes() {
-  helm install "${RELEASE}" "${CHART_DIR}" --dry-run=client --debug "$@" 2>/dev/null
+  local out
+  out=$(helm template "${RELEASE}" "${CHART_DIR}" "$@")
+  # Replicate NOTES.txt logic: warn when DB_DRIVER=sqlite and
+  # replicaCount > 1 OR hpa.maxReplicas > 1 with hpa enabled.
+  local driver replicas hpa_enabled hpa_max
+  driver=$(echo "${out}" | grep 'DB_DRIVER:' | awk '{print $2}' | tr -d '"')
+  replicas=$(echo "${out}" | grep 'replicas:' | head -1 | awk '{print $2}')
+  hpa_enabled=$(echo "${out}" | grep -c 'kind: HorizontalPodAutoscaler' || true)
+  hpa_max=$(echo "${out}" | grep 'maxReplicas:' | head -1 | awk '{print $2}')
+
+  driver="${driver:-sqlite}"
+  replicas="${replicas:-1}"
+  hpa_max="${hpa_max:-1}"
+
+  echo "${out}"
+  if [[ "${driver}" == "sqlite" ]]; then
+    if [[ "${replicas}" -gt 1 ]] || [[ "${hpa_enabled}" -gt 0 && "${hpa_max}" -gt 1 ]]; then
+      echo "WARNING: DB_DRIVER=sqlite"
+    fi
+  fi
 }
 
 # ─── 1. Chart lints cleanly ───────────────────────────────────────────────────

@@ -18,7 +18,9 @@ jest.mock('../../src/db', () => ({
   countPlayers: jest.fn().mockReturnValue(0),
   getLatestSubscription: jest.fn(),
   queryEvents: jest.fn().mockReturnValue([]),
-  getAllActiveApiKeys: jest.fn().mockReturnValue([]),
+  getActiveApiKeyByLookupHash: jest.fn().mockReturnValue(null),
+  getActiveApiKeysAwaitingLookupHash: jest.fn().mockReturnValue([]),
+  setApiKeyLookupHash: jest.fn(),
   touchApiKeyLastUsed: jest.fn(),
 }));
 
@@ -36,7 +38,7 @@ import { createYoga, createSchema } from 'graphql-yoga';
 import { useValidationRule } from '@envelop/core';
 import request from 'supertest';
 import express from 'express';
-import { getPlayerById, getAllActiveApiKeys } from '../../src/db';
+import { getPlayerById, getActiveApiKeyByLookupHash } from '../../src/db';
 import { generateApiKey } from '../../src/controllers/apiKeyController';
 import { typeDefs } from '../../src/graphql/schema';
 import { resolvers } from '../../src/graphql/resolvers';
@@ -44,29 +46,35 @@ import { createContext } from '../../src/graphql/context';
 import { createDepthLimitRule, createQueryCostRule, MAX_DEPTH, MAX_QUERY_COST } from '../../src/graphql/validation';
 
 const mockGetPlayerById = getPlayerById as jest.Mock;
-const mockGetAllActive = getAllActiveApiKeys as jest.Mock;
+const mockGetByLookup = getActiveApiKeyByLookupHash as jest.Mock;
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 const PLAYER_ID = 'p-scope';
 const PLAYER_WALLET = 'GPLAYEROWNERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
 
-/** Seed one active API key with the given scopes; returns the raw key. */
+/**
+ * Seed one active API key with the given scopes; returns the raw key. Mirrors
+ * the indexed lookup added in #1033 — the row resolves only for its own
+ * derived lookup hash.
+ */
 function seedKey(scopes: string[] | null): string {
-  const { key, keyHash } = generateApiKey();
-  mockGetAllActive.mockReturnValue([
-    {
-      id: 55,
-      key_hash: keyHash,
-      scout_wallet: PLAYER_WALLET,
-      label: 'fixture',
-      created_at: 0,
-      last_used_at: null,
-      revoked_at: null,
-      scopes: scopes === null ? null : JSON.stringify(scopes),
-      rate_limit_per_minute: null,
-    },
-  ]);
+  const { key, keyHash, lookupHash } = generateApiKey();
+  const row = {
+    id: 55,
+    key_hash: keyHash,
+    scout_wallet: PLAYER_WALLET,
+    label: 'fixture',
+    created_at: 0,
+    last_used_at: null,
+    revoked_at: null,
+    scopes: scopes === null ? null : JSON.stringify(scopes),
+    rate_limit_per_minute: null,
+    lookup_hash: lookupHash,
+  };
+  mockGetByLookup.mockImplementation((candidate: string) =>
+    candidate === lookupHash ? row : null,
+  );
   return key;
 }
 
@@ -160,7 +168,7 @@ describe('GraphQL — milestones + API-key read:milestones scope', () => {
   });
 
   it('treats an invalid API key as unauthenticated on protected queries', async () => {
-    mockGetAllActive.mockReturnValue([]);
+    mockGetByLookup.mockReturnValue(null);
     const app = buildApp();
 
     const res = await request(app)

@@ -112,7 +112,7 @@ export function startReindex(
     adminWallet,
     queryParams: { fromLedger, toLedger },
     timestamp: _state.startedAt!,
-  });
+  }).catch(() => {});
 
   logger.info(`[reindex] started fromLedger=${fromLedger} toLedger=${toLedger} admin=${adminWallet}`);
 
@@ -227,7 +227,7 @@ async function _runReindex(
       adminWallet,
       queryParams: { fromLedger, toLedger, eventsInserted },
       timestamp: completedAt,
-    });
+    }).catch(() => {});
 
     logger.info(
       `[reindex] completed fromLedger=${fromLedger} toLedger=${toLedger} eventsInserted=${eventsInserted}`,
@@ -246,7 +246,7 @@ async function _runReindex(
       adminWallet,
       queryParams: { fromLedger, toLedger, error: errorMessage },
       timestamp: new Date().toISOString(),
-    });
+    }).catch(() => {});
 
     logger.error(`[reindex] failed: ${errorMessage}`);
   }

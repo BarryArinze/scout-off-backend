@@ -37,9 +37,9 @@ export interface GraphQLContext {
  * never drift apart. Returns the authenticated context fields, or null when
  * the key is invalid/revoked.
  */
-function resolveApiKeyRequest(
+async function resolveApiKeyRequest(
   req: Request,
-): { account: string; role: string; apiKeyScopes: string[] | null } | null {
+): Promise<{ account: string; role: string; apiKeyScopes: string[] | null } | null> {
   const apiKeyHeader = req.headers['x-api-key'];
   if (!apiKeyHeader || typeof apiKeyHeader !== 'string') return null;
   try {
@@ -47,22 +47,22 @@ function resolveApiKeyRequest(
     // dependency at load time.
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { resolveApiKey } = require('../controllers/apiKeyController') as {
-      resolveApiKey: (rawKey: string) => {
+      resolveApiKey: (rawKey: string) => Promise<{
         scout_wallet: string;
         id: number;
         scopes: string[] | null;
-      } | null;
+      } | null>;
     };
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { touchApiKeyLastUsed } = require('../db') as {
-      touchApiKeyLastUsed: (id: number) => void;
+      touchApiKeyLastUsed: (id: number) => Promise<void>;
     };
-    const resolved = resolveApiKey(apiKeyHeader);
+    const resolved = await resolveApiKey(apiKeyHeader);
     if (!resolved) {
       logger.warn({ path: req.path, error: 'graphql: invalid or revoked API key' });
       return null;
     }
-    try { touchApiKeyLastUsed(resolved.id); } catch { /* best-effort */ }
+    Promise.resolve(touchApiKeyLastUsed(resolved.id)).catch(() => { /* best-effort */ });
     return {
       account: resolved.scout_wallet,
       role: 'scout',
@@ -82,7 +82,7 @@ export async function createContext({ req }: { req: Request }): Promise<GraphQLC
   const loaders = createLoaders();
 
   // ── X-API-Key path (mirrors REST requireAuth) ─────────────────────────────
-  const apiKeyAuth = resolveApiKeyRequest(req);
+  const apiKeyAuth = await resolveApiKeyRequest(req);
   if (apiKeyAuth) {
     return { ...apiKeyAuth, loaders, req };
   }

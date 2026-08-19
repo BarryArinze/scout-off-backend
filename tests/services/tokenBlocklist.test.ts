@@ -36,9 +36,9 @@ import {
 const FUTURE_EXP = Math.floor(Date.now() / 1000) + 3600; // 1 h from now
 const PAST_EXP   = Math.floor(Date.now() / 1000) - 1;    // already expired
 
-function jtiExists(jti: string): boolean {
+async function jtiExists(jti: string): Promise<boolean> {
   const driver = getDriver();
-  const row = driver.get<{ jti: string }>(
+  const row = await driver.get<{ jti: string }>(
     'SELECT jti FROM revoked_tokens WHERE jti = ?',
     [jti],
   );
@@ -51,10 +51,10 @@ describe('tokenBlocklist — DB-only (no Redis)', () => {
   // Redis URL is NOT set in the test environment, so redisClient === null
   // and all Redis paths are skipped.  The tests exercise pure DB behaviour.
 
-  beforeEach(() => {
+  beforeEach(async () => {
     // Clean the table between tests
     try {
-      getDriver().run('DELETE FROM revoked_tokens', []);
+      await getDriver().run('DELETE FROM revoked_tokens', []);
     } catch {
       // table may not exist yet on very first run — ignore
     }
@@ -63,7 +63,7 @@ describe('tokenBlocklist — DB-only (no Redis)', () => {
   it('revokeToken inserts the jti into the DB', async () => {
     const jti = 'unit-test-jti-1';
     await revokeToken(jti, FUTURE_EXP);
-    expect(jtiExists(jti)).toBe(true);
+    expect(await jtiExists(jti)).toBe(true);
   });
 
   it('isTokenRevoked returns true for a revoked jti', async () => {
@@ -88,7 +88,7 @@ describe('tokenBlocklist — DB-only (no Redis)', () => {
     // Insert a row with an expiry in the past directly (bypassing the
     // revokeToken guard which skips already-expired tokens in Redis)
     const jti = 'unit-test-jti-expired';
-    getDriver().run(
+    await getDriver().run(
       'INSERT INTO revoked_tokens (jti, revoked_at, expires_at) VALUES (?, ?, ?)',
       [jti, Math.floor(Date.now() / 1000), PAST_EXP],
     );
@@ -102,24 +102,24 @@ describe('tokenBlocklist — DB-only (no Redis)', () => {
     await expect(revokeToken(jti, FUTURE_EXP)).resolves.toBeUndefined();
   });
 
-  it('pruneExpiredTokens removes rows with expired timestamps', () => {
+  it('pruneExpiredTokens removes rows with expired timestamps', async () => {
     const driver = getDriver();
     const jti = 'unit-test-jti-prune';
-    driver.run(
+    await driver.run(
       'INSERT INTO revoked_tokens (jti, revoked_at, expires_at) VALUES (?, ?, ?)',
       [jti, Math.floor(Date.now() / 1000), PAST_EXP],
     );
 
-    expect(jtiExists(jti)).toBe(true);
-    pruneExpiredTokens();
-    expect(jtiExists(jti)).toBe(false);
+    expect(await jtiExists(jti)).toBe(true);
+    await pruneExpiredTokens();
+    expect(await jtiExists(jti)).toBe(false);
   });
 
   it('pruneExpiredTokens does not remove non-expired rows', async () => {
     const jti = 'unit-test-jti-keep';
     await revokeToken(jti, FUTURE_EXP);
-    pruneExpiredTokens();
-    expect(jtiExists(jti)).toBe(true);
+    await pruneExpiredTokens();
+    expect(await jtiExists(jti)).toBe(true);
   });
 });
 
@@ -143,9 +143,9 @@ describe('tokenBlocklist — DB-only (no Redis)', () => {
 // block's `getDriver`/`jtiExists` — each test reads back through that same
 // fresh instance rather than the stale outer one.
 describe('tokenBlocklist — Redis-down failover', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     try {
-      getDriver().run('DELETE FROM revoked_tokens', []);
+      await getDriver().run('DELETE FROM revoked_tokens', []);
     } catch { /* ignore */ }
   });
 
@@ -218,7 +218,7 @@ describe('tokenBlocklist — Redis-down failover', () => {
     await expect(freshTokenBlocklist.revokeToken(jti, FUTURE_EXP)).resolves.toBeUndefined();
 
     // DB row must exist — read back through the same fresh instance that wrote it
-    const row = freshDb.getDriver().get<{ jti: string }>(
+    const row = await freshDb.getDriver().get<{ jti: string }>(
       'SELECT jti FROM revoked_tokens WHERE jti = ?',
       [jti],
     );

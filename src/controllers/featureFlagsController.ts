@@ -62,7 +62,8 @@ export async function getFeatureFlags(
   try {
     // Force re-read from DB by clearing cache first
     clearFeatureFlagCache();
-    const flags = getAllFeatureFlags().map(serializeFlag);
+    const rows = await getAllFeatureFlags();
+    const flags = rows.map(serializeFlag);
     res.json({ success: true, data: flags });
   } catch (err) {
     next(err);
@@ -98,7 +99,7 @@ export async function updateFeatureFlag(
     const { name, enabled } = parsed.data;
     const updatedBy = req.account ?? 'unknown';
 
-    setFeatureFlag(name, enabled, updatedBy);
+    await setFeatureFlag(name, enabled, updatedBy);
 
     res.json({
       success: true,
@@ -152,7 +153,7 @@ export async function toggleFeatureFlag(
     const { enabled } = parsed.data;
 
     // Verify the flag exists in the DB before toggling
-    const existing = getFeatureFlag(name);
+    const existing = await getFeatureFlag(name);
     if (!existing) {
       res.status(404).json({
         success: false,
@@ -162,7 +163,7 @@ export async function toggleFeatureFlag(
     }
 
     const updatedBy = req.account ?? 'unknown';
-    setFeatureFlag(name, enabled, updatedBy);
+    await setFeatureFlag(name, enabled, updatedBy);
 
     res.json({
       success: true,

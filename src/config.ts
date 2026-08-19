@@ -112,6 +112,36 @@ if (!sep10ServerSecretValue) {
   }
 }
 
+// Validate API_KEY_LOOKUP_SECRET.
+// This is the server-side pepper used to derive the indexed, deterministic
+// lookup value stored in api_keys.lookup_hash (#1033).  It must be identical
+// on every backend instance, otherwise a key issued by instance A cannot be
+// located by instance B.  It is a *lookup* secret only — possession of a raw
+// API key is still proven against the salted key_hash — but it must never be
+// rotated casually: doing so orphans the stored lookup values (see
+// docs/auth.md).  Production refuses to start without it; staging warns;
+// development/test falls back to a fixed, insecure value at the derivation
+// layer so the test suite runs without extra config.
+const apiKeyLookupSecretValue = process.env.API_KEY_LOOKUP_SECRET ?? '';
+if (!apiKeyLookupSecretValue) {
+  if (nodeEnv === 'production') {
+    throw new Error(
+      'API_KEY_LOOKUP_SECRET is required in production but is not set. ' +
+      'Generate one with `openssl rand -hex 32` and set this variable. ' +
+      'All backend instances must share the same value, otherwise X-API-Key ' +
+      'authentication will fail behind a load balancer. ' +
+      'See docs/auth.md for rotation guidance.',
+    );
+  }
+  if (nodeEnv === 'staging') {
+    console.warn(
+      '[config] WARNING: API_KEY_LOOKUP_SECRET is not set in staging. ' +
+      'A fixed, insecure development-only pepper will be used to derive ' +
+      'api_keys.lookup_hash. Set API_KEY_LOOKUP_SECRET to suppress this warning.',
+    );
+  }
+}
+
 // Validate PINATA_GATEWAY when set — it must be a valid HTTPS URL. An invalid
 // gateway would otherwise only surface as a runtime failure when resolving
 // IPFS content, with no clear indication of the misconfiguration.
@@ -192,6 +222,14 @@ const config = {
    * configuration details and key-rotation guidance.
    */
   sep10ServerSecret: sep10ServerSecretValue,
+  /**
+   * Server-side pepper (32-byte hex, e.g. `openssl rand -hex 32`) used to
+   * derive `api_keys.lookup_hash`, the indexed deterministic value that lets
+   * X-API-Key authentication find a candidate row without scanning the table
+   * (#1033).  Must be identical on every backend instance.  See
+   * src/utils/apiKeyLookup.ts and docs/auth.md.
+   */
+  apiKeyLookupSecret: apiKeyLookupSecretValue,
   platformSecret: process.env.PLATFORM_SECRET ?? '',
   pinata: {
     apiKey: process.env.PINATA_API_KEY ?? '',
@@ -267,6 +305,13 @@ const config = {
     if (raw === 'no-verify') return 'no-verify' as const;
     return false as const;
   })(),
+  /**
+   * Max concurrent connections in the PostgreSQL connection pool. Each
+   * connection can run one query at a time, so this is effectively the
+   * PostgresDriver's concurrency ceiling — requests beyond this queue for a
+   * free connection rather than failing. Ignored when DB_DRIVER=sqlite.
+   */
+  databasePoolSize: parseInt(process.env.DATABASE_POOL_SIZE ?? '10', 10),
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),
@@ -316,6 +361,14 @@ const config = {
     windowMs: parseNumericEnv('PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS', process.env.PLAYER_IMPORT_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
     max: parseNumericEnv('PLAYER_IMPORT_RATE_LIMIT_MAX', process.env.PLAYER_IMPORT_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
   },
+  // Stricter than the default walletRateLimit() pool (#1037): this endpoint's
+  // entire purpose is to make the backend issue an outbound HTTP request to a
+  // caller-supplied URL, so its per-wallet cost is much higher than a normal
+  // write. Tuned to the same 5/min ceiling as admin bulk-import.
+  webhookTestRateLimit: {
+    windowMs: parseNumericEnv('WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS', process.env.WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
+    max: parseNumericEnv('WEBHOOK_TEST_RATE_LIMIT_MAX', process.env.WEBHOOK_TEST_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
+  },
   bodyLimit: {
     // Maximum JSON payload size (default: 1MB)
     json: process.env.JSON_PAYLOAD_LIMIT ?? '1mb',
@@ -336,6 +389,13 @@ const config = {
   subscriptionGracePeriodHours: parseNumericEnv('SUBSCRIPTION_GRACE_PERIOD_HOURS', process.env.SUBSCRIPTION_GRACE_PERIOD_HOURS, 24, { min: 0, integer: true }),
   /** Global request timeout in milliseconds before the server responds with 503. */
   requestTimeoutMs: parseNumericEnv('REQUEST_TIMEOUT_MS', process.env.REQUEST_TIMEOUT_MS, 30000, { min: 1, integer: true }),
+  /**
+   * Bounded Soroban transaction-confirmation poll window (ms). When a
+   * submitted pay_to_contact/subscribe transaction has not reached a final
+   * status (SUCCESS/FAILED) within this window, the payment is reported as
+   * failed rather than treated as confirmed (Issue #761).
+   */
+  txConfirmationTimeoutMs: parseNumericEnv('TX_CONFIRMATION_TIMEOUT_MS', process.env.TX_CONFIRMATION_TIMEOUT_MS, 60000, { min: 1000, integer: true }),
   requestLog: {
     skipPaths: (process.env.LOG_SKIP_PATHS ?? '/health,/health/liveness,/health/readiness,/ready,/metrics')
       .split(',').map(p => p.trim()).filter(Boolean),

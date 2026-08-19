@@ -29,15 +29,15 @@ export function clearFeatureFlagCache(): void {
  * Returns whether a named feature flag is enabled.
  * Reads from an in-process cache that is refreshed on admin updates.
  */
-export function isFeatureEnabled(
+export async function isFeatureEnabled(
   flagName: string,
   _context?: FeatureFlagContext,
-): boolean {
+): Promise<boolean> {
   if (cache.has(flagName)) {
     return cache.get(flagName)!;
   }
 
-  const row = getFeatureFlag(flagName);
+  const row = await getFeatureFlag(flagName);
   const enabled = row?.enabled === 1;
   cache.set(flagName, enabled);
   return enabled;
@@ -46,15 +46,15 @@ export function isFeatureEnabled(
 /** Update a flag at runtime and refresh the in-process cache immediately.
  *  Reads the old value first so it can be written to the audit trail.
  */
-export function setFeatureFlag(
+export async function setFeatureFlag(
   flagName: string,
   enabled: boolean,
   updatedBy: string,
-): void {
-  const oldRow = getFeatureFlag(flagName);
+): Promise<void> {
+  const oldRow = await getFeatureFlag(flagName);
   const oldValue = oldRow ? oldRow.enabled === 1 : false;
 
-  upsertFeatureFlag({
+  await upsertFeatureFlag({
     name: flagName,
     enabled: enabled ? 1 : 0,
     updated_at: Date.now(),
@@ -62,7 +62,7 @@ export function setFeatureFlag(
   });
   cache.set(flagName, enabled);
 
-  logAuditEvent({
+  await logAuditEvent({
     action: 'feature_flag_toggled',
     timestamp: new Date().toISOString(),
     adminWallet: updatedBy,
@@ -72,7 +72,7 @@ export function setFeatureFlag(
       new_value: enabled,
       admin_wallet: updatedBy,
     },
-  });
+  }).catch(() => {});
 }
 
 /** Return all feature flag rows from the DB (bypasses in-process cache). */

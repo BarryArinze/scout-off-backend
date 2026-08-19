@@ -90,17 +90,25 @@ jest.mock('../../src/db', () => {
       auditRows = [];
       nextAuditId = 1;
     },
-    // In-memory stand-in for the `revoked_tokens` table so
-    // tokenBlocklist.ts's real (unmocked) getDriver()-based checkDb always
-    // finds a working driver instead of failing closed (treating every
-    // token as revoked) — see src/services/tokenBlocklist.ts checkDb().
+    // src/app.ts's /health and /ready probes go through getDriver() but only
+    // care whether the call resolves, not what it resolves to. Meanwhile
+    // tokenBlocklist.ts's real (unmocked) getDriver()-based checkDb treats
+    // any truthy row as "revoked" — see src/services/tokenBlocklist.ts
+    // checkDb() — so `get` must resolve to `undefined` (no matching row) or
+    // every token in these tests would appear revoked and auth would fail.
     getDriver: jest.fn(() => ({
       run: () => ({ changes: 0, lastId: 0 }),
       get: () => undefined,
       all: () => [],
       value: () => undefined,
       exec: () => {},
-      transaction: (fn: () => unknown) => fn(),
+      transaction: (fn: (tx: unknown) => unknown) => fn({
+        run: () => ({ changes: 0, lastId: 0 }),
+        get: () => undefined,
+        all: () => [],
+        value: () => undefined,
+        exec: () => {},
+      }),
       close: async () => {},
     })),
   };
@@ -545,7 +553,7 @@ describe('GET /api/players — search audit logging', () => {
 
   it('records an anonymous player_search entry when no auth token is provided', async () => {
     await request(app).get('/api/players?region=europe');
-    const entry = queryAudit({ eventType: 'player_search' })[0];
+    const entry = (await queryAudit({ eventType: 'player_search' }))[0];
     expect(entry).toBeDefined();
     expect(entry!.actorWallet).toBe('anonymous');
     expect(entry!.eventType).toBe('player_search');
@@ -557,7 +565,7 @@ describe('GET /api/players — search audit logging', () => {
     await request(app)
       .get('/api/players?position=striker')
       .set('Authorization', `Bearer ${token}`);
-    const entry = queryAudit({ eventType: 'player_search' })[0];
+    const entry = (await queryAudit({ eventType: 'player_search' }))[0];
     expect(entry).toBeDefined();
     expect(entry!.actorWallet).toBe(scoutWallet);
   });

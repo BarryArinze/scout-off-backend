@@ -167,85 +167,90 @@ export async function pinJson(body: object): Promise<string> {
         return devStubCid(JSON.stringify(body));
       }
 
-      const now = new Date().toISOString();
-      const acquiredLock = insertPendingPin({
-        payload: JSON.stringify(body),
-        hash,
-        created_at: now,
-        last_tried: now,
-      });
-
-      if (acquiredLock === false) {
-        logger.debug(`[ipfs] pinJson lock contended — polling for completion (hash=${hash.slice(0, 8)}…)`);
-        const MAX_POLL_MS = 30000;
-        while (Date.now() - start < MAX_POLL_MS) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          const pollCached = pinJsonCache.get(hash);
-          if (pollCached && Date.now() - pollCached.timestamp < ttlMs) {
-            return pollCached.cid;
-          }
-          if (inflightPins.has(hash)) {
-            return await inflightPins.get(hash)!;
-          }
-          // Check the cross-instance resolved_cid column unconditionally on
-          // every tick — not only once the pending_pins row is confirmed
-          // gone. The winning instance persists resolved_cid (a separate DB
-          // write) *before* deleting the row (another separate DB write), so
-          // in a real multi-instance deployment there's a window — bounded
-          // by the round-trip time between those two writes — where the row
-          // still exists but the CID is already readable. Gating this read
-          // behind "row is gone" misses that window entirely, since by the
-          // time the row is gone the resolved_cid is gone with it.
-          const resolvedCid = getResolvedCidByHash(hash);
-          if (resolvedCid) {
-            logger.debug(`[ipfs] pinJson cross-instance dedup — using resolved CID from DB (hash=${hash.slice(0, 8)}…)`);
-            pinJsonCache.set(hash, { cid: resolvedCid, timestamp: Date.now() });
-            return resolvedCid;
-          }
-          if (!isPendingPinByHash(hash)) {
-            // Lock row is gone and no resolved_cid was ever observed — the
-            // winning instance most likely crashed before finishing.
-            // Check process-local cache once more, then fall through to
-            // upload as a safety-net.
-            const finalCached = pinJsonCache.get(hash);
-            if (finalCached && Date.now() - finalCached.timestamp < ttlMs) {
-              return finalCached.cid;
-            }
-            break;
-          }
-        }
-      }
-
-      // Register the in-flight promise synchronously (before the first await
-      // below) so any same-process concurrent call for this hash — however
-      // soon it arrives — hits the `inflightPins.has(hash)` check above and
-      // awaits this exact upload instead of independently acquiring its own
-      // DB lock / issuing its own Pinata request.
-      const uploadPromise = (async () => {
+      // Register the in-flight promise synchronously, *before* the first
+      // await (the DB lock-acquisition call below) — not after it. Every DB
+      // call here now goes through the async DbDriver (required to support
+      // DB_DRIVER=postgres), so even the SQLite path is a real await that
+      // yields to the event loop. Two same-process calls issued back-to-back
+      // (e.g. via Promise.all) both run synchronously up to their first
+      // await, so if registration happened after `await insertPendingPin`,
+      // both would race past the `inflightPins.has(hash)` check above before
+      // either had a chance to register — defeating same-process dedup and
+      // causing two independent Pinata uploads. Registering here, before any
+      // await, closes that window: whichever call runs first claims the
+      // entry synchronously, and the second sees it immediately.
+      const resultPromise = (async (): Promise<string> => {
         try {
-          const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
-          const uploadedCid = res.data.IpfsHash as string;
-          // Persist the CID into the pending_pins row BEFORE deleting it so any
-          // other instance waiting in its poll loop can read it via
-          // getResolvedCidByHash() and avoid a duplicate upload.
-          setPendingPinResolvedCid(hash, uploadedCid);
-          return uploadedCid;
-        } catch (err) {
-          logger.critical('[ipfs] Pinata unavailable — queueing payload for retry', (err as Error).message);
-          const failTime = new Date().toISOString();
-          insertPendingPin({ payload: JSON.stringify(body), created_at: failTime, last_tried: failTime });
-          throw err;
+          const now = new Date().toISOString();
+          const acquiredLock = await insertPendingPin({
+            payload: JSON.stringify(body),
+            hash,
+            created_at: now,
+            last_tried: now,
+          });
+
+          if (acquiredLock === false) {
+            logger.debug(`[ipfs] pinJson lock contended — polling for completion (hash=${hash.slice(0, 8)}…)`);
+            const MAX_POLL_MS = 30000;
+            while (Date.now() - start < MAX_POLL_MS) {
+              await new Promise((resolve) => setTimeout(resolve, 50));
+              const pollCached = pinJsonCache.get(hash);
+              if (pollCached && Date.now() - pollCached.timestamp < ttlMs) {
+                return pollCached.cid;
+              }
+              // Check the cross-instance resolved_cid column unconditionally on
+              // every tick — not only once the pending_pins row is confirmed
+              // gone. The winning instance persists resolved_cid (a separate DB
+              // write) *before* deleting the row (another separate DB write), so
+              // in a real multi-instance deployment there's a window — bounded
+              // by the round-trip time between those two writes — where the row
+              // still exists but the CID is already readable. Gating this read
+              // behind "row is gone" misses that window entirely, since by the
+              // time the row is gone the resolved_cid is gone with it.
+              const resolvedCid = await getResolvedCidByHash(hash);
+              if (resolvedCid) {
+                logger.debug(`[ipfs] pinJson cross-instance dedup — using resolved CID from DB (hash=${hash.slice(0, 8)}…)`);
+                pinJsonCache.set(hash, { cid: resolvedCid, timestamp: Date.now() });
+                return resolvedCid;
+              }
+              if (!(await isPendingPinByHash(hash))) {
+                // Lock row is gone and no resolved_cid was ever observed — the
+                // winning instance most likely crashed before finishing.
+                // Check process-local cache once more, then fall through to
+                // upload as a safety-net.
+                const finalCached = pinJsonCache.get(hash);
+                if (finalCached && Date.now() - finalCached.timestamp < ttlMs) {
+                  return finalCached.cid;
+                }
+                break;
+              }
+            }
+          }
+
+          try {
+            const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
+            const uploadedCid = res.data.IpfsHash as string;
+            // Persist the CID into the pending_pins row BEFORE deleting it so any
+            // other instance waiting in its poll loop can read it via
+            // getResolvedCidByHash() and avoid a duplicate upload.
+            await setPendingPinResolvedCid(hash, uploadedCid);
+            pinJsonCache.set(hash, { cid: uploadedCid, timestamp: Date.now() });
+            span.setAttribute('ipfs.cid', uploadedCid);
+            return uploadedCid;
+          } catch (err) {
+            logger.critical('[ipfs] Pinata unavailable — queueing payload for retry', (err as Error).message);
+            const failTime = new Date().toISOString();
+            await insertPendingPin({ payload: JSON.stringify(body), created_at: failTime, last_tried: failTime });
+            throw err;
+          } finally {
+            await deletePendingPinByHash(hash);
+          }
         } finally {
-          deletePendingPinByHash(hash);
           inflightPins.delete(hash);
         }
       })();
-      inflightPins.set(hash, uploadPromise);
-      const cid = await uploadPromise;
-
-      pinJsonCache.set(hash, { cid, timestamp: Date.now() });
-      span.setAttribute('ipfs.cid', cid);
-      return cid;
+      inflightPins.set(hash, resultPromise);
+      return await resultPromise;
     })();
   } catch (err) {
     span.recordException(err as Error);
@@ -330,7 +335,7 @@ const DEBOUNCE_MS = 60 * 1000; // 1 minute
  */
 export async function retryPendingPins(): Promise<void> {
   if (!isPinataConfigured()) return;
-  const pending = getPendingPins();
+  const pending = await getPendingPins();
   const now = Date.now();
 
   for (const row of pending) {
@@ -350,9 +355,9 @@ export async function retryPendingPins(): Promise<void> {
       const body = JSON.parse(row.payload) as object;
       const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
       logger.info(`[ipfs] retried pending pin id=${row.id} cid=${res.data.IpfsHash as string}`);
-      deletePendingPin(row.id);
+      await deletePendingPin(row.id);
     } catch {
-      incrementPendingPinAttempts(row.id);
+      await incrementPendingPinAttempts(row.id);
       logger.warn(`[ipfs] retry failed for pending pin id=${row.id}, attempt=${row.attempts + 1}`);
     }
   }

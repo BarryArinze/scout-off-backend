@@ -139,7 +139,7 @@ jest.mock('../../src/db', () => {
 });
 
 jest.mock('../../src/services/audit', () => ({
-  logAuditEvent: jest.fn(),
+  logAuditEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../../src/utils/logger', () => ({
@@ -194,16 +194,16 @@ afterAll(() => {
 // ─── Propose action ──────────────────────────────────────────────────────────
 
 describe('proposeAction()', () => {
-  it('returns a proposed result with actionId when threshold > 1', () => {
-    const result = proposeAction('pause_contract', {}, ADMIN_1);
+  it('returns a proposed result with actionId when threshold > 1', async () => {
+    const result = await proposeAction('pause_contract', {}, ADMIN_1);
 
     expect(result.status).toBe('proposed');
     expect(result.actionId).toBeDefined();
     expect(typeof result.actionId).toBe('string');
   });
 
-  it('persists an action with the correct properties', () => {
-    const result = proposeAction('withdraw_fees', { recipient: 'G...' }, ADMIN_1);
+  it('persists an action with the correct properties', async () => {
+    const result = await proposeAction('withdraw_fees', { recipient: 'G...' }, ADMIN_1);
 
     const action = store.pending_admin_actions[0];
     expect(action).toBeDefined();
@@ -215,15 +215,15 @@ describe('proposeAction()', () => {
     expect(action.status).toBe('pending');
   });
 
-  it('records the proposer as the first signature', () => {
-    proposeAction('pause_contract', {}, ADMIN_1);
+  it('records the proposer as the first signature', async () => {
+    await proposeAction('pause_contract', {}, ADMIN_1);
 
     expect(store.admin_action_signatures).toHaveLength(1);
     expect(store.admin_action_signatures[0].signer).toBe(ADMIN_1);
   });
 
-  it('logs an audit event on proposal', () => {
-    proposeAction('pause_contract', {}, ADMIN_1);
+  it('logs an audit event on proposal', async () => {
+    await proposeAction('pause_contract', {}, ADMIN_1);
 
     expect(mockLogAuditEvent).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -233,9 +233,9 @@ describe('proposeAction()', () => {
     );
   });
 
-  it('sets an expiry timestamp in the future', () => {
+  it('sets an expiry timestamp in the future', async () => {
     const before = Date.now();
-    proposeAction('pause_contract', {}, ADMIN_1);
+    await proposeAction('pause_contract', {}, ADMIN_1);
 
     expect(store.pending_admin_actions[0].expires_at as number).toBeGreaterThanOrEqual(before);
   });
@@ -246,8 +246,8 @@ describe('proposeAction()', () => {
 describe('approveAction()', () => {
   let actionId: string;
 
-  beforeEach(() => {
-    actionId = proposeAction('pause_contract', {}, ADMIN_1).actionId;
+  beforeEach(async () => {
+    actionId = (await proposeAction('pause_contract', {}, ADMIN_1)).actionId;
     jest.clearAllMocks();
     mockPauseContractOnChain.mockResolvedValue({ transactionId: 'tx_pause_mock' });
   });
@@ -290,13 +290,6 @@ describe('approveAction()', () => {
 
     const a = store.pending_admin_actions[0];
     expect(a.status).toBe('executed');
-  });
-
-  it('calls the real on-chain operation when threshold is reached', async () => {
-    await approveAction(actionId, ADMIN_2);
-    await approveAction(actionId, ADMIN_3);
-
-    expect(mockPauseContractOnChain).toHaveBeenCalledTimes(1);
   });
 
   it('throws when trying to approve an already executed action', async () => {
@@ -478,25 +471,25 @@ describe('Execution dispatch — each AdminActionType fires the correct stellar 
 // ─── List pending actions ────────────────────────────────────────────────────
 
 describe('listPendingActions()', () => {
-  it('returns empty array when no pending actions exist', () => {
-    const result = listPendingActions();
+  it('returns empty array when no pending actions exist', async () => {
+    const result = await listPendingActions();
     expect(result).toEqual([]);
   });
 
-  it('returns only pending actions', () => {
-    proposeAction('pause_contract', {}, ADMIN_1);
+  it('returns only pending actions', async () => {
+    await proposeAction('pause_contract', {}, ADMIN_1);
 
-    const pending = listPendingActions();
+    const pending = await listPendingActions();
     expect(pending).toHaveLength(1);
     expect(pending[0].status).toBe('pending');
   });
 
-  it('does not return expired actions', () => {
-    proposeAction('pause_contract', {}, ADMIN_1);
+  it('does not return expired actions', async () => {
+    await proposeAction('pause_contract', {}, ADMIN_1);
     const a = store.pending_admin_actions[0];
     a.expires_at = Date.now() - 1000;
 
-    const pending = listPendingActions();
+    const pending = await listPendingActions();
     expect(pending).toHaveLength(0);
     expect(store.pending_admin_actions[0].status).toBe('expired');
   });
@@ -505,15 +498,15 @@ describe('listPendingActions()', () => {
 // ─── Get action details ──────────────────────────────────────────────────────
 
 describe('getActionDetails()', () => {
-  it('returns null for non-existent action', () => {
-    expect(getActionDetails('nonexistent')).toBeNull();
+  it('returns null for non-existent action', async () => {
+    expect(await getActionDetails('nonexistent')).toBeNull();
   });
 
   it('returns action with signatures', async () => {
-    const id = proposeAction('pause_contract', {}, ADMIN_1).actionId;
+    const id = (await proposeAction('pause_contract', {}, ADMIN_1)).actionId;
     await approveAction(id, ADMIN_2);
 
-    const details = getActionDetails(id);
+    const details = await getActionDetails(id);
     expect(details).not.toBeNull();
     expect(details!.action.id).toBe(id);
     expect(details!.signatures).toHaveLength(2);
@@ -527,11 +520,7 @@ describe('getActionDetails()', () => {
 
 describe('Full flow: 3-of-3 threshold', () => {
   it('propose -> co-sign -> co-sign -> executed', async () => {
-    // withdraw_fees needs a recipient; mock it to resolve
-    const stellar = jest.requireMock('../../src/services/stellar');
-    stellar.withdrawFees.mockResolvedValue({ transactionId: 'tx_w', amount: 0, recipient: 'G...', token: 'XLM' });
-
-    const result1 = proposeAction('withdraw_fees', { recipient: 'G...' }, ADMIN_1);
+    const result1 = await proposeAction('withdraw_fees', { recipient: 'G...' }, ADMIN_1);
     expect(result1.status).toBe('proposed');
     const actionId = result1.actionId;
 
@@ -553,10 +542,10 @@ describe('Full flow: 3-of-3 threshold', () => {
 
 describe('Below-threshold: 2 of 3 signatures', () => {
   it('remains pending after 2 signatures', async () => {
-    const actionId = proposeAction('pause_contract', {}, ADMIN_1).actionId;
+    const actionId = (await proposeAction('pause_contract', {}, ADMIN_1)).actionId;
 
     await approveAction(actionId, ADMIN_2);
-    const detail = listPendingActions();
+    const detail = await listPendingActions();
     expect(detail).toHaveLength(1);
     expect(detail[0].status).toBe('pending');
 

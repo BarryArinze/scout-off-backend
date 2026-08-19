@@ -2,8 +2,16 @@
  * API Key Controller (#490)
  *
  * Allows scouts to issue, list, and revoke long-lived API keys for
- * server-to-server integrations.  Only a salted SHA-256 hash of each key is
- * ever persisted; the raw key is returned exactly once at issuance time.
+ * server-to-server integrations.  The raw key is returned exactly once at
+ * issuance time and never persisted.
+ *
+ * Two derived representations are stored per key:
+ *  - `key_hash`    — `salt:sha256(salt+key)`, the authentication proof. Salted
+ *                    per row, therefore not searchable.
+ *  - `lookup_hash` — a deterministic keyed digest used purely to locate the
+ *                    candidate row with one indexed query (#1033). Never
+ *                    sufficient to authenticate on its own, and never exposed
+ *                    in an API response. See src/utils/apiKeyLookup.ts.
  */
 import { Request, Response, NextFunction } from 'express';
 import { randomBytes, createHash } from 'crypto';
@@ -12,7 +20,9 @@ import {
   insertApiKey,
   listApiKeysByWallet,
   revokeApiKeyById,
-  getAllActiveApiKeys,
+  getActiveApiKeyByLookupHash,
+  getActiveApiKeysAwaitingLookupHash,
+  setApiKeyLookupHash,
   ApiKeyRow,
 } from '../db';
 import { logger } from '../utils/logger';
@@ -20,6 +30,7 @@ import {
   parseApiKeyScopes,
   normalizeRequestedScopes,
 } from '../utils/apiKeyScopes';
+import { deriveApiKeyLookupHash } from '../utils/apiKeyLookup';
 
 // ─── Hashing helpers (mirrors tokenBlocklist.ts conventions) ──────────────────
 
@@ -28,16 +39,23 @@ const SALT_BYTES = 16;
 const SEPARATOR = ':';
 
 /**
- * Generate a random API key and its storable salted hash.
- * Returns `{ key, keyHash }` where `key` is the raw (plaintext) value and
- * `keyHash` is `salt:sha256(salt+key)`.
+ * Generate a random API key and the two representations persisted for it.
+ *
+ * Returns `{ key, keyHash, lookupHash }` where:
+ *  - `key`        is the raw (plaintext) value, returned to the caller once
+ *                 and never stored;
+ *  - `keyHash`    is `salt:sha256(salt+key)` — the *authentication proof*,
+ *                 salted per row and therefore not searchable;
+ *  - `lookupHash` is the deterministic HMAC used to find this row by indexed
+ *                 equality (#1033). It is only a locator; possession of it
+ *                 does not authenticate. See src/utils/apiKeyLookup.ts.
  */
-export function generateApiKey(): { key: string; keyHash: string } {
+export function generateApiKey(): { key: string; keyHash: string; lookupHash: string } {
   const key = randomBytes(32).toString('hex'); // 64-char hex string
   const salt = randomBytes(SALT_BYTES).toString('hex');
   const hash = createHash('sha256').update(salt + key).digest('hex');
   const keyHash = `${salt}${SEPARATOR}${hash}`;
-  return { key, keyHash };
+  return { key, keyHash, lookupHash: deriveApiKeyLookupHash(key) };
 }
 
 /**
@@ -61,10 +79,37 @@ export function verifyApiKey(rawKey: string, keyHash: string): boolean {
   return diff === 0;
 }
 
+export interface ResolvedApiKey {
+  scout_wallet: string;
+  id: number;
+  scopes: string[] | null;
+}
+
+/** Build the resolver's return value from a verified row. */
+function toResolvedApiKey(row: ApiKeyRow): ResolvedApiKey {
+  return {
+    scout_wallet: row.scout_wallet,
+    id: row.id,
+    scopes: parseApiKeyScopes(row.scopes, (message) => logger.warn(message)),
+  };
+}
+
 /**
  * Resolve a raw API key string to the associated scout wallet.
- * Scans all active (non-revoked) keys and verifies the hash.
- * Returns `{ scout_wallet, id, scopes }` on success or null on failure.
+ *
+ * Two distinct steps, and they must not be conflated (#1033):
+ *
+ *   1. LOCATE — derive the deterministic lookup value for the presented key
+ *      and fetch the single candidate row with an indexed equality query.
+ *      This replaces the former "load every active key and re-hash each one"
+ *      scan, whose cost grew linearly with the number of issued keys.
+ *   2. VERIFY — prove possession of the raw key against that row's salted
+ *      `key_hash` using the existing timing-safe comparison. A row located in
+ *      step 1 is *not* authenticated until this succeeds.
+ *
+ * Returns `{ scout_wallet, id, scopes }` on success or null on failure —
+ * identical to the pre-optimization contract, including for unknown, revoked
+ * (filtered out by the query's `revoked_at IS NULL`) and malformed keys.
  *
  * `scopes` is the parsed scope list (`null` = legacy/unrestricted key) so
  * REST middleware and GraphQL context can enforce the shared scope contract
@@ -74,8 +119,8 @@ export function verifyApiKey(rawKey: string, keyHash: string): boolean {
  * circular dependency — auth.ts calls this function only at runtime via a
  * lazy require so the module graph stays acyclic at load time.
  */
-export function resolveApiKey(rawKey: string): { scout_wallet: string; id: number; scopes: string[] | null } | null {
-  const rows: ApiKeyRow[] = getAllActiveApiKeys();
+export async function resolveApiKey(rawKey: string): Promise<{ scout_wallet: string; id: number; scopes: string[] | null } | null> {
+  const rows: ApiKeyRow[] = await getAllActiveApiKeys();
   for (const row of rows) {
     if (verifyApiKey(rawKey, row.key_hash)) {
       return {
@@ -84,6 +129,7 @@ export function resolveApiKey(rawKey: string): { scout_wallet: string; id: numbe
         scopes: parseApiKeyScopes(row.scopes, (message) => logger.warn(message)),
       };
     }
+    return toResolvedApiKey(row);
   }
   return null;
 }
@@ -127,16 +173,20 @@ export async function issueApiKey(
       return;
     }
 
-    const { key, keyHash } = generateApiKey();
+    const { key, keyHash, lookupHash } = generateApiKey();
     const now = Math.floor(Date.now() / 1000);
 
     const grantedScopes = scopesResult.scopes;
-    const id = insertApiKey({
+    const id = await insertApiKey({
       key_hash: keyHash,
       scout_wallet: req.params.wallet,
       label: parsed.data.label,
       created_at: now,
       scopes: grantedScopes.length > 0 ? grantedScopes : undefined,
+      // Indexed lookup value (#1033). Persisted alongside the salted
+      // verification hash so this key never touches the transitional scan
+      // path; deliberately absent from the response body below.
+      lookup_hash: lookupHash,
     });
 
     logger.info({ scout: req.params.wallet, action: 'api_key_issued', keyId: id, scopes: grantedScopes.length > 0 ? grantedScopes : null });
@@ -169,7 +219,7 @@ export async function listApiKeys(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const rows: ApiKeyRow[] = listApiKeysByWallet(req.params.wallet);
+    const rows: ApiKeyRow[] = await listApiKeysByWallet(req.params.wallet);
 
     res.json({
       success: true,
@@ -208,7 +258,7 @@ export async function revokeApiKey(
       return;
     }
 
-    const revoked = revokeApiKeyById(id, req.params.wallet);
+    const revoked = await revokeApiKeyById(id, req.params.wallet);
     if (!revoked) {
       res.status(404).json({ success: false, error: 'API key not found' });
       return;

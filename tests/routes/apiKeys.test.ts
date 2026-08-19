@@ -38,7 +38,7 @@ jest.mock('../../src/db', () => ({
   revokeApiKeyById: jest.fn(),
   getApiKeyByHash: jest.fn().mockReturnValue(null),
   getAllActiveApiKeys: jest.fn().mockReturnValue([]),
-  touchApiKeyLastUsed: jest.fn(),
+  touchApiKeyLastUsed: jest.fn().mockResolvedValue(undefined),
   // bookmarks
   insertBookmark: jest.fn(),
   deleteBookmark: jest.fn(),
@@ -68,15 +68,30 @@ import {
   insertApiKey,
   listApiKeysByWallet,
   revokeApiKeyById,
-  getAllActiveApiKeys,
+  getActiveApiKeyByLookupHash,
+  getActiveApiKeysAwaitingLookupHash,
+  setApiKeyLookupHash,
   touchApiKeyLastUsed,
 } from '../../src/db';
 
 const mockInsertApiKey    = insertApiKey    as jest.Mock;
 const mockListApiKeys     = listApiKeysByWallet as jest.Mock;
 const mockRevokeApiKey    = revokeApiKeyById as jest.Mock;
-const mockGetAllActive    = getAllActiveApiKeys as jest.Mock;
+const mockGetByLookup     = getActiveApiKeyByLookupHash as jest.Mock;
+const mockGetPending      = getActiveApiKeysAwaitingLookupHash as jest.Mock;
+const mockSetLookupHash   = setApiKeyLookupHash as jest.Mock;
 const mockTouchLastUsed   = touchApiKeyLastUsed as jest.Mock;
+
+/**
+ * Seed the indexed lookup so that only the row's own lookup_hash resolves it —
+ * mirroring the UNIQUE index in db/024_api_key_lookup_hash.sql rather than
+ * returning the same row for any input.
+ */
+function seedIndexedKey(row: Record<string, unknown> & { lookup_hash: string }): void {
+  mockGetByLookup.mockImplementation((lookupHash: string) =>
+    lookupHash === row.lookup_hash ? row : null,
+  );
+}
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -134,23 +149,23 @@ describe('generateApiKey / verifyApiKey (unit)', () => {
 describe('resolveApiKey (unit)', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('returns null when getAllActiveApiKeys returns empty array', () => {
+  it('returns null when getAllActiveApiKeys returns empty array', async () => {
     mockGetAllActive.mockReturnValueOnce([]);
-    expect(resolveApiKey('somekey')).toBeNull();
+    expect(await resolveApiKey('somekey')).toBeNull();
   });
 
-  it('returns scout_wallet, id, and parsed scopes when key matches', () => {
+  it('returns scout_wallet, id, and parsed scopes when key matches', async () => {
     const { key, keyHash } = generateApiKey();
     mockGetAllActive.mockReturnValueOnce([
       { id: 42, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'test', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null },
     ]);
-    const result = resolveApiKey(key);
+    const result = await resolveApiKey(key);
     // Legacy key: null scopes → parsed as null (unrestricted) for the shared
     // scope contract (#1019).
     expect(result).toEqual({ scout_wallet: SCOUT_A, id: 42, scopes: null });
   });
 
-  it('resolves the parsed scope list for a restricted key', () => {
+  it('resolves the parsed scope list for a restricted key', async () => {
     const { key, keyHash } = generateApiKey();
     mockGetAllActive.mockReturnValueOnce([
       {
@@ -165,7 +180,7 @@ describe('resolveApiKey (unit)', () => {
         rate_limit_per_minute: null,
       },
     ]);
-    const result = resolveApiKey(key);
+    const result = await resolveApiKey(key);
     expect(result).toEqual({
       scout_wallet: SCOUT_A,
       id: 43,
@@ -173,12 +188,80 @@ describe('resolveApiKey (unit)', () => {
     });
   });
 
-  it('returns null when no key matches', () => {
+  it('returns null when no key matches', async () => {
     const { keyHash } = generateApiKey();
     mockGetAllActive.mockReturnValueOnce([
       { id: 1, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null },
     ]);
-    expect(resolveApiKey('completely-different-key')).toBeNull();
+    expect(await resolveApiKey('completely-different-key')).toBeNull();
+  });
+
+  // ── #1033: the lookup value must not become the authentication proof ───────
+
+  it('locates the candidate with one indexed query — never a full-table scan', () => {
+    const { key, keyHash, lookupHash } = generateApiKey();
+    seedIndexedKey({ id: 44, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null, lookup_hash: lookupHash });
+
+    expect(resolveApiKey(key)).not.toBeNull();
+
+    // Exactly one targeted lookup, keyed by the derived lookup hash…
+    expect(mockGetByLookup).toHaveBeenCalledTimes(1);
+    expect(mockGetByLookup).toHaveBeenCalledWith(lookupHash);
+    // …and no scan of the active key set.
+    expect(mockGetPending).not.toHaveBeenCalled();
+  });
+
+  it('rejects a key whose lookup hash hits a row but whose raw key fails verification', () => {
+    // Simulates the security-critical case: a caller who somehow presents a
+    // value that locates a row must still fail the salted key_hash check.
+    const other = generateApiKey();
+    const attacker = generateApiKey();
+    mockGetByLookup.mockReturnValue({
+      id: 45,
+      key_hash: other.keyHash,       // belongs to a *different* key
+      scout_wallet: SCOUT_A,
+      label: '',
+      created_at: 0,
+      last_used_at: null,
+      revoked_at: null,
+      scopes: null,
+      rate_limit_per_minute: null,
+      lookup_hash: attacker.lookupHash,
+    });
+
+    expect(resolveApiKey(attacker.key)).toBeNull();
+    // A located-but-unverified row must not fall through to the legacy scan.
+    expect(mockGetPending).not.toHaveBeenCalled();
+  });
+
+  it('returns null for an empty API key without querying the database', () => {
+    expect(resolveApiKey('')).toBeNull();
+    expect(mockGetByLookup).not.toHaveBeenCalled();
+    expect(mockGetPending).not.toHaveBeenCalled();
+  });
+
+  // ── #1033: pre-migration keys keep working and heal themselves ─────────────
+
+  it('resolves a pre-migration key (lookup_hash NULL) and backfills its lookup hash', () => {
+    const { key, keyHash, lookupHash } = generateApiKey();
+    mockGetByLookup.mockReturnValue(null);
+    mockGetPending.mockReturnValue([
+      { id: 46, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'legacy', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null, lookup_hash: null },
+    ]);
+
+    expect(resolveApiKey(key)).toEqual({ scout_wallet: SCOUT_A, id: 46, scopes: null });
+    expect(mockSetLookupHash).toHaveBeenCalledWith(46, lookupHash);
+  });
+
+  it('still authenticates a pre-migration key when persisting the backfill fails', () => {
+    const { key, keyHash } = generateApiKey();
+    mockGetByLookup.mockReturnValue(null);
+    mockGetPending.mockReturnValue([
+      { id: 47, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'legacy', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null, lookup_hash: null },
+    ]);
+    mockSetLookupHash.mockImplementationOnce(() => { throw new Error('db down'); });
+
+    expect(resolveApiKey(key)).toEqual({ scout_wallet: SCOUT_A, id: 47, scopes: null });
   });
 });
 
@@ -219,6 +302,26 @@ describe('POST /api/scouts/:wallet/api-keys', () => {
     expect(callArg.key_hash).not.toContain(plaintextKey);
     // key_hash must be in salt:hash format
     expect(callArg.key_hash).toContain(':');
+  });
+
+  it('persists an indexed lookup_hash that is neither the raw key nor the verification hash (#1033)', async () => {
+    mockInsertApiKey.mockReturnValueOnce(2);
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ label: 'indexed' });
+
+    expect(res.status).toBe(201);
+    const plaintextKey = res.body.data.key;
+    const callArg = mockInsertApiKey.mock.calls[0][0];
+
+    expect(callArg.lookup_hash).toMatch(/^v1:[0-9a-f]{64}$/);
+    expect(callArg.lookup_hash).not.toContain(plaintextKey);
+    expect(callArg.lookup_hash).not.toBe(callArg.key_hash);
+    // The locator must never leak to the client.
+    expect(res.body.data.lookup_hash).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain(callArg.lookup_hash);
   });
 
   it('returns 403 when scout writes to a different wallet', async () => {
@@ -327,10 +430,8 @@ describe('X-API-Key header authentication', () => {
   beforeEach(() => jest.clearAllMocks());
 
   it('accepts a valid X-API-Key for an authenticated request', async () => {
-    const { key, keyHash } = generateApiKey();
-    mockGetAllActive.mockReturnValue([
-      { id: 5, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null },
-    ]);
+    const { key, keyHash, lookupHash } = generateApiKey();
+    seedIndexedKey({ id: 5, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null, lookup_hash: lookupHash });
     mockListApiKeys.mockReturnValue([]);
 
     const res = await request(app)
@@ -342,10 +443,8 @@ describe('X-API-Key header authentication', () => {
   });
 
   it('updates last_used_at when an API key is used', async () => {
-    const { key, keyHash } = generateApiKey();
-    mockGetAllActive.mockReturnValue([
-      { id: 9, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null },
-    ]);
+    const { key, keyHash, lookupHash } = generateApiKey();
+    seedIndexedKey({ id: 9, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null, lookup_hash: lookupHash });
     mockListApiKeys.mockReturnValue([]);
 
     await request(app)
@@ -356,7 +455,8 @@ describe('X-API-Key header authentication', () => {
   });
 
   it('rejects an unknown API key with 401', async () => {
-    mockGetAllActive.mockReturnValue([]);
+    mockGetByLookup.mockReturnValue(null);
+    mockGetPending.mockReturnValue([]);
 
     const res = await request(app)
       .get(`/api/scouts/${SCOUT_A}/api-keys`)
@@ -365,9 +465,11 @@ describe('X-API-Key header authentication', () => {
     expect(res.status).toBe(401);
   });
 
-  it('rejects a revoked key (revoked_at is non-null = excluded by getAllActiveApiKeys)', async () => {
-    // getAllActiveApiKeys returns only non-revoked rows, so revoked key cannot be found
-    mockGetAllActive.mockReturnValue([]); // simulates revoked key filtered out
+  it('rejects a revoked key (revoked_at is non-null = excluded by the indexed lookup)', async () => {
+    // getActiveApiKeyByLookupHash filters on `revoked_at IS NULL`, so a revoked
+    // key's row is never returned even though its lookup_hash still matches.
+    mockGetByLookup.mockReturnValue(null);
+    mockGetPending.mockReturnValue([]);
 
     const { key } = generateApiKey();
     const res = await request(app)

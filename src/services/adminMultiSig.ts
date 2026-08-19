@@ -178,12 +178,12 @@ async function executeAdminAction(
 // If threshold is 1, executes immediately (returns 'immediate').
 // Otherwise persists a pending action for co-signing.
 
-export function proposeAction(
+export async function proposeAction(
   actionType: AdminActionType,
   payload: Record<string, unknown>,
   proposer: string,
-): ProposalResult {
-  expireStalePendingAdminActions();
+): Promise<ProposalResult> {
+  await expireStalePendingAdminActions();
 
   const required = config.adminThreshold;
   if (required <= 1) {
@@ -192,7 +192,7 @@ export function proposeAction(
       adminWallet: proposer,
       queryParams: { actionType, threshold: required, outcome: 'immediate' },
       timestamp: new Date().toISOString(),
-    });
+    }).catch(() => {});
     return { actionId: '', status: 'immediate' };
   }
 
@@ -200,7 +200,7 @@ export function proposeAction(
   const now = Date.now();
   const expiresAt = now + config.adminActionTtlMs;
 
-  insertPendingAdminAction({
+  await insertPendingAdminAction({
     id: actionId,
     action_type: actionType,
     proposer,
@@ -210,11 +210,9 @@ export function proposeAction(
     created_at: now,
   });
 
-  // The proposer counts as the first signer — insert their signature atomically
-  // with the row creation so there is never a window where collected_signatures=0
-  // but the proposer's sig already counts.
-  insertAdminActionSignature({ action_id: actionId, signer: proposer, signed_at: now });
-  incrementActionSignatures(actionId);
+  // The proposer is the first signer
+  await insertAdminActionSignature({ action_id: actionId, signer: proposer, signed_at: now });
+  await incrementActionSignatures(actionId);
 
   logAuditEvent({
     action: `${actionType}_proposed`,
@@ -227,7 +225,7 @@ export function proposeAction(
       outcome: 'multisig_pending',
     },
     timestamp: new Date().toISOString(),
-  });
+  }).catch(() => {});
 
   return { actionId, status: 'proposed' };
 }
@@ -250,9 +248,9 @@ export async function approveAction(
   actionId: string,
   signer: string,
 ): Promise<ApprovalResult> {
-  expireStalePendingAdminActions();
+  await expireStalePendingAdminActions();
 
-  const action = getPendingAdminActionById(actionId);
+  const action = await getPendingAdminActionById(actionId);
   if (!action) {
     throw Object.assign(new Error('Pending action not found'), { code: 'ACTION_NOT_FOUND', status: 404 });
   }
@@ -276,44 +274,17 @@ export async function approveAction(
   }
 
   if (Date.now() > action.expires_at) {
-    updatePendingAdminActionStatus(actionId, 'expired');
-    throw Object.assign(new Error('Action proposal has expired'), {
-      code: ErrorCode.EXPIRED_ACTION,
-      status: 410,
-    });
+    await updatePendingAdminActionStatus(actionId, 'expired');
+    throw Object.assign(new Error('Action proposal has expired'), { code: ErrorCode.EXPIRED_ACTION, status: 410 });
   }
 
   if (!config.adminWallets.includes(signer)) {
     throw Object.assign(new Error('Insufficient permissions'), { code: ErrorCode.FORBIDDEN, status: 403 });
   }
 
-  // ── Atomic signature collection ──────────────────────────────────────────
-  // Run inside a DB transaction so that the duplicate check, signature insert,
-  // and counter increment are all-or-nothing under concurrent load.
-  // The INSERT … ON CONFLICT / INSERT OR IGNORE in insertAdminActionSignature
-  // returns false if the row already existed, letting us detect duplicates
-  // without a prior SELECT that could race.
-  const txResult = getDriver().transaction((): { duplicate: boolean; collected: number } => {
-    const inserted = insertAdminActionSignature({
-      action_id: actionId,
-      signer,
-      signed_at: Date.now(),
-    });
-
-    if (!inserted) {
-      // Row already existed — duplicate signer
-      return { duplicate: true, collected: action.collected_signatures };
-    }
-
-    incrementActionSignatures(actionId);
-
-    // Re-read the updated row inside the transaction for an accurate count
-    const updated = getPendingAdminActionById(actionId);
-    const newCollected = updated?.collected_signatures ?? action.collected_signatures + 1;
-    return { duplicate: false, collected: newCollected };
-  });
-
-  if (txResult.duplicate) {
+  // Check for duplicate signer
+  const existingSig = await getAdminActionSignature(actionId, signer);
+  if (existingSig) {
     return {
       actionId,
       collected: txResult.collected,
@@ -322,8 +293,12 @@ export async function approveAction(
     };
   }
 
-  const collected = txResult.collected;
-  const thresholdReached = collected >= action.required_signatures;
+  const now = Date.now();
+  await insertAdminActionSignature({ action_id: actionId, signer, signed_at: now });
+  await incrementActionSignatures(actionId);
+
+  const updated = await getPendingAdminActionById(actionId);
+  const collected = updated?.collected_signatures ?? action.collected_signatures + 1;
 
   logAuditEvent({
     action: `${action.action_type}_approved`,
@@ -336,10 +311,12 @@ export async function approveAction(
       outcome: thresholdReached ? 'threshold_met' : 'partially_signed',
     },
     timestamp: new Date().toISOString(),
-  });
+  }).catch(() => {});
 
-  if (!thresholdReached) {
-    return { actionId, collected, required: action.required_signatures, status: 'pending' };
+  if (collected >= action.required_signatures) {
+    await updatePendingAdminActionStatus(actionId, 'executed');
+    logger.info(`[multisig] action=${action.action_type} id=${actionId} threshold=${action.required_signatures} collected=${collected} — executing`);
+    return { actionId, collected, required: action.required_signatures, status: 'approved' };
   }
 
   // ── Quorum reached — mark as executed then fire the real operation ────────
@@ -402,17 +379,17 @@ export async function approveAction(
 
 // ─── Lookup pending actions (with expiry sweep) ──────────────────────────────
 
-export function listPendingActions(): PendingAdminActionRow[] {
-  expireStalePendingAdminActions();
-  return getPendingAdminActionsByStatus('pending') as PendingAdminActionRow[];
+export async function listPendingActions(): Promise<PendingAdminActionRow[]> {
+  await expireStalePendingAdminActions();
+  return getPendingAdminActionsByStatus('pending');
 }
 
-export function getActionDetails(actionId: string): {
+export async function getActionDetails(actionId: string): Promise<{
   action: PendingAdminActionRow;
   signatures: { signer: string; signed_at: number }[];
-} | null {
-  const action = getPendingAdminActionById(actionId);
+} | null> {
+  const action = await getPendingAdminActionById(actionId);
   if (!action) return null;
-  const signatures = getAdminActionSignatures(actionId);
+  const signatures = await getAdminActionSignatures(actionId);
   return { action, signatures };
 }

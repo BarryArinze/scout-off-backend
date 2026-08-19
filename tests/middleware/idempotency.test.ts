@@ -11,6 +11,7 @@
 
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
+import express from 'express';
 
 const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 const WALLET = 'GSCOUTWALLET1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
@@ -27,6 +28,7 @@ interface StoredRecord {
   response: string;
   status: 'pending' | 'complete';
   expires_at: number;
+  request_fingerprint: string | null;
 }
 
 const idempotencyStore = new Map<string, StoredRecord>();
@@ -43,7 +45,7 @@ jest.mock('../../src/db', () => {
       return { key, ...record };
     }),
 
-    claimIdempotencyKey: jest.fn((key: string): boolean => {
+    claimIdempotencyKey: jest.fn((key: string, requestFingerprint?: string | null): boolean => {
       if (idempotencyStore.has(key)) return false;
       // Insert a pending placeholder — mirrors INSERT OR IGNORE.
       idempotencyStore.set(key, {
@@ -51,6 +53,7 @@ jest.mock('../../src/db', () => {
         response: '',
         status: 'pending',
         expires_at: Date.now() + 24 * 60 * 60 * 1000,
+        request_fingerprint: requestFingerprint ?? null,
       });
       return true;
     }),
@@ -74,6 +77,7 @@ jest.mock('../../src/db', () => {
         response: JSON.stringify(body),
         status: 'complete',
         expires_at: Date.now() + 24 * 60 * 60 * 1000,
+        request_fingerprint: null,
       });
     }),
   };
@@ -104,6 +108,7 @@ jest.mock('../../src/utils/inflightLock', () => {
 });
 
 import app from '../../src/app';
+import { idempotency } from '../../src/middleware/idempotency';
 import { purchaseSubscription } from '../../src/services/stellar';
 import {
   getIdempotencyRecord,
@@ -339,5 +344,92 @@ describe('idempotency middleware — claim-first concurrency', () => {
     expect(res.body.error).toMatch(/already in progress/i);
     // The handler must never have been called.
     expect(mockPurchase).not.toHaveBeenCalled();
+  });
+});
+
+// ─── Request-fingerprint conflict detection (#761) ────────────────────────────
+
+describe('idempotency middleware — request fingerprint conflicts', () => {
+  // A minimal app wired directly to the middleware factory, so the test
+  // exercises the fingerprint option without depending on a specific route.
+  const miniApp = express();
+  miniApp.use(express.json());
+  miniApp.post(
+    '/items',
+    idempotency({
+      requestFingerprint: (req) =>
+        String((req.body as { id?: string } | undefined)?.id ?? ''),
+    }),
+    (req, res) => {
+      res.json({ ok: true, id: (req.body as { id?: string }).id });
+    },
+  );
+
+  beforeEach(() => {
+    idempotencyStore.clear();
+    inFlightLock.clear();
+    // Re-install the store-backed implementations: an earlier test replaced
+    // mockClaim's implementation with an inline variant via mockImplementation,
+    // which would otherwise persist into this suite and drop fingerprints.
+    mockClaim.mockImplementation((key: string, requestFingerprint?: string | null) => {
+      if (idempotencyStore.has(key)) return false;
+      idempotencyStore.set(key, {
+        status_code: 0,
+        response: '',
+        status: 'pending',
+        expires_at: Date.now() + 24 * 60 * 60 * 1000,
+        request_fingerprint: requestFingerprint ?? null,
+      });
+      return true;
+    });
+    mockGet.mockImplementation((key: string) => {
+      const record = idempotencyStore.get(key);
+      if (!record) return null;
+      if (record.expires_at <= Date.now()) return null;
+      return { key, ...record };
+    });
+    mockUpdate.mockImplementation((key: string, statusCode: number, body: unknown) => {
+      const record = idempotencyStore.get(key);
+      if (record) {
+        record.status_code = statusCode;
+        record.response = JSON.stringify(body);
+        record.status = 'complete';
+      }
+    });
+    mockClaim.mockClear();
+    mockUpdate.mockClear();
+    mockGet.mockClear();
+  });
+
+  it('serves the cached response for an identical replay', async () => {
+    const first = await request(miniApp)
+      .post('/items')
+      .set('Idempotency-Key', 'fp-key-001')
+      .send({ id: 'a' });
+    expect(first.status).toBe(200);
+    expect(first.body).toEqual({ ok: true, id: 'a' });
+
+    const replay = await request(miniApp)
+      .post('/items')
+      .set('Idempotency-Key', 'fp-key-001')
+      .send({ id: 'a' });
+    expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(first.body);
+  });
+
+  it('rejects the same key with a materially different request (409) without running the handler', async () => {
+    const first = await request(miniApp)
+      .post('/items')
+      .set('Idempotency-Key', 'fp-key-002')
+      .send({ id: 'a' });
+    expect(first.status).toBe(200);
+
+    const conflict = await request(miniApp)
+      .post('/items')
+      .set('Idempotency-Key', 'fp-key-002')
+      .send({ id: 'b' });
+
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.error).toMatch(/different request/i);
   });
 });

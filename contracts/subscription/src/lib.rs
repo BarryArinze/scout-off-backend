@@ -695,7 +695,7 @@ mod tests {
         client.subscribe(&scout, &1u32, &30u32);
 
         let result = client.try_withdraw_fees(&admin, &30_000_001i128);
-        assert!(result.is_err());
+        assert_eq!(result, Err(Ok(Error::InsufficientFee)));
         // The rejected call leaves the vault untouched.
         assert_eq!(client.get_fee_balance(), 30_000_000);
     }
