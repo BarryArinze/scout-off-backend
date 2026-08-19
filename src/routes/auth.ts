@@ -13,10 +13,34 @@ const authRateLimit = rateLimit({
   max: config.authRateLimit.max,
 });
 
+/**
+ * GET /auth/challenge
+ *
+ * Issue a SEP-10-style challenge transaction XDR for the given Stellar
+ * account. The client signs it and exchanges it for a token via POST
+ * /auth/token.
+ *
+ * @query account {string} - Stellar public key (G...) to build the challenge for
+ * @response 200 { challenge: string, networkPassphrase: string }
+ * @response 400 { success: false, error: string } - Missing/invalid account
+ */
 router.route('/challenge')
   .get(authRateLimit, getChallenge)
   .all(methodNotAllowed(['GET']));
 
+/**
+ * POST /auth/token
+ *
+ * Exchange a signed challenge transaction for an access + refresh token
+ * pair. The caller's role is derived from the verified account: configured
+ * admin wallets always get `admin`, otherwise the requested `role` (default
+ * `player`) is used.
+ *
+ * @body { transaction: string, role?: 'validator' | 'player' | 'scout' } - Signed challenge XDR
+ * @response 200 { token, accessToken, refreshToken, account, expiresAt }
+ * @response 400 { success: false, error: string } - Invalid body or malformed XDR
+ * @response 401 { success: false, error: string } - Invalid signature or expired challenge
+ */
 router.route('/token')
   .post(authRateLimit, postToken)
   .all(methodNotAllowed(['POST']));
