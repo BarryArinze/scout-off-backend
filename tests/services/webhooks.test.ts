@@ -74,6 +74,43 @@ describe('postWebhookWithRetry', () => {
     const [, init] = mockedFetch.mock.calls[0];
     expect((init!.headers as Record<string, string>)['X-Webhook-Signature']).toBeUndefined();
   });
+
+  it(
+    'fails within the configured timeout when the subscriber never responds',
+    async () => {
+      // Simulates a subscriber that accepts the TCP connection but never sends
+      // a response: the underlying fetch promise never settles on its own.
+      // A real `node-fetch` call passed an aborted signal rejects with an
+      // AbortError, so we mimic that here to exercise our abort wiring
+      // without depending on real network timing.
+      mockedFetch.mockImplementation((_url, init) => {
+        return new Promise((_resolve, reject) => {
+          const signal = init?.signal as AbortSignal | undefined;
+          signal?.addEventListener('abort', () => {
+            const err = new Error('The operation was aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+        }) as ReturnType<typeof fetch>;
+      });
+
+      const startedAt = Date.now();
+      await expect(
+        postWebhookWithRetry('https://example.com', { eventType: 'test' }, {
+          retries: 1,
+          timeoutMs: 50,
+        })
+      ).rejects.toThrow(/timed out/i);
+
+      // The attempt must fail close to the configured timeout, not hang
+      // indefinitely (well under the 10s test timeout below).
+      expect(Date.now() - startedAt).toBeLessThan(2000);
+      expect(mockedFetch).toHaveBeenCalledTimes(1);
+      const [, init] = mockedFetch.mock.calls[0];
+      expect(init!.signal).toBeDefined();
+    },
+    10000
+  );
 });
 
 describe('signWebhookPayload', () => {

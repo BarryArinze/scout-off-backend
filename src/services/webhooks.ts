@@ -8,6 +8,7 @@ import {
 import { logger } from '../utils/logger';
 import { recordWebhookDelivery } from '../middleware/metrics';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
+import config from '../config';
 
 /**
  * Generate a unique, stable delivery identifier for a webhook event.
@@ -28,6 +29,14 @@ type WebhookRetryOptions = {
   maxDelayMs?: number;
   /** When provided, the raw JSON body is signed with HMAC-SHA256 using this secret. */
   secret?: string;
+  /**
+   * Per-attempt timeout in ms. An attempt that hasn't completed within this
+   * window is aborted and treated as a failed attempt (proceeding to
+   * retry/backoff or dead-lettering per the existing logic) instead of
+   * hanging indefinitely on an unresponsive subscriber. Defaults to
+   * config.webhook.timeoutMs.
+   */
+  timeoutMs?: number;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -63,6 +72,7 @@ export async function postWebhookWithRetry(
   const retries = options.retries ?? 3;
   const baseDelayMs = options.baseDelayMs ?? 500;
   const maxDelayMs = options.maxDelayMs ?? 5000;
+  const timeoutMs = options.timeoutMs ?? config.webhook.timeoutMs;
   let lastError: unknown;
 
   // Serialize once so the signature is computed over the exact bytes sent.
@@ -74,11 +84,14 @@ export async function postWebhookWithRetry(
 
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     span.setAttribute('webhook.attempt', attempt);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(url, {
         method: 'POST',
         body: rawBody,
         headers,
+        signal: controller.signal,
       });
 
       if (!response.ok) {
@@ -88,7 +101,11 @@ export async function postWebhookWithRetry(
       span.setAttribute('webhook.status', response.status);
       return;
     } catch (err) {
-      lastError = err;
+      lastError = controller.signal.aborted
+        ? new Error(`Webhook dispatch timed out after ${timeoutMs}ms`)
+        : err;
+    } finally {
+      clearTimeout(timer);
     }
 
     if (attempt < retries) {

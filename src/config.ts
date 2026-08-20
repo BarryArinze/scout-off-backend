@@ -333,6 +333,14 @@ const config = {
     // row in `webhook_subscriptions` on startup for backward compatibility. Real
     // multi-subscriber deployments should manage subscriptions in the DB instead.
     secret: process.env.WEBHOOK_SECRET ?? '',
+    /**
+     * Per-attempt timeout (ms) for outbound webhook delivery requests (#691).
+     * An unresponsive subscriber is aborted after this window and the attempt
+     * is treated as a failure, proceeding to retry/backoff or dead-lettering
+     * per the existing postWebhookWithRetry logic, rather than hanging
+     * indefinitely.
+     */
+    timeoutMs: parseNumericEnv('WEBHOOK_TIMEOUT_MS', process.env.WEBHOOK_TIMEOUT_MS, 10000, { min: 1, integer: true }),
   },
   // Symmetric key (32-byte hex, e.g. `openssl rand -hex 32`) used to encrypt
   // webhook_subscriptions.secret at rest (#686). Required in production —

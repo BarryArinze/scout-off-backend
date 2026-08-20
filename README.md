@@ -792,6 +792,7 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
 | `WEBHOOK_ENABLED`                 | Set to `true` to enable event webhooks (default: `false`)                                                             |
 | `WEBHOOK_URL`                     | Endpoint to POST contract events to when `WEBHOOK_ENABLED=true`                                                       |
 | `WEBHOOK_SECRET`                  | HMAC secret for the legacy `WEBHOOK_URL` subscription (see `docs/webhooks.md`); a random secret is generated if unset |
+| `WEBHOOK_TIMEOUT_MS`              | Per-attempt timeout for outbound webhook deliveries in milliseconds (default: `10000`)                                |
 | `REDIS_URL`                       | Redis connection URL for distributed caching (falls back to in-memory if unset)                                       |
 | `PLAYER_CACHE_TTL_MS`             | TTL for player list cache entries in milliseconds (default: `60000`)                                                  |
 | `PLAYER_IMPORT_MAX_BATCH`         | Maximum rows per bulk player import request (default: `500`)                                                          |
