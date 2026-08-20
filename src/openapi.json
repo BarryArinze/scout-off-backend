@@ -965,6 +965,9 @@
         "responses": {
           "200": {
             "description": "{ success: true, data: IpReputation | null }"
+          },
+          "400": {
+            "description": "{ success: false, error: string } - :ip is not a valid IPv4/IPv6 address"
           }
         },
         "security": [

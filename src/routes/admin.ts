@@ -637,6 +637,7 @@ router.route('/ip-allowlist')
  * Returns the current reputation record (score, lastSeen, pinned) for a given IP.
  *
  * @response 200 { success: true, data: IpReputation | null }
+ * @response 400 { success: false, error: string } - :ip is not a valid IPv4/IPv6 address
  * @auth Bearer (admin role required)
  */
 router.route('/ip-reputation/:ip')
