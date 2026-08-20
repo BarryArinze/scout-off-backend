@@ -280,6 +280,49 @@ describe('config PINATA_GATEWAY validation', () => {
   });
 });
 
+describe('config.pinata.gateways fallback', () => {
+  const savedIpfsGateways = process.env.IPFS_GATEWAYS;
+  const savedContractId = process.env.CONTRACT_ID;
+  const savedJwtSecret = process.env.JWT_SECRET;
+
+  beforeEach(() => {
+    process.env.CONTRACT_ID = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
+    process.env.JWT_SECRET = 'test-secret';
+  });
+
+  afterEach(() => {
+    if (savedIpfsGateways !== undefined) {
+      process.env.IPFS_GATEWAYS = savedIpfsGateways;
+    } else {
+      delete process.env.IPFS_GATEWAYS;
+    }
+    process.env.CONTRACT_ID = savedContractId;
+    process.env.JWT_SECRET = savedJwtSecret;
+    jest.resetModules();
+  });
+
+  it('falls back to the three default gateways when IPFS_GATEWAYS is unset', async () => {
+    delete process.env.IPFS_GATEWAYS;
+    jest.resetModules();
+    const { default: config } = await import('../src/config');
+    expect(config.pinata.gateways).toEqual([
+      'https://gateway.pinata.cloud',
+      'https://cloudflare-ipfs.com',
+      'https://ipfs.io',
+    ]);
+  });
+
+  it('uses IPFS_GATEWAYS when set to a comma-separated list', async () => {
+    process.env.IPFS_GATEWAYS = 'https://a.example.com, https://b.example.com';
+    jest.resetModules();
+    const { default: config } = await import('../src/config');
+    expect(config.pinata.gateways).toEqual([
+      'https://a.example.com',
+      'https://b.example.com',
+    ]);
+  });
+});
+
 describe('parseNumericEnv validation', () => {
   const savedEnv: Record<string, string | undefined> = {};
 
