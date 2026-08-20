@@ -11,7 +11,6 @@
     "prepare": "husky",
     "predev": "node scripts/validate-env.js",
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
-    "prebuild": "node scripts/generate-openapi-json.js",
     "build": "tsc",
     "prestart": "node scripts/validate-env.js",
     "start": "node dist/index.js",
