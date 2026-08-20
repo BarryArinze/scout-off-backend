@@ -2745,6 +2745,62 @@
         "x-owner-only": true
       }
     },
+    "/scouts/{wallet}/api-keys/{id}/rotate": {
+      "post": {
+        "tags": [
+          "scouts"
+        ],
+        "summary": "Atomically issue a replacement key and schedule the old one for revocation after a grace period, instead of issuing and revoking as two s...",
+        "operationId": "rotateApiKey",
+        "description": "Atomically issue a replacement key and schedule the old one for revocation\nafter a grace period, instead of issuing and revoking as two separate,\nnon-atomic requests (#676). The replacement inherits the old key's label\nand scopes. The old key keeps authenticating until `oldKey.revokesAt`.",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Scout's Stellar public key"
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "description": "API key row ID to rotate"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "{ success: true, data: { newKey: { id, key, label, created_at, scopes }, oldKey: { id, revokesAt } } }"
+          },
+          "400": {
+            "description": "{ success: false, error: string } - Invalid id or gracePeriodSeconds"
+          },
+          "404": {
+            "description": "{ success: false, error: string } - API key not found (or already revoked)"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": [
+              "write:api_keys"
+            ]
+          }
+        ],
+        "x-required-role": [
+          "scout"
+        ],
+        "x-api-key-scope": "write:api_keys",
+        "x-owner-only": true
+      }
+    },
     "/scouts/{wallet}/bookmark-folders": {
       "get": {
         "tags": [

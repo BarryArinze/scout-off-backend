@@ -373,7 +373,7 @@ surfaces can never drift apart.
 | `write:subscriptions` | Subscribe / renew / cancel subscriptions |
 | `write:trial_offers` | Create trial offers |
 | `write:webhooks` | Register / delete / test webhooks |
-| `write:api_keys` | Issue / revoke API keys |
+| `write:api_keys` | Issue / revoke / rotate API keys |
 | `write:bookmarks` | Manage bookmarks and bookmark folders |
 | `write:notes` | Create / update / delete scout notes |
 | `write:saved_searches` | Create / update / delete saved searches |
@@ -394,6 +394,55 @@ curl -X POST "http://localhost:3000/api/scouts/G.../api-keys" \
 Unknown scope strings are rejected at issuance (`400`). A restricted key that
 lacks the scope for an operation receives `403` with `reason.requiredScope`
 and `reason.providedScopes`.
+
+### Rotating a key without downtime (#676)
+
+Rotating a key by hand — issue a new one, then separately revoke the old one
+— has two real failure modes: revoke the old key before the new one is
+deployed everywhere that consumes it, and the integration goes down; or
+crash after issuing the new key but before revoking the old one, and the old
+key stays live indefinitely. `POST .../api-keys/:id/rotate` does both in one
+atomic request, and the old key keeps working for a grace period instead of
+dying immediately:
+
+```bash
+curl -X POST "http://localhost:3000/api/scouts/G.../api-keys/42/rotate" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "gracePeriodSeconds": 86400 }'
+```
+
+```json
+{
+  "success": true,
+  "data": {
+    "newKey": { "id": 57, "key": "<64-char hex>", "label": "ci-bot", "created_at": 1234567890, "scopes": ["read:milestones"] },
+    "oldKey": { "id": 42, "revokesAt": 1234654290 }
+  }
+}
+```
+
+- The replacement key inherits the old key's `label` and `scopes` — rotation
+  replaces credentials, not policy. Update scopes with a separate issue/revoke
+  pair if the rotated key also needs a different scope list.
+- `gracePeriodSeconds` is optional and defaults to `86400` (24h); the maximum
+  is 7 days (`604800`). `0` revokes the old key immediately, equivalent to a
+  plain `DELETE`.
+- The old key (`oldKey.id`) keeps authenticating normally until
+  `oldKey.revokesAt` (a unix timestamp, seconds) and is rejected from that
+  moment on — enforced live by the same active-key queries used for every
+  `X-API-Key` request (`revoke_after IS NULL OR revoke_after > now`), so
+  there is no background sweep job and no window where an already-elapsed
+  key is still mistakenly accepted.
+- **Recommended integrator workflow:** call rotate, deploy the returned
+  `newKey.key` to every system that uses the old one, then optionally call
+  `DELETE .../api-keys/:oldId` once the rollout is confirmed complete instead
+  of waiting out the full grace period. If the rollout isn't done in time,
+  call rotate again on the *new* key before its own eventual expiry — do not
+  rely on an indefinitely long `gracePeriodSeconds` as a substitute for
+  finishing the rollout.
+- Rotating an already-revoked or unknown key id returns `404`. Rotating
+  requires the `write:api_keys` scope, same as issuing and revoking.
 
 ### GraphQL scope enforcement
 

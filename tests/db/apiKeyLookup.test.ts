@@ -27,13 +27,13 @@ import { deriveApiKeyLookupHash } from '../../src/utils/apiKeyLookup';
 const SCOUT = 'GAAKO6EK5AIJWZH7ITXBFZTPASYKPY3YVMFVFVD5UDG2C6NUIXTT7BE3';
 
 /** Issue a key straight into the real database, exactly as the controller does. */
-function issueKey(opts: { scopes?: string[]; wallet?: string } = {}): {
+async function issueKey(opts: { scopes?: string[]; wallet?: string } = {}): Promise<{
   id: number;
   key: string;
   lookupHash: string;
-} {
+}> {
   const { key, keyHash, lookupHash } = generateApiKey();
-  const id = db.insertApiKey({
+  const id = await db.insertApiKey({
     key_hash: keyHash,
     scout_wallet: opts.wallet ?? SCOUT,
     label: 'scale-fixture',
@@ -69,9 +69,9 @@ afterEach(() => {
 describe('db/024_api_key_lookup_hash.sql', () => {
   let migrated: Database.Database;
 
-  beforeAll(() => {
+  beforeAll(async () => {
     migrated = new Database(':memory:');
-    runMigrations(new SqliteDriver(migrated));
+    await runMigrations(new SqliteDriver(migrated));
   });
 
   afterAll(() => migrated.close());
@@ -130,49 +130,51 @@ describe('db/024_api_key_lookup_hash.sql', () => {
 // ───────────────────────────────────────────────────────────────────────────────
 
 describe('resolveApiKey uses an indexed lookup (#1033)', () => {
-  it('issues exactly one targeted lookup and never fetches the active key set', () => {
-    const { id, key, lookupHash } = issueKey();
+  it('issues exactly one targeted lookup and never fetches the active key set', async () => {
+    const { id, key, lookupHash } = await issueKey();
 
     const byLookup = jest.spyOn(db, 'getActiveApiKeyByLookupHash');
     const scan = jest.spyOn(db, 'getActiveApiKeysAwaitingLookupHash');
 
-    expect(resolveApiKey(key)).toEqual({ scout_wallet: SCOUT, id, scopes: null });
+    expect(await resolveApiKey(key)).toEqual({ scout_wallet: SCOUT, id, scopes: null });
 
     expect(byLookup).toHaveBeenCalledTimes(1);
     expect(byLookup).toHaveBeenCalledWith(lookupHash);
     expect(scan).not.toHaveBeenCalled();
   });
 
-  it('an unknown key costs one indexed lookup plus one (empty) pending probe — not a table scan', () => {
-    issueKey();
+  it('an unknown key costs one indexed lookup plus one (empty) pending probe — not a table scan', async () => {
+    await issueKey();
 
     const byLookup = jest.spyOn(db, 'getActiveApiKeyByLookupHash');
     const scan = jest.spyOn(db, 'getActiveApiKeysAwaitingLookupHash');
 
-    expect(resolveApiKey('a'.repeat(64))).toBeNull();
+    expect(await resolveApiKey('a'.repeat(64))).toBeNull();
 
     expect(byLookup).toHaveBeenCalledTimes(1);
     // The pending probe is index-backed and, with every key migrated, empty.
     expect(scan).toHaveBeenCalledTimes(1);
-    expect(scan.mock.results[0].value).toEqual([]);
+    expect(await scan.mock.results[0].value).toEqual([]);
   });
 
-  it('rejects a revoked key without falling back to a scan', () => {
-    const { id, key } = issueKey();
-    expect(db.revokeApiKeyById(id, SCOUT)).toBe(true);
+  it('rejects a revoked key without falling back to a scan', async () => {
+    const { id, key } = await issueKey();
+    expect(await db.revokeApiKeyById(id, SCOUT)).toBe(true);
 
     const scan = jest.spyOn(db, 'getActiveApiKeysAwaitingLookupHash');
 
-    expect(resolveApiKey(key)).toBeNull();
+    expect(await resolveApiKey(key)).toBeNull();
     // A revoked row still holds its lookup_hash, so it is excluded by the
     // query's `revoked_at IS NULL`, not by anything application-side.
-    expect(scan.mock.results.every((r) => (r.value as unknown[]).length === 0)).toBe(true);
+    for (const r of scan.mock.results) {
+      expect(await r.value).toEqual([]);
+    }
   });
 
-  it('preserves scope resolution for a restricted key', () => {
+  it('preserves scope resolution for a restricted key', async () => {
     const scopes = ['read:milestones', 'write:contacts'];
-    const { id, key } = issueKey({ scopes });
-    expect(resolveApiKey(key)).toEqual({ scout_wallet: SCOUT, id, scopes });
+    const { id, key } = await issueKey({ scopes });
+    expect(await resolveApiKey(key)).toEqual({ scout_wallet: SCOUT, id, scopes });
   });
 });
 
@@ -183,12 +185,12 @@ describe('resolveApiKey uses an indexed lookup (#1033)', () => {
 describe('resolution cost does not grow with the number of stored keys (#1033)', () => {
   const KEY_COUNT = 2_000;
 
-  it(`resolves one key out of ${KEY_COUNT} with a single candidate lookup`, () => {
+  it(`resolves one key out of ${KEY_COUNT} with a single candidate lookup`, async () => {
     // Seed a large active key set — the exact condition that made the old
     // implementation pay for a full table read plus n SHA-256 computations.
     let target: { id: number; key: string; lookupHash: string } | null = null;
     for (let i = 0; i < KEY_COUNT; i++) {
-      const issued = issueKey();
+      const issued = await issueKey();
       // Pick a key from the middle so neither insertion order nor row id
       // could make this accidentally cheap.
       if (i === Math.floor(KEY_COUNT / 2)) target = issued;
@@ -200,7 +202,7 @@ describe('resolution cost does not grow with the number of stored keys (#1033)',
     const byLookup = jest.spyOn(db, 'getActiveApiKeyByLookupHash');
     const scan = jest.spyOn(db, 'getActiveApiKeysAwaitingLookupHash');
 
-    const resolved = resolveApiKey(target!.key);
+    const resolved = await resolveApiKey(target!.key);
 
     expect(resolved).toEqual({ scout_wallet: SCOUT, id: target!.id, scopes: null });
     // ONE candidate row considered, regardless of KEY_COUNT.
@@ -234,9 +236,9 @@ describe('resolution cost does not grow with the number of stored keys (#1033)',
 
 describe('keys issued before db/024 (lookup_hash IS NULL)', () => {
   /** Insert a key the way rows looked before migration 024: no lookup_hash. */
-  function issueLegacyKey(): { id: number; key: string; lookupHash: string } {
+  async function issueLegacyKey(): Promise<{ id: number; key: string; lookupHash: string }> {
     const { key, keyHash, lookupHash } = generateApiKey();
-    const id = db.insertApiKey({
+    const id = await db.insertApiKey({
       key_hash: keyHash,
       scout_wallet: SCOUT,
       label: 'pre-024',
@@ -245,35 +247,35 @@ describe('keys issued before db/024 (lookup_hash IS NULL)', () => {
     return { id, key, lookupHash };
   }
 
-  it('still authenticates, and is backfilled onto the indexed path on first use', () => {
-    const { id, key, lookupHash } = issueLegacyKey();
+  it('still authenticates, and is backfilled onto the indexed path on first use', async () => {
+    const { id, key, lookupHash } = await issueLegacyKey();
 
     expect(storedLookupHash(id)).toBeNull();
 
     // First use: indexed lookup misses, transitional path verifies and heals.
-    expect(resolveApiKey(key)).toEqual({ scout_wallet: SCOUT, id, scopes: null });
+    expect(await resolveApiKey(key)).toEqual({ scout_wallet: SCOUT, id, scopes: null });
 
     expect(storedLookupHash(id)).toBe(lookupHash);
   });
 
-  it('second use takes the indexed path only — the fallback is not the hot path', () => {
-    const { id, key } = issueLegacyKey();
+  it('second use takes the indexed path only — the fallback is not the hot path', async () => {
+    const { id, key } = await issueLegacyKey();
 
-    resolveApiKey(key); // heals
+    await resolveApiKey(key); // heals
 
     const byLookup = jest.spyOn(db, 'getActiveApiKeyByLookupHash');
     const scan = jest.spyOn(db, 'getActiveApiKeysAwaitingLookupHash');
 
-    expect(resolveApiKey(key)).toEqual({ scout_wallet: SCOUT, id, scopes: null });
+    expect(await resolveApiKey(key)).toEqual({ scout_wallet: SCOUT, id, scopes: null });
     expect(byLookup).toHaveBeenCalledTimes(1);
     expect(scan).not.toHaveBeenCalled();
   });
 
-  it('a revoked pre-migration key is never resolved or backfilled', () => {
-    const { id, key } = issueLegacyKey();
-    expect(db.revokeApiKeyById(id, SCOUT)).toBe(true);
+  it('a revoked pre-migration key is never resolved or backfilled', async () => {
+    const { id, key } = await issueLegacyKey();
+    expect(await db.revokeApiKeyById(id, SCOUT)).toBe(true);
 
-    expect(resolveApiKey(key)).toBeNull();
+    expect(await resolveApiKey(key)).toBeNull();
 
     expect(storedLookupHash(id)).toBeNull();
   });

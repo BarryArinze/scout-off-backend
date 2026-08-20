@@ -36,8 +36,13 @@ jest.mock('../../src/db', () => ({
   insertApiKey: jest.fn(),
   listApiKeysByWallet: jest.fn().mockReturnValue([]),
   revokeApiKeyById: jest.fn(),
+  getApiKeyById: jest.fn(),
+  scheduleApiKeyRevocation: jest.fn(),
   getApiKeyByHash: jest.fn().mockReturnValue(null),
   getAllActiveApiKeys: jest.fn().mockReturnValue([]),
+  getActiveApiKeyByLookupHash: jest.fn().mockReturnValue(null),
+  getActiveApiKeysAwaitingLookupHash: jest.fn().mockReturnValue([]),
+  setApiKeyLookupHash: jest.fn(),
   touchApiKeyLastUsed: jest.fn().mockResolvedValue(undefined),
   // bookmarks
   insertBookmark: jest.fn(),
@@ -68,6 +73,8 @@ import {
   insertApiKey,
   listApiKeysByWallet,
   revokeApiKeyById,
+  getApiKeyById,
+  scheduleApiKeyRevocation,
   getActiveApiKeyByLookupHash,
   getActiveApiKeysAwaitingLookupHash,
   setApiKeyLookupHash,
@@ -77,6 +84,8 @@ import {
 const mockInsertApiKey    = insertApiKey    as jest.Mock;
 const mockListApiKeys     = listApiKeysByWallet as jest.Mock;
 const mockRevokeApiKey    = revokeApiKeyById as jest.Mock;
+const mockGetApiKeyById   = getApiKeyById as jest.Mock;
+const mockScheduleRevoke  = scheduleApiKeyRevocation as jest.Mock;
 const mockGetByLookup     = getActiveApiKeyByLookupHash as jest.Mock;
 const mockGetPending      = getActiveApiKeysAwaitingLookupHash as jest.Mock;
 const mockSetLookupHash   = setApiKeyLookupHash as jest.Mock;
@@ -149,60 +158,13 @@ describe('generateApiKey / verifyApiKey (unit)', () => {
 describe('resolveApiKey (unit)', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('returns null when getAllActiveApiKeys returns empty array', async () => {
-    mockGetAllActive.mockReturnValueOnce([]);
-    expect(await resolveApiKey('somekey')).toBeNull();
-  });
-
-  it('returns scout_wallet, id, and parsed scopes when key matches', async () => {
-    const { key, keyHash } = generateApiKey();
-    mockGetAllActive.mockReturnValueOnce([
-      { id: 42, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'test', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null },
-    ]);
-    const result = await resolveApiKey(key);
-    // Legacy key: null scopes → parsed as null (unrestricted) for the shared
-    // scope contract (#1019).
-    expect(result).toEqual({ scout_wallet: SCOUT_A, id: 42, scopes: null });
-  });
-
-  it('resolves the parsed scope list for a restricted key', async () => {
-    const { key, keyHash } = generateApiKey();
-    mockGetAllActive.mockReturnValueOnce([
-      {
-        id: 43,
-        key_hash: keyHash,
-        scout_wallet: SCOUT_A,
-        label: 'restricted',
-        created_at: 0,
-        last_used_at: null,
-        revoked_at: null,
-        scopes: JSON.stringify(['read:milestones', 'write:contacts']),
-        rate_limit_per_minute: null,
-      },
-    ]);
-    const result = await resolveApiKey(key);
-    expect(result).toEqual({
-      scout_wallet: SCOUT_A,
-      id: 43,
-      scopes: ['read:milestones', 'write:contacts'],
-    });
-  });
-
-  it('returns null when no key matches', async () => {
-    const { keyHash } = generateApiKey();
-    mockGetAllActive.mockReturnValueOnce([
-      { id: 1, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null },
-    ]);
-    expect(await resolveApiKey('completely-different-key')).toBeNull();
-  });
-
   // ── #1033: the lookup value must not become the authentication proof ───────
 
-  it('locates the candidate with one indexed query — never a full-table scan', () => {
+  it('locates the candidate with one indexed query — never a full-table scan', async () => {
     const { key, keyHash, lookupHash } = generateApiKey();
     seedIndexedKey({ id: 44, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null, lookup_hash: lookupHash });
 
-    expect(resolveApiKey(key)).not.toBeNull();
+    expect(await resolveApiKey(key)).not.toBeNull();
 
     // Exactly one targeted lookup, keyed by the derived lookup hash…
     expect(mockGetByLookup).toHaveBeenCalledTimes(1);
@@ -211,7 +173,30 @@ describe('resolveApiKey (unit)', () => {
     expect(mockGetPending).not.toHaveBeenCalled();
   });
 
-  it('rejects a key whose lookup hash hits a row but whose raw key fails verification', () => {
+  it('resolves the parsed scope list for a restricted key', async () => {
+    const { key, keyHash, lookupHash } = generateApiKey();
+    seedIndexedKey({
+      id: 43,
+      key_hash: keyHash,
+      scout_wallet: SCOUT_A,
+      label: 'restricted',
+      created_at: 0,
+      last_used_at: null,
+      revoked_at: null,
+      scopes: JSON.stringify(['read:milestones', 'write:contacts']),
+      rate_limit_per_minute: null,
+      lookup_hash: lookupHash,
+    });
+
+    const result = await resolveApiKey(key);
+    expect(result).toEqual({
+      scout_wallet: SCOUT_A,
+      id: 43,
+      scopes: ['read:milestones', 'write:contacts'],
+    });
+  });
+
+  it('rejects a key whose lookup hash hits a row but whose raw key fails verification', async () => {
     // Simulates the security-critical case: a caller who somehow presents a
     // value that locates a row must still fail the salted key_hash check.
     const other = generateApiKey();
@@ -229,31 +214,37 @@ describe('resolveApiKey (unit)', () => {
       lookup_hash: attacker.lookupHash,
     });
 
-    expect(resolveApiKey(attacker.key)).toBeNull();
+    expect(await resolveApiKey(attacker.key)).toBeNull();
     // A located-but-unverified row must not fall through to the legacy scan.
     expect(mockGetPending).not.toHaveBeenCalled();
   });
 
-  it('returns null for an empty API key without querying the database', () => {
-    expect(resolveApiKey('')).toBeNull();
+  it('returns null for an empty API key without querying the database', async () => {
+    expect(await resolveApiKey('')).toBeNull();
     expect(mockGetByLookup).not.toHaveBeenCalled();
     expect(mockGetPending).not.toHaveBeenCalled();
   });
 
+  it('returns null when no key matches anything', async () => {
+    mockGetByLookup.mockReturnValue(null);
+    mockGetPending.mockReturnValue([]);
+    expect(await resolveApiKey('completely-unknown-key')).toBeNull();
+  });
+
   // ── #1033: pre-migration keys keep working and heal themselves ─────────────
 
-  it('resolves a pre-migration key (lookup_hash NULL) and backfills its lookup hash', () => {
+  it('resolves a pre-migration key (lookup_hash NULL) and backfills its lookup hash', async () => {
     const { key, keyHash, lookupHash } = generateApiKey();
     mockGetByLookup.mockReturnValue(null);
     mockGetPending.mockReturnValue([
       { id: 46, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'legacy', created_at: 0, last_used_at: null, revoked_at: null, scopes: null, rate_limit_per_minute: null, lookup_hash: null },
     ]);
 
-    expect(resolveApiKey(key)).toEqual({ scout_wallet: SCOUT_A, id: 46, scopes: null });
+    expect(await resolveApiKey(key)).toEqual({ scout_wallet: SCOUT_A, id: 46, scopes: null });
     expect(mockSetLookupHash).toHaveBeenCalledWith(46, lookupHash);
   });
 
-  it('still authenticates a pre-migration key when persisting the backfill fails', () => {
+  it('still authenticates a pre-migration key when persisting the backfill fails', async () => {
     const { key, keyHash } = generateApiKey();
     mockGetByLookup.mockReturnValue(null);
     mockGetPending.mockReturnValue([
@@ -261,7 +252,7 @@ describe('resolveApiKey (unit)', () => {
     ]);
     mockSetLookupHash.mockImplementationOnce(() => { throw new Error('db down'); });
 
-    expect(resolveApiKey(key)).toEqual({ scout_wallet: SCOUT_A, id: 47, scopes: null });
+    expect(await resolveApiKey(key)).toEqual({ scout_wallet: SCOUT_A, id: 47, scopes: null });
   });
 });
 
@@ -421,6 +412,189 @@ describe('DELETE /api/scouts/:wallet/api-keys/:id', () => {
 
     expect(res.status).toBe(403);
     expect(mockRevokeApiKey).not.toHaveBeenCalled();
+  });
+});
+
+// ─── POST /api/scouts/:wallet/api-keys/:id/rotate (#676) ────────────────────
+
+describe('POST /api/scouts/:wallet/api-keys/:id/rotate', () => {
+  beforeEach(() => jest.clearAllMocks());
+
+  function mockOldKey(overrides: Partial<{ label: string; scopes: string | null; revoked_at: number | null }> = {}) {
+    mockGetApiKeyById.mockReturnValueOnce({
+      id: 3,
+      key_hash: 'somesalt:somehash',
+      scout_wallet: SCOUT_A,
+      label: 'CI pipeline',
+      created_at: 0,
+      last_used_at: null,
+      revoked_at: null,
+      scopes: null,
+      rate_limit_per_minute: null,
+      lookup_hash: 'v1:deadbeef',
+      revoke_after: null,
+      ...overrides,
+    });
+  }
+
+  it('issues a new working key and schedules the old one for revocation with the default 24h grace period', async () => {
+    mockOldKey();
+    mockInsertApiKey.mockReturnValueOnce(8);
+    mockScheduleRevoke.mockReturnValueOnce(true);
+
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({});
+
+    expect(res.status).toBe(201);
+    expect(res.body.success).toBe(true);
+    expect(res.body.data.newKey.id).toBe(8);
+    expect(res.body.data.newKey.key).toMatch(/^[0-9a-f]{64}$/);
+    expect(res.body.data.newKey.label).toBe('CI pipeline');
+    expect(res.body.data.oldKey.id).toBe(3);
+    // Default grace period is 24h.
+    expect(res.body.data.oldKey.revokesAt).toBeGreaterThanOrEqual(before + 24 * 60 * 60);
+    expect(mockScheduleRevoke).toHaveBeenCalledWith(3, SCOUT_A, res.body.data.oldKey.revokesAt);
+  });
+
+  it('respects a caller-supplied gracePeriodSeconds', async () => {
+    mockOldKey();
+    mockInsertApiKey.mockReturnValueOnce(9);
+    mockScheduleRevoke.mockReturnValueOnce(true);
+
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ gracePeriodSeconds: 60 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.oldKey.revokesAt).toBeGreaterThanOrEqual(before + 60);
+    expect(res.body.data.oldKey.revokesAt).toBeLessThan(before + 24 * 60 * 60);
+    expect(mockScheduleRevoke).toHaveBeenCalledWith(3, SCOUT_A, res.body.data.oldKey.revokesAt);
+  });
+
+  it('a gracePeriodSeconds of 0 schedules immediate revocation', async () => {
+    mockOldKey();
+    mockInsertApiKey.mockReturnValueOnce(11);
+    mockScheduleRevoke.mockReturnValueOnce(true);
+
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ gracePeriodSeconds: 0 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.oldKey.revokesAt).toBeGreaterThanOrEqual(before);
+    expect(res.body.data.oldKey.revokesAt).toBeLessThan(before + 5);
+  });
+
+  it('inherits the old key label and scopes onto the replacement', async () => {
+    mockOldKey({ scopes: JSON.stringify(['read:milestones', 'write:contacts']) });
+    mockInsertApiKey.mockReturnValueOnce(10);
+    mockScheduleRevoke.mockReturnValueOnce(true);
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({});
+
+    expect(res.body.data.newKey.label).toBe('CI pipeline');
+    expect(res.body.data.newKey.scopes).toEqual(['read:milestones', 'write:contacts']);
+    const insertArg = mockInsertApiKey.mock.calls[0][0];
+    expect(insertArg.scopes).toEqual(['read:milestones', 'write:contacts']);
+    expect(insertArg.label).toBe('CI pipeline');
+  });
+
+  it('only persists the new key hash — never the plaintext', async () => {
+    mockOldKey();
+    mockInsertApiKey.mockReturnValueOnce(12);
+    mockScheduleRevoke.mockReturnValueOnce(true);
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({});
+
+    const plaintextKey = res.body.data.newKey.key;
+    const insertArg = mockInsertApiKey.mock.calls[0][0];
+    expect(insertArg.key_hash).not.toBe(plaintextKey);
+    expect(insertArg.key_hash).not.toContain(plaintextKey);
+    expect(insertArg.lookup_hash).toMatch(/^v1:[0-9a-f]{64}$/);
+  });
+
+  it('returns 400 for a negative gracePeriodSeconds', async () => {
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ gracePeriodSeconds: -1 });
+
+    expect(res.status).toBe(400);
+    expect(mockInsertApiKey).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 for a gracePeriodSeconds beyond the 7-day cap', async () => {
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ gracePeriodSeconds: 8 * 24 * 60 * 60 });
+
+    expect(res.status).toBe(400);
+    expect(mockInsertApiKey).not.toHaveBeenCalled();
+  });
+
+  it('returns 400 for an invalid id', async () => {
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/not-a-number/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({});
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 when the key does not exist', async () => {
+    mockGetApiKeyById.mockReturnValueOnce(null);
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/999/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({});
+
+    expect(res.status).toBe(404);
+    expect(mockInsertApiKey).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when the key is already revoked', async () => {
+    mockOldKey({ revoked_at: 12345 });
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({});
+
+    expect(res.status).toBe(404);
+    expect(mockInsertApiKey).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 for cross-wallet rotation', async () => {
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutBToken}`)
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(mockGetApiKeyById).not.toHaveBeenCalled();
+  });
+
+  it('returns 401 with no token', async () => {
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .send({});
+
+    expect(res.status).toBe(401);
   });
 });
 

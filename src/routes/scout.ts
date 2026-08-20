@@ -23,7 +23,7 @@ import {
   updatePlayerNote,
   deletePlayerNote,
 } from '../controllers/scoutNotesController';
-import { issueApiKey, listApiKeys, revokeApiKey } from '../controllers/apiKeyController';
+import { issueApiKey, listApiKeys, revokeApiKey, rotateApiKey } from '../controllers/apiKeyController';
 import {
   addBookmark,
   removeBookmark,
@@ -448,6 +448,25 @@ router.route('/:wallet/api-keys')
 router.route('/:wallet/api-keys/:id')
   .delete(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:api_keys'), revokeApiKey)
   .all(methodNotAllowed(['DELETE']));
+
+/**
+ * POST /api/scouts/:wallet/api-keys/:id/rotate
+ * Atomically issue a replacement key and schedule the old one for revocation
+ * after a grace period, instead of issuing and revoking as two separate,
+ * non-atomic requests (#676). The replacement inherits the old key's label
+ * and scopes. The old key keeps authenticating until `oldKey.revokesAt`.
+ *
+ * @param wallet {string} - Scout's Stellar public key
+ * @param id {integer} - API key row ID to rotate
+ * @body { gracePeriodSeconds?: number } - How long the old key stays valid (default 24h, max 7d); 0 revokes it immediately
+ * @response 201 { success: true, data: { newKey: { id, key, label, created_at, scopes }, oldKey: { id, revokesAt } } }
+ * @response 400 { success: false, error: string } - Invalid id or gracePeriodSeconds
+ * @response 404 { success: false, error: string } - API key not found (or already revoked)
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/api-keys/:id/rotate')
+  .post(requireRole('scout'), requireWalletOwner(), requireApiKeyScope('write:api_keys'), rotateApiKey)
+  .all(methodNotAllowed(['POST']));
 
 // ─── Scout bookmarks (#487) ───────────────────────────────────────────────────
 
