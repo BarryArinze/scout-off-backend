@@ -109,6 +109,13 @@ Successful response:
 - `account` is the authenticated Stellar account.
 - `expiresAt` is the UNIX timestamp when the token expires.
 
+Each challenge is single-use: `verifyAndIssueToken` tracks the nonce (the
+challenge's `manageData` value) of every challenge it has successfully
+exchanged for a token, keyed for the duration of the challenge's own 5-minute
+TTL. Resubmitting the identical signed challenge — e.g. one captured via a
+compromised client or a leaked request log — is rejected with `Challenge has
+already been used` (#693) instead of minting another token.
+
 ## JWT Claims Structure
 
 The backend issues JWTs with the following standard claims:
