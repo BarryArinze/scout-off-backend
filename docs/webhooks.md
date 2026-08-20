@@ -53,6 +53,9 @@ new field.
 
 Delivery uses exponential backoff (3 attempts by default: 500ms, then 1000ms
 between attempts) via `postWebhookWithRetry` in `src/services/webhooks.ts`.
+Each individual attempt is bounded by `WEBHOOK_TIMEOUT_MS` (default: 10s) — a
+subscriber that accepts the connection but never responds is aborted and the
+attempt treated as a failure, rather than hanging indefinitely (#691).
 
 ## Verifying the signature
 
