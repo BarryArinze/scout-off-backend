@@ -242,6 +242,56 @@ describe('sep10', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Replay / nonce consumption (#693)
+  // ---------------------------------------------------------------------------
+  describe('challenge replay protection', () => {
+    it('rejects a second token exchange using the identical signed challenge', () => {
+      const xdr = buildChallenge(clientKeypair.publicKey());
+      const tx = new Transaction(xdr, Networks.TESTNET);
+      tx.sign(clientKeypair);
+      const signedXdr = tx.toXDR();
+
+      // First exchange succeeds and consumes the challenge's nonce.
+      const { token, account } = verifyAndIssueToken(signedXdr);
+      expect(typeof token).toBe('string');
+      expect(account).toBe(clientKeypair.publicKey());
+
+      // A second exchange with the exact same signed challenge — as an
+      // attacker replaying a captured request would attempt — must be
+      // rejected rather than minting another token.
+      expect(() => verifyAndIssueToken(signedXdr)).toThrow('Challenge has already been used');
+    });
+
+    it('does not consume the nonce when an earlier verification step fails', () => {
+      // Unsigned challenge — fails signature verification before the nonce
+      // would ever be recorded as consumed.
+      const xdr = buildChallenge(clientKeypair.publicKey());
+      expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge signature');
+
+      // Now sign it properly — this must still succeed, proving the failed
+      // attempt above did not mark the nonce as used.
+      const tx = new Transaction(xdr, Networks.TESTNET);
+      tx.sign(clientKeypair);
+      const signedXdr = tx.toXDR();
+      const { token } = verifyAndIssueToken(signedXdr);
+      expect(typeof token).toBe('string');
+    });
+
+    it('allows two different challenges (distinct nonces) to each be redeemed once', () => {
+      const xdrA = buildChallenge(clientKeypair.publicKey());
+      const txA = new Transaction(xdrA, Networks.TESTNET);
+      txA.sign(clientKeypair);
+
+      const xdrB = buildChallenge(clientKeypair.publicKey());
+      const txB = new Transaction(xdrB, Networks.TESTNET);
+      txB.sign(clientKeypair);
+
+      expect(() => verifyAndIssueToken(txA.toXDR())).not.toThrow();
+      expect(() => verifyAndIssueToken(txB.toXDR())).not.toThrow();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Cross-instance verification (horizontal scaling)
   // ---------------------------------------------------------------------------
   /**

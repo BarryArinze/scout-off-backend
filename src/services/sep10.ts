@@ -49,6 +49,26 @@ const CHALLENGE_TTL_SECONDS = 300; // 5 min to sign the challenge
 const TOKEN_TTL_SECONDS = 86400;   // 24 h JWT validity
 
 /**
+ * Tracks nonces (the base64-encoded manageData value) of SEP-10 challenges
+ * that have already been redeemed for a token, so a captured signed
+ * challenge can't be replayed against POST /auth/token for as long as its
+ * TTL window remains valid (#693).
+ *
+ * Keyed by nonce, valued by the challenge's own `maxTime` (epoch seconds) —
+ * entries are pruned once that time has passed, since an expired challenge
+ * is already rejected by the TTL check and doesn't need tracking anymore.
+ */
+const consumedChallengeNonces = new Map<string, number>();
+
+function pruneConsumedChallengeNonces(nowSeconds: number): void {
+  for (const [nonce, expiresAt] of consumedChallengeNonces) {
+    if (expiresAt <= nowSeconds) {
+      consumedChallengeNonces.delete(nonce);
+    }
+  }
+}
+
+/**
  * Returns the server keypair used for signing challenges.
  * Exposed for verification logic and testing.
  */
@@ -192,6 +212,18 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
     }
   });
   if (!clientSigned) throw new Error('Invalid challenge signature');
+
+  // 7. Reject replay of an already-redeemed challenge. SEP-10 intends each
+  // challenge to be single-use; without this check, a captured signed
+  // challenge can be resubmitted for a fresh token as many times as desired
+  // within its TTL window.
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  pruneConsumedChallengeNonces(nowSeconds);
+  const nonceKey = manageDataOp.value.toString('base64');
+  if (consumedChallengeNonces.has(nonceKey)) {
+    throw new Error('Challenge has already been used');
+  }
+  consumedChallengeNonces.set(nonceKey, maxTime > 0 ? maxTime : nowSeconds + CHALLENGE_TTL_SECONDS);
 
   // Issue JWT with client account, role, and a unique JTI for revocation support
   const jti = crypto.randomUUID();
