@@ -198,10 +198,11 @@ Comment on the GitHub issue to indicate you're working on it. Maintainers will a
 ### 2. Make Changes and Test
 
 ```bash
-npm run dev           # Start dev server with hot-reload
-npm run test          # Run full test suite
-npm run lint          # Check code style
-npm audit             # Check for security vulnerabilities
+npm run dev                  # Start dev server with hot-reload
+npm run test                 # Run full test suite
+npm run lint                 # Check code style
+npm run check:sql-injection  # Scan src/db for unsafe SQL string interpolation
+npm audit                    # Check for security vulnerabilities
 ```
 
 ### 3. Commit with Clear Messages
@@ -303,6 +304,11 @@ npx lint-staged
 - **Linting**: No linting warnings
   ```bash
   npm run lint
+  ```
+
+- **SQL Injection Check**: `src/db/*.ts` must not splice values into SQL via string interpolation; use parameterized `?` placeholders instead
+  ```bash
+  npm run check:sql-injection
   ```
 
 - **Types**: Use strict TypeScript; avoid `any` types where possible

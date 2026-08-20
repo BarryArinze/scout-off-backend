@@ -651,6 +651,7 @@ export async function getPendingMilestones(options: GetPendingMilestonesOptions)
   const whereClause = whereConditions.length > 0 ? 'WHERE ' + whereConditions.join(' AND ') : '';
 
   // Get total count
+  // sql-injection-check-ignore: `whereClause` is built from hardcoded `col = ?` conditions; values are bound via params.
   const countSql = `SELECT COUNT(*) AS total FROM pending_milestones pm
                     LEFT JOIN players p ON pm.player_id = p.player_id
                     ${whereClause}`;
@@ -661,6 +662,7 @@ export async function getPendingMilestones(options: GetPendingMilestonesOptions)
   const page = options.page || 1;
   const pageSize = options.pageSize || 20;
   const offset = (page - 1) * pageSize;
+  // sql-injection-check-ignore: `whereClause` is built from hardcoded `col = ?` conditions; values are bound via params.
   const dataSql = `SELECT pm.* FROM pending_milestones pm
                    LEFT JOIN players p ON pm.player_id = p.player_id
                    ${whereClause}
@@ -737,6 +739,7 @@ export async function queryPlayers(opts: QueryPlayersOptions): Promise<PlayerRow
   const { where, params } = buildPlayerWhereClause(opts);
   const limit = opts.limit ?? 20;
   const offset = opts.offset ?? 0;
+  // sql-injection-check-ignore: `where` is built from hardcoded `col = ?` conditions; values are bound via params.
   const sql = `SELECT * FROM players ${where} ORDER BY created_at ASC LIMIT ? OFFSET ?`;
   return timedQueryAsync(sql, () =>
     getDriver().all<PlayerRow>(sql, [...params, limit, offset])
@@ -745,6 +748,7 @@ export async function queryPlayers(opts: QueryPlayersOptions): Promise<PlayerRow
 
 export async function countPlayers(opts: Omit<QueryPlayersOptions, 'limit' | 'offset'>): Promise<number> {
   const { where, params } = buildPlayerWhereClause(opts);
+  // sql-injection-check-ignore: `where` is built from hardcoded `col = ?` conditions; values are bound via params.
   const sql = `SELECT COUNT(*) as count FROM players ${where}`;
   return timedQueryAsync(sql, async () => {
     const row = await getDriver().get<{ count: number | string }>(sql, params);
@@ -827,6 +831,7 @@ export async function searchPlayers(opts: SearchPlayersOptions): Promise<SearchP
     }
 
     const fetchLimit = useCursor ? limit + 1 : limit;
+    // sql-injection-check-ignore: baseWhere/cursorWhere use `?` placeholders for values; offsetClause embeds a validated number.
     const sql = `WITH scored AS (
       SELECT *,
         (CAST(progress_level AS REAL) * 10.0) +
@@ -881,6 +886,7 @@ export async function searchPlayers(opts: SearchPlayersOptions): Promise<SearchP
   }
 
   const fetchLimit = useCursor ? limit + 1 : limit;
+  // sql-injection-check-ignore: baseWhere/cursorWhere use `?` placeholders for values; orderColumn/direction are drawn from fixed enums; offsetClause embeds a validated number.
   const sql = `SELECT * FROM players ${baseWhere} ${cursorWhere} ORDER BY ${orderColumn} ${direction}, player_id ASC LIMIT ? ${offsetClause}`;
   const allParams = [...params, ...cursorParams, fetchLimit];
   const rows = await timedQueryAsync(sql, () =>
@@ -1165,6 +1171,7 @@ function dateBucketExpr(column: string): string {
  * Get daily counts of new players registered within a time window.
  */
 export async function getNewPlayersTimeSeries(startDateMs: number, endDateMs: number): Promise<TimeSeriesPoint[]> {
+  // sql-injection-check-ignore: dateBucketExpr takes a hardcoded column literal, not user input; the SQL it returns is driver-specific date formatting.
   const sql = `
     SELECT ${dateBucketExpr('created_at')} as date, COUNT(*) as count
     FROM players
@@ -1199,6 +1206,7 @@ export function getMilestonesApprovedTimeSeries(startDateMs: number, endDateMs: 
  * Get daily counts of contact unlocks within a time window.
  */
 export async function getContactUnlocksTimeSeries(startDateMs: number, endDateMs: number): Promise<TimeSeriesPoint[]> {
+  // sql-injection-check-ignore: dateBucketExpr takes a hardcoded column literal, not user input; the SQL it returns is driver-specific date formatting.
   const sql = `
     SELECT ${dateBucketExpr('unlocked_at')} as date, COUNT(*) as count
     FROM contact_unlocks
@@ -1216,6 +1224,7 @@ export async function getContactUnlocksTimeSeries(startDateMs: number, endDateMs
  * Get daily counts of subscriptions started within a time window.
  */
 export async function getSubscriptionsStartedTimeSeries(startDateMs: number, endDateMs: number): Promise<TimeSeriesPoint[]> {
+  // sql-injection-check-ignore: dateBucketExpr takes a hardcoded column literal, not user input; the SQL it returns is driver-specific date formatting.
   const sql = `
     SELECT ${dateBucketExpr('created_at')} as date, COUNT(*) as count
     FROM subscriptions
@@ -1233,6 +1242,7 @@ export async function getSubscriptionsStartedTimeSeries(startDateMs: number, end
  * Get daily counts of new players grouped by region within a time window.
  */
 export async function getNewPlayersByRegionTimeSeries(startDateMs: number, endDateMs: number): Promise<RegionBreakdownPoint[]> {
+  // sql-injection-check-ignore: dateBucketExpr takes a hardcoded column literal, not user input; the SQL it returns is driver-specific date formatting.
   const sql = `
     SELECT ${dateBucketExpr('created_at')} as date, region, COUNT(*) as count
     FROM players
@@ -1351,6 +1361,7 @@ export async function getAuditLogs(filters: {
   const where = conditions.length ? 'WHERE ' + conditions.join(' AND ') : '';
   const limit = filters.limit ?? 50;
   const offset = filters.offset ?? 0;
+// sql-injection-check-ignore: `where` is built from hardcoded `col = ?` conditions; values are bound via params.
 const sql = `SELECT * FROM audit_log ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`;
   return timedQueryAsync(sql, () => getDriver().all<AuditLogRow>(sql, [...params, limit, offset]));
 }
@@ -1370,6 +1381,7 @@ export async function getAuditLogsCount(filters: {
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
 const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  // sql-injection-check-ignore: `where` is built from hardcoded `col = ?` conditions; values are bound via params.
   const sql = `SELECT COUNT(*) AS count FROM audit_log ${where}`;
   return timedQueryAsync(sql, async () => {
     const row = await getDriver().get<{ count: number | string }>(sql, params);
@@ -1395,6 +1407,7 @@ export async function getAllAuditLogRows(filters: {
   if (filters.eventSource) { conditions.push('event_source = ?'); params.push(filters.eventSource); }
   if (filters.actorWallet) { conditions.push('admin_wallet = ?'); params.push(filters.actorWallet); }
 const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  // sql-injection-check-ignore: `where` is built from hardcoded `col = ?` conditions; values are bound via params.
   const sql = `SELECT * FROM audit_log ${where} ORDER BY id ASC`;
   return timedQueryAsync(sql, () => getDriver().all<AuditLogRow>(sql, params));
 }
@@ -2146,6 +2159,7 @@ export async function updateSavedSearch(
   }
 
   params.push(id, scoutWallet);
+  // sql-injection-check-ignore: fields.join produces `col = ?` fragments only ("name = ?", "filters = ?"); values are bound via params.
   const sql = `UPDATE scout_saved_searches SET ${fields.join(', ')} WHERE id = ? AND scout_wallet = ?`;
   return timedQueryAsync(sql, async () => {
     const info = await getDriver().run(sql, params);

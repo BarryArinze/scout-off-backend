@@ -79,6 +79,9 @@ jobs:
       - name: Validate OpenAPI spec is in sync with route sources
         run: npm run validate:openapi
 
+      - name: Check for unsafe SQL string interpolation
+        run: npm run check:sql-injection
+
       # The Helm chart's defaults must stay internally consistent: SQLite is
       # single-process, so the default topology is one replica with HPA/PDB
       # disabled, and the SQLite + multi-replica combination must be loudly
