@@ -1721,6 +1721,15 @@ export interface ApiKeyRow {
    * src/utils/apiKeyLookup.ts.
    */
   lookup_hash: string | null;
+  /**
+   * Unix timestamp (seconds) after which this key stops authenticating
+   * (db/025_api_key_rotation.sql, #676). Set only by POST .../rotate, which
+   * schedules the *old* key for revocation after a grace period rather than
+   * revoking it immediately. NULL (the default) means no scheduled
+   * revocation. Enforced live by every active-key query — see
+   * getActiveApiKeyByLookupHash().
+   */
+  revoke_after: number | null;
 }
 
 /**
@@ -1744,10 +1753,11 @@ export async function insertApiKey(p: {
   label: string;
   created_at: number;
   scopes?: string[];
+  lookup_hash?: string;
 }): Promise<number> {
   const sql = `
-    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at, scopes)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at, scopes, lookup_hash)
+    VALUES (?, ?, ?, ?, ?, ?)
     RETURNING id
   `;
   return timedQueryAsync(sql, async () => {
@@ -1757,6 +1767,7 @@ export async function insertApiKey(p: {
       p.label,
       p.created_at,
       p.scopes ? JSON.stringify(p.scopes) : null,
+      p.lookup_hash ?? null,
     ]);
     return info.lastId;
   });
@@ -1794,18 +1805,59 @@ export async function revokeApiKeyById(id: number, scoutWallet: string): Promise
 }
 
 /**
+ * SQL fragment excluding both permanently revoked rows and rows past their
+ * scheduled rotation deadline (db/025_api_key_rotation.sql, #676). Shared by
+ * every "active key" query so a key mid-grace-period keeps authenticating
+ * right up to (and not past) `revoke_after`, with no background job needed
+ * to flip it over.
+ */
+const ACTIVE_KEY_SQL = `revoked_at IS NULL AND (revoke_after IS NULL OR revoke_after > ?)`;
+
+/**
  * Look up an API key row by its full hash value (including salt prefix).
- * Returns null when not found or already revoked.
+ * Returns null when not found, already revoked, or past its rotation
+ * grace-period deadline.
  */
 export async function getApiKeyByHash(keyHash: string): Promise<ApiKeyRow | null> {
-  const sql = `SELECT * FROM api_keys WHERE key_hash = ? AND revoked_at IS NULL LIMIT 1`;
+  const now = Math.floor(Date.now() / 1000);
+  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded `col IS NULL AND (col IS NULL OR col > ?)` fragment; values are bound via params.
+  const sql = `SELECT * FROM api_keys WHERE key_hash = ? AND ${ACTIVE_KEY_SQL} LIMIT 1`;
   return timedQueryAsync(sql, async () =>
-    (await getDriver().get<ApiKeyRow>(sql, [keyHash])) ?? null,
+    (await getDriver().get<ApiKeyRow>(sql, [keyHash, now])) ?? null,
   );
 }
 
 /**
- * Locate the single active (non-revoked) API key row carrying `lookupHash`.
+ * Look up an API key row by id, scoped to its owning scout wallet. Returns
+ * revoked and grace-period-scheduled rows too (unlike the active-key
+ * queries) — callers such as rotateApiKey need to see and validate the
+ * row's current state themselves.
+ */
+export async function getApiKeyById(id: number, scoutWallet: string): Promise<ApiKeyRow | null> {
+  const sql = `SELECT * FROM api_keys WHERE id = ? AND scout_wallet = ? LIMIT 1`;
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<ApiKeyRow>(sql, [id, scoutWallet])) ?? null,
+  );
+}
+
+/**
+ * Load every active API key row (not permanently revoked, and not past its
+ * rotation grace-period deadline). A full-table read — never used on the
+ * X-API-Key authentication hot path, which resolves a candidate with the
+ * single indexed lookup in getActiveApiKeyByLookupHash() instead (#1033).
+ * Kept for diagnostics/regression coverage only.
+ */
+export async function getAllActiveApiKeys(): Promise<ApiKeyRow[]> {
+  const now = Math.floor(Date.now() / 1000);
+  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded `col IS NULL AND (col IS NULL OR col > ?)` fragment; values are bound via params.
+  const sql = `SELECT * FROM api_keys WHERE ${ACTIVE_KEY_SQL}`;
+  return timedQueryAsync(sql, () => getDriver().all<ApiKeyRow>(sql, [now]));
+}
+
+/**
+ * Locate the single active API key row carrying `lookupHash` — excluding
+ * both permanently revoked rows and rows past their rotation grace-period
+ * deadline (db/025_api_key_rotation.sql, #676).
  *
  * This is the hot path for X-API-Key authentication (#1033): one indexed
  * equality lookup against the UNIQUE idx_api_keys_lookup_hash, replacing the
@@ -1814,18 +1866,62 @@ export async function getApiKeyByHash(keyHash: string): Promise<ApiKeyRow | null
  * Returning a row proves nothing on its own — the caller must still verify the
  * presented raw key against `key_hash`. See src/utils/apiKeyLookup.ts.
  */
-export async function getAllActiveApiKeys(): Promise<ApiKeyRow[]> {
-  const sql = `SELECT * FROM api_keys WHERE revoked_at IS NULL`;
-  return timedQueryAsync(sql, () => getDriver().all<ApiKeyRow>(sql));
+export async function getActiveApiKeyByLookupHash(lookupHash: string): Promise<ApiKeyRow | null> {
+  const now = Math.floor(Date.now() / 1000);
+  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded `col IS NULL AND (col IS NULL OR col > ?)` fragment; values are bound via params.
+  const sql = `SELECT * FROM api_keys WHERE lookup_hash = ? AND ${ACTIVE_KEY_SQL} LIMIT 1`;
+  return timedQueryAsync(sql, async () =>
+    (await getDriver().get<ApiKeyRow>(sql, [lookupHash, now])) ?? null,
+  );
+}
+
+/**
+ * Load active API key rows that predate db/024_api_key_lookup_hash.sql and
+ * have not yet been healed onto the indexed lookup path (#1033). Backed by
+ * the partial index idx_api_keys_lookup_pending, so this shrinks to an empty
+ * result — and an effectively free indexed probe — as keys are used. Also
+ * excludes rows past their rotation grace-period deadline (#676).
+ */
+export async function getActiveApiKeysAwaitingLookupHash(): Promise<ApiKeyRow[]> {
+  const now = Math.floor(Date.now() / 1000);
+  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded `col IS NULL AND (col IS NULL OR col > ?)` fragment; values are bound via params.
+  const sql = `SELECT * FROM api_keys WHERE lookup_hash IS NULL AND ${ACTIVE_KEY_SQL}`;
+  return timedQueryAsync(sql, () => getDriver().all<ApiKeyRow>(sql, [now]));
+}
+
+/**
+ * Schedule an active API key for revocation at `revokeAfter` (unix seconds)
+ * instead of revoking it immediately (#676). Used by key rotation to give
+ * callers a grace window to roll a replacement key out before the old one
+ * stops authenticating. A fresh call always overwrites any previously
+ * scheduled deadline on the row.
+ *
+ * Only schedules keys belonging to the given scout wallet, and only while
+ * not already permanently revoked. Returns true when a row was updated,
+ * false when not found, not owned by this wallet, or already revoked.
+ */
+export async function scheduleApiKeyRevocation(
+  id: number,
+  scoutWallet: string,
+  revokeAfter: number,
+): Promise<boolean> {
+  const sql = `
+    UPDATE api_keys SET revoke_after = ?
+    WHERE id = ? AND scout_wallet = ? AND revoked_at IS NULL
+  `;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [revokeAfter, id, scoutWallet]);
+    return info.changes > 0;
+  });
 }
 
 /**
  * Persist the derived lookup_hash for a pre-migration API key (#1033).
  * Only ever fills a NULL — an existing lookup value is never overwritten.
  */
-export function setApiKeyLookupHash(id: number, lookupHash: string): void {
+export async function setApiKeyLookupHash(id: number, lookupHash: string): Promise<void> {
   const sql = `UPDATE api_keys SET lookup_hash = ? WHERE id = ? AND lookup_hash IS NULL`;
-  timedQuery(sql, () => getDb().prepare(sql).run(lookupHash, id));
+  await timedQueryAsync(sql, () => getDriver().run(sql, [lookupHash, id]));
 }
 
 /**

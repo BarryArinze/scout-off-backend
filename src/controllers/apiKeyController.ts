@@ -20,6 +20,8 @@ import {
   insertApiKey,
   listApiKeysByWallet,
   revokeApiKeyById,
+  getApiKeyById,
+  scheduleApiKeyRevocation,
   getActiveApiKeyByLookupHash,
   getActiveApiKeysAwaitingLookupHash,
   setApiKeyLookupHash,
@@ -119,15 +121,47 @@ function toResolvedApiKey(row: ApiKeyRow): ResolvedApiKey {
  * circular dependency — auth.ts calls this function only at runtime via a
  * lazy require so the module graph stays acyclic at load time.
  */
-export async function resolveApiKey(rawKey: string): Promise<{ scout_wallet: string; id: number; scopes: string[] | null } | null> {
-  const rows: ApiKeyRow[] = await getAllActiveApiKeys();
-  for (const row of rows) {
-    if (verifyApiKey(rawKey, row.key_hash)) {
-      return {
-        scout_wallet: row.scout_wallet,
-        id: row.id,
-        scopes: parseApiKeyScopes(row.scopes, (message) => logger.warn(message)),
-      };
+export async function resolveApiKey(rawKey: string): Promise<ResolvedApiKey | null> {
+  if (!rawKey || typeof rawKey !== 'string') return null;
+
+  const lookupHash = deriveApiKeyLookupHash(rawKey);
+
+  // ── 1. Indexed lookup ──────────────────────────────────────────────────────
+  const candidate = await getActiveApiKeyByLookupHash(lookupHash);
+  if (candidate) {
+    // ── 2. Cryptographic verification against the salted stored hash ─────────
+    return verifyApiKey(rawKey, candidate.key_hash) ? toResolvedApiKey(candidate) : null;
+  }
+
+  return resolvePreMigrationApiKey(rawKey, lookupHash);
+}
+
+/**
+ * TRANSITIONAL fallback for keys issued before db/024_api_key_lookup_hash.sql.
+ *
+ * Those rows have `lookup_hash IS NULL` and cannot be backfilled in SQL: only
+ * a one-way salted hash of each key is stored, so the raw key needed to derive
+ * the lookup value simply does not exist server-side. Rather than force every
+ * scout to rotate, such a key is verified the old way *once* — against the
+ * strictly-shrinking set of not-yet-migrated rows, never the full table — and
+ * its lookup_hash is written on that first successful authentication, moving
+ * it onto the indexed path for good.
+ *
+ * The set is backed by the partial index idx_api_keys_lookup_pending, so once
+ * every active key has been healed this costs one empty indexed read. It is
+ * deliberately not a general-purpose fallback: a wrong or revoked key never
+ * reaches the full-table scan the old implementation performed.
+ */
+async function resolvePreMigrationApiKey(rawKey: string, lookupHash: string): Promise<ResolvedApiKey | null> {
+  const pending: ApiKeyRow[] = await getActiveApiKeysAwaitingLookupHash();
+  for (const row of pending) {
+    if (!verifyApiKey(rawKey, row.key_hash)) continue;
+    try {
+      await setApiKeyLookupHash(row.id, lookupHash);
+      logger.info({ action: 'api_key_lookup_hash_backfilled', keyId: row.id });
+    } catch {
+      // Best-effort: failing to persist the lookup value must never fail an
+      // otherwise valid authentication. The row is simply retried next time.
     }
     return toResolvedApiKey(row);
   }
@@ -144,6 +178,27 @@ const issueKeySchema = z.object({
    * perform operations covered by their granted scopes (#1019).
    */
   scopes: z.array(z.string()).optional(),
+});
+
+// ── Key rotation (#676) ─────────────────────────────────────────────────────
+
+/** Default grace period: the old key keeps authenticating for 24h post-rotation. */
+const DEFAULT_ROTATION_GRACE_PERIOD_SECONDS = 24 * 60 * 60;
+/** Upper bound on a caller-supplied grace period, to keep "grace" from becoming indefinite. */
+const MAX_ROTATION_GRACE_PERIOD_SECONDS = 7 * 24 * 60 * 60;
+
+const rotateKeySchema = z.object({
+  /**
+   * How long the old key keeps authenticating after rotation, in seconds.
+   * Omitted → DEFAULT_ROTATION_GRACE_PERIOD_SECONDS. 0 revokes the old key
+   * immediately, same as DELETE.
+   */
+  gracePeriodSeconds: z
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_ROTATION_GRACE_PERIOD_SECONDS)
+    .default(DEFAULT_ROTATION_GRACE_PERIOD_SECONDS),
 });
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
@@ -231,6 +286,9 @@ export async function listApiKeys(
         last_used_at: r.last_used_at ?? null,
         revoked: r.revoked_at !== null,
         revoked_at: r.revoked_at ?? null,
+        // Set only while a rotation grace period is in effect (#676); null
+        // once the key is either permanently revoked or never rotated.
+        scheduled_revocation_at: r.revoked_at === null ? (r.revoke_after ?? null) : null,
         // Empty array = legacy/unrestricted key; otherwise the granted scope list.
         scopes: r.scopes ? (JSON.parse(r.scopes) as string[]) : [],
       })),
@@ -267,6 +325,88 @@ export async function revokeApiKey(
     logger.info({ scout: req.params.wallet, action: 'api_key_revoked', keyId: id });
 
     res.json({ success: true, data: { id, revoked: true } });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * POST /api/scouts/:wallet/api-keys/:id/rotate
+ *
+ * Atomically issue a replacement key and schedule the old one for
+ * revocation after a grace period (default 24h, caller-configurable up to
+ * 7 days), instead of the caller having to issue-then-revoke as two
+ * separate, non-atomic requests (#676). The replacement key inherits the
+ * old key's label and scopes — rotation replaces credentials, not policy.
+ *
+ * The old key keeps authenticating until `oldKey.revokesAt`, giving the
+ * caller a window to roll the new key out everywhere it's consumed before
+ * the old one stops working.
+ */
+export async function rotateApiKey(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ success: false, error: 'Invalid API key id' });
+      return;
+    }
+
+    const parsed = rotateKeySchema.safeParse(req.body ?? {});
+    if (!parsed.success) {
+      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid body' });
+      return;
+    }
+
+    const oldRow = await getApiKeyById(id, req.params.wallet);
+    if (!oldRow || oldRow.revoked_at !== null) {
+      res.status(404).json({ success: false, error: 'API key not found' });
+      return;
+    }
+
+    const inheritedScopes = parseApiKeyScopes(oldRow.scopes, (message) => logger.warn(message));
+
+    const { key, keyHash, lookupHash } = generateApiKey();
+    const now = Math.floor(Date.now() / 1000);
+    const newId = await insertApiKey({
+      key_hash: keyHash,
+      scout_wallet: req.params.wallet,
+      label: oldRow.label,
+      created_at: now,
+      scopes: inheritedScopes ?? undefined,
+      lookup_hash: lookupHash,
+    });
+
+    const revokesAt = now + parsed.data.gracePeriodSeconds;
+    await scheduleApiKeyRevocation(id, req.params.wallet, revokesAt);
+
+    logger.info({
+      scout: req.params.wallet,
+      action: 'api_key_rotated',
+      oldKeyId: id,
+      newKeyId: newId,
+      revokesAt,
+    });
+
+    res.status(201).json({
+      success: true,
+      data: {
+        newKey: {
+          id: newId,
+          key,          // plaintext — returned once only
+          label: oldRow.label,
+          created_at: now,
+          scopes: inheritedScopes ?? [],
+        },
+        oldKey: {
+          id,
+          revokesAt,
+        },
+      },
+    });
   } catch (err) {
     next(err);
   }
