@@ -128,11 +128,6 @@ router.route('/:wallet/subscribe')
 /**
  * GET /api/scouts/:wallet/contacts
  *
- * GET /api/scouts/:wallet/contacts/:playerId
- */
-/**
- * GET /api/scouts/:wallet/contacts
- *
  * List all players this scout has unlocked contact details for. Supports an
  * optional `?playerId=` filter to check a single player.
  *
@@ -629,6 +624,9 @@ router.route('/:wallet/saved-searches/:id/run')
  *
  * Registration is subject to the default per-wallet rate limit (#1037).
  *
+ * @param wallet {string} - Scout's Stellar public key
+ * @response 200 { success: true, data: Array<{ id, url, secret, eventTypes, createdAt }> }
+ * @response 403 { success: false, error: string } - Wallet mismatch
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/webhooks')
@@ -663,6 +661,14 @@ router.route('/:wallet/webhooks/:id')
  * wallet (WEBHOOK_TEST_RATE_LIMIT_MAX / WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS).
  * Exceeding it returns 429 before any outbound request is attempted.
  *
+ * @param wallet {string} - Scout's Stellar public key
+ * @param id {integer} - Webhook subscription row ID
+ * @response 200 { success: true, data: { id, url, statusCode } }
+ * @response 400 { success: false, error: string } - Invalid subscription id
+ * @response 403 { success: false, error: string } - Wallet mismatch or subscription belongs to another scout
+ * @response 404 { success: false, error: string } - Subscription not found
+ * @response 429 { success: false, error: string } - Webhook-test rate limit exceeded
+ * @response 502 { success: false, error: string, data: { id, url, statusCode? } } - Remote server returned non-2xx or was unreachable
  * @auth Bearer (scout role required; wallet must match authenticated account)
  */
 router.route('/:wallet/webhooks/:id/test')

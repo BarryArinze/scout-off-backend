@@ -4389,7 +4389,7 @@
         ],
         "summary": "List all active subscriptions (secrets masked — only the last 4 hex chars visible).",
         "operationId": "listWebhooks",
-        "description": "List all active subscriptions (secrets masked — only the last 4 hex chars visible).",
+        "description": "List all active subscriptions (secrets masked — only the last 4 hex chars visible).\n\nRegistration is subject to the default per-wallet rate limit (#1037).",
         "parameters": [
           {
             "name": "wallet",
@@ -4531,7 +4531,7 @@
         ],
         "summary": "Send a test ping to the registered URL, signed with the subscription secret.",
         "operationId": "testWebhook",
-        "description": "Send a test ping to the registered URL, signed with the subscription secret.\nReturns 502 when the remote server does not respond with 2xx or is unreachable.",
+        "description": "Send a test ping to the registered URL, signed with the subscription secret.\nReturns 502 when the remote server does not respond with 2xx or is unreachable.\n\nRate limited separately from — and more tightly than — other scout write\nendpoints (#1037), since each call makes the backend issue an outbound\nHTTP request to a caller-supplied URL. Default: 5 requests/minute per\nwallet (WEBHOOK_TEST_RATE_LIMIT_MAX / WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS).\nExceeding it returns 429 before any outbound request is attempted.",
         "parameters": [
           {
             "name": "wallet",
@@ -4564,6 +4564,9 @@
           },
           "404": {
             "description": "{ success: false, error: string } - Subscription not found"
+          },
+          "429": {
+            "description": "{ success: false, error: string } - Webhook-test rate limit exceeded"
           },
           "502": {
             "description": "{ success: false, error: string, data: { id, url, statusCode? } } - Remote server returned non-2xx or was unreachable"
