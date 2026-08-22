@@ -158,12 +158,20 @@ with no support for concurrent access from multiple processes, so scaling to
 multiple pods while on SQLite would give every pod its own unshared, ephemeral
 database file (writes invisible across pods, data lost on restart).
 
-To scale horizontally you **must** switch to PostgreSQL first:
+To scale horizontally you **must** switch to PostgreSQL first. Add `DATABASE_URL`
+to the Kubernetes Secret (it contains credentials and must never live in the
+ConfigMap), then upgrade:
 
 ```bash
+# 1. Add DATABASE_URL to the existing Secret (or re-create it):
+kubectl create secret generic scout-off-secrets \
+  ... \
+  --from-literal=DATABASE_URL=postgresql://user:pass@host:5432/db \
+  --dry-run=client -o yaml | kubectl apply -f - --namespace <your-namespace>
+
+# 2. Switch the driver and enable scaling:
 helm upgrade --install scout-off-backend ./helm/scout-off-backend \
   --set env.DB_DRIVER=postgres \
-  --set env.DATABASE_URL=postgresql://user:pass@host:5432/db \
   --set replicaCount=3 \
   --set hpa.enabled=true
 ```
@@ -184,16 +192,39 @@ push.
 
 ### 1. Create the Kubernetes Secret
 
-Sensitive env vars (`CONTRACT_ID`, `JWT_SECRET`, and optional rotation keys) are
-sourced exclusively from a Kubernetes Secret — they are never stored in the
-ConfigMap or committed to source control.
+All sensitive env vars are sourced exclusively from a Kubernetes Secret — they
+are never stored in the ConfigMap or committed to source control.
 
 ```bash
 kubectl create secret generic scout-off-secrets \
-  --from-literal=CONTRACT_ID=<your-soroban-contract-id> \
   --from-literal=JWT_SECRET=<min-32-char-random-string> \
   --from-literal=SEP10_SERVER_SECRET=<stellar-secret-key-starting-with-S> \
+  --from-literal=PLATFORM_SECRET_KEY=<stellar-secret-key-starting-with-S> \
+  --from-literal=API_KEY_LOOKUP_SECRET=$(openssl rand -hex 32) \
+  --from-literal=ADMIN_WALLETS=<comma-separated-stellar-admin-addresses> \
+  --from-literal=PINATA_API_KEY=<your-pinata-api-key> \
+  --from-literal=PINATA_SECRET=<your-pinata-secret> \
+  --from-literal=WEBHOOK_SECRET_ENCRYPTION_KEY=$(openssl rand -hex 32) \
+  --from-literal=REGISTER_CONTRACT_ID=<deployed-register-contract-id> \
+  --from-literal=PROGRESS_CONTRACT_ID=<deployed-progress-contract-id> \
+  --from-literal=SUBSCRIPTION_CONTRACT_ID=<deployed-subscription-contract-id> \
+  --from-literal=CONNECTION_CONTRACT_ID=<deployed-connection-contract-id> \
   --namespace <your-namespace>
+```
+
+For PostgreSQL deployments, also add:
+```bash
+  --from-literal=DATABASE_URL=postgresql://user:pass@host:5432/db
+```
+
+Optional keys (only include when needed):
+```bash
+  --from-literal=CONTRACT_ID=<legacy-single-contract-id>        # backward compat
+  --from-literal=JWT_SECRET_PREVIOUS=<old-secret>               # during rotation
+  --from-literal=JWT_SECRET_PREVIOUS_UNTIL=<ISO-8601-datetime>  # during rotation
+  --from-literal=ADMIN_WALLET=<single-admin-address>            # backward compat
+  --from-literal=REDIS_URL=redis://:password@host:6379           # distributed cache
+  --from-literal=WEBHOOK_SECRET=<hmac-secret>                   # legacy WEBHOOK_URL
 ```
 
 > **Horizontal scaling note:** `SEP10_SERVER_SECRET` is the most important variable to
@@ -202,10 +233,9 @@ kubectl create secret generic scout-off-secrets \
 > key because the variable is absent), a challenge built by one pod will be
 > rejected by any other pod — causing intermittent, hard-to-diagnose auth
 > failures proportional to `(N-1)/N` where N is the replica count.
-> Store the key in the Kubernetes Secret (as shown above) and reference it in
-> the Deployment's `envFrom` / `env.valueFrom.secretKeyRef` block so all pods
-> share the exact same value. See
-> [docs/auth.md](docs/auth.md#sep-10-server-keypair-sep10_server_secret) for
+> Store the key in the Kubernetes Secret (as shown above) — the Deployment
+> template wires it via `secretKeyRef` so all pods share the exact same value.
+> See [docs/auth.md](docs/auth.md#sep-10-server-keypair-sep10_server_secret) for
 > generation instructions and the safe rotation procedure.
 
 ### JWT secret rotation runbook (zero-downtime dual-key)
