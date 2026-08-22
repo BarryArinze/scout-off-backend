@@ -90,6 +90,14 @@ jobs:
       - name: Validate Helm chart topology defaults
         run: bash scripts/validate-helm-chart.sh
 
+      # Every production-required env var from src/config.ts must be wired
+      # into the rendered Helm deployment manifest (issue #1043). This check
+      # renders the chart and greps for each required variable name, so a
+      # future change that adds a new required secret cannot silently omit
+      # the corresponding secretKeyRef without breaking CI.
+      - name: Validate Helm env-var wiring (issue #1043)
+        run: bash scripts/validate-helm-env-wiring.sh
+
       - name: Type check (src)
         run: node node_modules/.bin/tsc --noEmit
 
