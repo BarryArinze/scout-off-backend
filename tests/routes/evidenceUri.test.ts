@@ -14,7 +14,7 @@ async function getValidatorToken(): Promise<string> {
   tx.sign(kp);
   const tokenRes = await request(app)
     .post('/auth/token')
-    .send({ transaction: tx.toXDR(), role: 'validator' });
+    .send({ transaction: tx.toXdr(), role: 'validator' });
   return tokenRes.body.token;
 }
 

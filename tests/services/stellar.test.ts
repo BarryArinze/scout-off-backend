@@ -27,7 +27,7 @@ const mockAssemble        = jest.fn().mockReturnValue({ build: mockAssembleBuild
 const mockContractCall    = jest.fn().mockReturnValue({ type: 'invokeHostFunction' });
 
 jest.mock('@stellar/stellar-sdk', () => ({
-  SorobanRpc: {
+  rpc: {
     Server: jest.fn().mockReturnValue({
       getLatestLedger:     jest.fn().mockResolvedValue({ sequence: 1 }),
       getAccount:          mockGetAccount,
@@ -131,7 +131,7 @@ beforeEach(() => {
 
   // Restore default SDK behaviours after clearAllMocks() wipes return values
   sdk.scValToNative.mockReturnValue(true);
-  sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(false);
+  sdk.rpc.Api.isSimulationError.mockReturnValue(false);
   mockAssembleBuild.mockReturnValue({ sign: jest.fn() });
   mockAssemble.mockReturnValue({ build: mockAssembleBuild });
 
@@ -169,7 +169,7 @@ describe('isSubscribed', () => {
   });
 
   it('throws PaymentError NETWORK_ERROR on simulation error response', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'rpc down' });
     await expect(isSubscribed(WALLET)).rejects.toMatchObject({ code: 'NETWORK_ERROR' });
   });
@@ -269,7 +269,7 @@ describe('queryMilestones', () => {
   });
 
   it('throws PaymentError MISSING_PLAYER when simulation reports contract error #3', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #3' });
 
     await expect(queryMilestones(PLAYER_ID)).rejects.toMatchObject({
@@ -279,7 +279,7 @@ describe('queryMilestones', () => {
   });
 
   it('throws PaymentError MISSING_PLAYER when simulation message contains "player not found"', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'PlayerNotFound' });
 
     await expect(queryMilestones(PLAYER_ID)).rejects.toMatchObject({
@@ -289,7 +289,7 @@ describe('queryMilestones', () => {
   });
 
   it('throws PaymentError NETWORK_ERROR for an unrelated simulation error', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Something went wrong' });
 
     await expect(queryMilestones(PLAYER_ID)).rejects.toMatchObject({
@@ -350,7 +350,7 @@ describe('cancelSubscriptionOnChain', () => {
   });
 
   it('throws SubscriptionError NOT_SUBSCRIBED when simulation returns contract error #8', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #8' });
 
     await expect(cancelSubscriptionOnChain(WALLET)).rejects.toMatchObject({
@@ -362,7 +362,7 @@ describe('cancelSubscriptionOnChain', () => {
   });
 
   it('throws SubscriptionError NOT_SUBSCRIBED when simulation message contains "NotSubscribed"', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'NotSubscribed' });
 
     await expect(cancelSubscriptionOnChain(WALLET)).rejects.toMatchObject({
@@ -372,7 +372,7 @@ describe('cancelSubscriptionOnChain', () => {
   });
 
   it('throws SubscriptionError UNAUTHORIZED when simulation returns contract error #9', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #9' });
 
     await expect(cancelSubscriptionOnChain(WALLET)).rejects.toMatchObject({
@@ -383,7 +383,7 @@ describe('cancelSubscriptionOnChain', () => {
   });
 
   it('throws PaymentError NETWORK_ERROR for an unknown simulation error', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Something went wrong' });
 
     await expect(cancelSubscriptionOnChain(WALLET)).rejects.toMatchObject({
@@ -488,7 +488,7 @@ describe('pauseContractOnChain', () => {
   });
 
   it('throws ContractActionError CONTRACT_ALREADY_PAUSED when simulation reports the contract is already paused', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'ContractPaused' });
 
     await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
@@ -500,7 +500,7 @@ describe('pauseContractOnChain', () => {
   });
 
   it('throws ContractActionError CONTRACT_ALREADY_PAUSED when simulation error contains contract code #10', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #10' });
 
     await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
@@ -510,7 +510,7 @@ describe('pauseContractOnChain', () => {
   });
 
   it('throws ContractActionError NETWORK_ERROR for an unrelated simulation error', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Something went wrong' });
 
     await expect(pauseContractOnChain(WALLET)).rejects.toMatchObject({
@@ -597,7 +597,7 @@ describe('registerValidatorOnChain', () => {
   });
 
   it('throws ValidatorActionError ALREADY_REGISTERED when simulation returns contract error #13', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #13' });
 
     await expect(registerValidatorOnChain(WALLET)).rejects.toMatchObject({
@@ -608,7 +608,7 @@ describe('registerValidatorOnChain', () => {
   });
 
   it('throws ValidatorActionError UNAUTHORIZED when simulation message contains "unauthorized"', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Unauthorized caller' });
 
     await expect(registerValidatorOnChain(WALLET)).rejects.toMatchObject({
@@ -618,7 +618,7 @@ describe('registerValidatorOnChain', () => {
   });
 
   it('throws ValidatorActionError NETWORK_ERROR for an unknown simulation error', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Something went wrong' });
 
     await expect(registerValidatorOnChain(WALLET)).rejects.toMatchObject({
@@ -725,7 +725,7 @@ describe('updateProfile', () => {
   });
 
   it('throws PaymentError MISSING_PLAYER when simulation reports contract error #3', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #3' });
 
     await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
@@ -749,7 +749,7 @@ describe('updateProfile', () => {
   });
 
   it('throws PaymentError NETWORK_ERROR for an unrelated simulation error', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Something went wrong' });
 
     await expect(updateProfile(PLAYER_ID, METADATA_URI)).rejects.toMatchObject({
@@ -905,7 +905,7 @@ describe('logTrialOffer', () => {
   });
 
   it('throws PaymentError NETWORK_ERROR on simulation error response', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'rpc down' });
 
     await expect(logTrialOffer(WALLET, PLAYER_ID, DETAILS_URI)).rejects.toMatchObject({
@@ -1021,7 +1021,7 @@ describe('renewSubscription', () => {
   });
 
   it('throws PaymentError INSUFFICIENT_FUNDS when simulation reports contract error #7', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #7' });
 
     await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
@@ -1042,7 +1042,7 @@ describe('renewSubscription', () => {
   });
 
   it('throws PaymentError EXPIRED_TRUSTLINE when simulation reports a missing trustline', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'trustline not found for payment token' });
 
     await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
@@ -1063,7 +1063,7 @@ describe('renewSubscription', () => {
   });
 
   it('throws PaymentError CONTRACT_ERROR on a generic contract panic during simulation', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'HostError: panicked at contract' });
 
     await expect(renewSubscription(WALLET, TIER, DURATION, PREVIOUS_EXPIRY)).rejects.toMatchObject({
@@ -1216,7 +1216,7 @@ describe('submitContactPayment', () => {
   });
 
   it('throws PaymentError INSUFFICIENT_FUNDS when simulation reports contract error #7', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #7' });
 
     await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
@@ -1287,7 +1287,7 @@ describe('submitContactPayment', () => {
   // ── Contract error mapping (#761) ─────────────────────────────────────────
 
   it('throws PaymentError CONTRACT_PAUSED when simulation reports contract error #10', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #10' });
 
     await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
@@ -1318,7 +1318,7 @@ describe('submitContactPayment', () => {
   });
 
   it('throws PaymentError MISSING_PLAYER when simulation reports contract error #3', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #3' });
 
     await expect(submitContactPayment(WALLET, PLAYER_ID)).rejects.toMatchObject({
@@ -1477,7 +1477,7 @@ describe('withdrawFees', () => {
   });
 
   it('throws INSUFFICIENT_FEES when the simulation reports contract error #7 (amount > balance)', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #7' });
 
     await expect(withdrawFees(WALLET, '999999')).rejects.toMatchObject({
@@ -1488,7 +1488,7 @@ describe('withdrawFees', () => {
   });
 
   it('throws CONTRACT_PAUSED when the simulation reports contract error #10', async () => {
-    sdk.SorobanRpc.Api.isSimulationError.mockReturnValue(true);
+    sdk.rpc.Api.isSimulationError.mockReturnValue(true);
     mockSimulate.mockResolvedValue({ error: 'Contract error: #10' });
 
     await expect(withdrawFees(WALLET, '100')).rejects.toMatchObject({

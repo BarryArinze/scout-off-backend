@@ -34,9 +34,11 @@ const { server } = require('../../src/services/stellar') as { server: { getEvent
 import app from '../../src/app';
 
 function makeEvent(type: string, payload: Record<string, unknown>, txHash: string, ledger = 1000) {
+  // In @stellar/stellar-sdk v16+, topic items and value are xdr.ScVal objects.
+  const { nativeToScVal } = require('@stellar/stellar-sdk');
   return {
-    topic: [{ value: () => type }],
-    value: { value: () => payload },
+    topic: [nativeToScVal(type, { type: 'symbol' })],
+    value: nativeToScVal(payload),
     ledger,
     txHash,
   };

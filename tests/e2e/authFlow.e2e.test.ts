@@ -115,7 +115,7 @@ describe('E2E SEP-10 Authentication Flow', () => {
     const challengeXdr = challengeRes.body.challenge;
     const tx = new Transaction(challengeXdr, NETWORK);
     tx.sign(TEST_KEYPAIR);
-    const signedXdr = tx.toXDR();
+    const signedXdr = tx.toXdr();
 
     // Step 3: POST /auth/token
     const tokenRes = await request(app)
@@ -167,7 +167,7 @@ describe('E2E SEP-10 Authentication Flow', () => {
 
     const tx = new Transaction(challengeRes.body.challenge, NETWORK);
     tx.sign(wrongKeypair);
-    const signedXdr = tx.toXDR();
+    const signedXdr = tx.toXdr();
 
     const tokenRes = await request(app)
       .post('/auth/token')
@@ -184,7 +184,7 @@ describe('E2E SEP-10 Authentication Flow', () => {
 
     const tx = new Transaction(challengeRes.body.challenge, NETWORK);
     tx.sign(TEST_KEYPAIR);
-    const signedXdr = tx.toXDR();
+    const signedXdr = tx.toXdr();
 
     const tokenRes = await request(app)
       .post('/auth/token')

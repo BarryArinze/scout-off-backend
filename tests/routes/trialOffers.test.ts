@@ -44,7 +44,7 @@ async function getScoutToken(): Promise<string> {
   tx.sign(SCOUT_KEYPAIR);
   const tokenRes = await request(app)
     .post('/auth/token')
-    .send({ transaction: tx.toXDR(), role: 'scout' });
+    .send({ transaction: tx.toXdr(), role: 'scout' });
   return tokenRes.body.token;
 }
 

@@ -214,7 +214,7 @@ describe('POST /auth/token — envelope shape', () => {
     const challengeRes = await request(app).get(`/auth/challenge?account=${kp.publicKey()}`);
     const tx = new Transaction(challengeRes.body.challenge, Networks.TESTNET);
     tx.sign(kp);
-    const res = await request(app).post('/auth/token').send({ transaction: tx.toXDR() });
+    const res = await request(app).post('/auth/token').send({ transaction: tx.toXdr() });
     expect(res.status).toBe(200);
     expect(typeof res.body.token).toBe('string');
     expect(typeof res.body.account).toBe('string');

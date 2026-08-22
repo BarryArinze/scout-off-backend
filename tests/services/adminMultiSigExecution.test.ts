@@ -30,7 +30,7 @@ async function getAdminToken(wallet: Keypair): Promise<string> {
   tx.sign(wallet);
   const tokenRes = await request(app)
     .post('/auth/token')
-    .send({ transaction: tx.toXDR(), role: 'admin' });
+    .send({ transaction: tx.toXdr(), role: 'admin' });
   return tokenRes.body.token;
 }
 

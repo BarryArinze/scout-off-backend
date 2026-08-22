@@ -100,11 +100,18 @@ export function buildChallenge(accountId: string): string {
     .build();
 
   tx.sign(SERVER_KEYPAIR);
-  return tx.toXDR();
+  return tx.toXdr();
   } catch (err) {
-    span.recordException(err as Error);
-    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
-    throw err;
+    // Normalise to a plain Error before re-throwing. The SDK can throw
+    // DOMException or XdrError which in some JS sandbox environments (e.g.
+    // Jest's vm context) may not satisfy `instanceof Error`. Wrapping here
+    // ensures callers always receive a genuine Error instance.
+    const normalised = err instanceof Error
+      ? err
+      : new Error(String((err as { message?: string })?.message ?? err));
+    span.recordException(normalised);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: normalised.message });
+    throw normalised;
   } finally {
     span.end();
   }
@@ -194,7 +201,12 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
   // Per SEP-10, the challenge must originate from the server keypair
   const serverSigned = tx.signatures.some((sig) => {
     try {
-      return SERVER_KEYPAIR.verify(tx.hash(), sig.signature());
+      // In @stellar/stellar-sdk v16+, sig.signature is a Signature object
+      // with a .value (Uint8Array) property rather than a callable function.
+      const sigBytes = sig.signature instanceof Uint8Array
+        ? sig.signature
+        : (sig.signature as unknown as { value: Uint8Array }).value;
+      return SERVER_KEYPAIR.verify(tx.hash(), sigBytes);
     } catch {
       return false;
     }
@@ -206,7 +218,10 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
   const clientKeypair = Keypair.fromPublicKey(clientAccountId);
   const clientSigned = tx.signatures.some((sig) => {
     try {
-      return clientKeypair.verify(tx.hash(), sig.signature());
+      const sigBytes = sig.signature instanceof Uint8Array
+        ? sig.signature
+        : (sig.signature as unknown as { value: Uint8Array }).value;
+      return clientKeypair.verify(tx.hash(), sigBytes);
     } catch {
       return false;
     }
@@ -219,7 +234,8 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
   // within its TTL window.
   const nowSeconds = Math.floor(Date.now() / 1000);
   pruneConsumedChallengeNonces(nowSeconds);
-  const nonceKey = manageDataOp.value.toString('base64');
+  // value is Uint8Array in @stellar/stellar-sdk v16+; wrap in Buffer for base64
+  const nonceKey = Buffer.from(manageDataOp.value).toString('base64');
   if (consumedChallengeNonces.has(nonceKey)) {
     throw new Error('Challenge has already been used');
   }
@@ -234,9 +250,16 @@ export function verifyAndIssueToken(xdr: string, role?: string): { token: string
   span.setAttribute('sep10.account', clientAccountId);
   return { token, account: clientAccountId };
   } catch (err) {
-    span.recordException(err as Error);
-    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
-    throw err;
+    // Normalise to a plain Error before re-throwing. The SDK can throw
+    // DOMException or XdrError which in some JS sandbox environments (e.g.
+    // Jest's vm context) may not satisfy `instanceof Error`. Wrapping here
+    // ensures callers always receive a genuine Error instance.
+    const normalised = err instanceof Error
+      ? err
+      : new Error(String((err as { message?: string })?.message ?? err));
+    span.recordException(normalised);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: normalised.message });
+    throw normalised;
   } finally {
     span.end();
   }
