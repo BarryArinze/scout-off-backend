@@ -1,4 +1,5 @@
 import { server } from './stellar';
+import { scValToNative } from '@stellar/stellar-sdk';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import {
@@ -104,7 +105,7 @@ export async function indexEvents(): Promise<void> {
   span.setAttribute('indexer.ledger_start', fromLedger);
 
   const response = await server.getEvents({
-    startLedger: fromLedger || undefined,
+    startLedger: fromLedger > 0 ? fromLedger : 1,
     filters: [{ type: 'contract', contractIds: [config.contractId] }],
   });
   span.setAttribute('indexer.ledger_end', response.latestLedger);
@@ -162,8 +163,10 @@ export async function indexEvents(): Promise<void> {
   // transactionally atomic with the events insert — see note above).
   const insertMany = async (events: typeof response.events) => {
     for (const raw of events) {
-      const type = raw.topic[0]?.value() as string;
-      const payload = normalizePayload((raw.value?.value() as unknown as Record<string, unknown>) ?? {});
+      // In @stellar/stellar-sdk v16+, topic items and value are xdr.ScVal
+      // discriminated-union objects; use scValToNative() instead of .value().
+      const type = raw.topic[0] ? scValToNative(raw.topic[0]) as string : '';
+      const payload = normalizePayload((raw.value ? scValToNative(raw.value) as Record<string, unknown> : {}) ?? {});
       const eventId = normalizeEventId(config.contractId, raw.ledger, raw.txHash);
       const createdAt = raw.ledgerClosedAt ? new Date(raw.ledgerClosedAt).getTime() : Date.now();
       const ledgerHash = (raw as any).ledgerHash ?? (raw as any).pagingToken ?? raw.txHash;

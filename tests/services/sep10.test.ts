@@ -15,7 +15,7 @@ describe('sep10', () => {
     const xdr = buildChallenge(clientKeypair.publicKey());
     const tx = new Transaction(xdr, Networks.TESTNET);
     tx.sign(clientKeypair);
-    const signedXdr = tx.toXDR();
+    const signedXdr = tx.toXdr();
 
     const { token, account } = verifyAndIssueToken(signedXdr);
     expect(typeof token).toBe('string');
@@ -48,7 +48,7 @@ describe('sep10', () => {
     // Sign with the rogue keypair (not our server) and the client
     tx.sign(rogueKeypair);
     tx.sign(clientKeypair);
-    const xdr = tx.toXDR();
+    const xdr = tx.toXdr();
 
     // Should reject because our server did not sign this challenge
     expect(() => verifyAndIssueToken(xdr)).toThrow('Challenge not signed by server');
@@ -68,7 +68,7 @@ describe('sep10', () => {
 
       tx.sign(serverKeypair);
       tx.sign(clientKeypair);
-      const xdr = tx.toXDR();
+      const xdr = tx.toXdr();
 
       expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: no operations found');
     });
@@ -93,7 +93,7 @@ describe('sep10', () => {
 
       tx.sign(serverKeypair);
       tx.sign(clientKeypair);
-      const xdr = tx.toXDR();
+      const xdr = tx.toXdr();
 
       expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: expected manageData operation');
     });
@@ -117,7 +117,7 @@ describe('sep10', () => {
 
       tx.sign(serverKeypair);
       tx.sign(clientKeypair);
-      const xdr = tx.toXDR();
+      const xdr = tx.toXdr();
 
       expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: wrong operation name');
     });
@@ -141,7 +141,7 @@ describe('sep10', () => {
 
       tx.sign(serverKeypair);
       tx.sign(clientKeypair);
-      const xdr = tx.toXDR();
+      const xdr = tx.toXdr();
 
       expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: missing nonce value');
     });
@@ -165,7 +165,7 @@ describe('sep10', () => {
 
       tx.sign(serverKeypair);
       tx.sign(clientKeypair);
-      const xdr = tx.toXDR();
+      const xdr = tx.toXdr();
 
       expect(() => verifyAndIssueToken(xdr)).toThrow('Invalid challenge: nonce must be exactly 64 bytes');
     });
@@ -189,7 +189,7 @@ describe('sep10', () => {
 
       tx.sign(serverKeypair);
       tx.sign(clientKeypair);
-      const xdr = tx.toXDR();
+      const xdr = tx.toXdr();
 
       expect(() => verifyAndIssueToken(xdr)).toThrow('Missing source account in challenge');
     });
@@ -198,7 +198,7 @@ describe('sep10', () => {
       const xdr = buildChallenge(clientKeypair.publicKey());
       const tx = new Transaction(xdr, Networks.TESTNET);
       tx.sign(clientKeypair);
-      const signedXdr = tx.toXDR();
+      const signedXdr = tx.toXdr();
 
       const { token, account } = verifyAndIssueToken(signedXdr);
       expect(typeof token).toBe('string');
@@ -211,7 +211,7 @@ describe('sep10', () => {
       const xdr = buildChallenge(clientKeypair.publicKey());
       const tx = new Transaction(xdr, Networks.TESTNET);
       tx.sign(clientKeypair);
-      const signedXdr = tx.toXDR();
+      const signedXdr = tx.toXdr();
 
       // Advance Date.now() past the challenge TTL (300 s)
       const realNow = Date.now;
@@ -227,7 +227,7 @@ describe('sep10', () => {
       const xdr = buildChallenge(clientKeypair.publicKey());
       const tx = new Transaction(xdr, Networks.TESTNET);
       tx.sign(clientKeypair);
-      const signedXdr = tx.toXDR();
+      const signedXdr = tx.toXdr();
 
       // Wind back time slightly to ensure we're before maxTime
       const realNow = Date.now;
@@ -249,7 +249,7 @@ describe('sep10', () => {
       const xdr = buildChallenge(clientKeypair.publicKey());
       const tx = new Transaction(xdr, Networks.TESTNET);
       tx.sign(clientKeypair);
-      const signedXdr = tx.toXDR();
+      const signedXdr = tx.toXdr();
 
       // First exchange succeeds and consumes the challenge's nonce.
       const { token, account } = verifyAndIssueToken(signedXdr);
@@ -272,7 +272,7 @@ describe('sep10', () => {
       // attempt above did not mark the nonce as used.
       const tx = new Transaction(xdr, Networks.TESTNET);
       tx.sign(clientKeypair);
-      const signedXdr = tx.toXDR();
+      const signedXdr = tx.toXdr();
       const { token } = verifyAndIssueToken(signedXdr);
       expect(typeof token).toBe('string');
     });
@@ -286,8 +286,8 @@ describe('sep10', () => {
       const txB = new Transaction(xdrB, Networks.TESTNET);
       txB.sign(clientKeypair);
 
-      expect(() => verifyAndIssueToken(txA.toXDR())).not.toThrow();
-      expect(() => verifyAndIssueToken(txB.toXDR())).not.toThrow();
+      expect(() => verifyAndIssueToken(txA.toXdr())).not.toThrow();
+      expect(() => verifyAndIssueToken(txB.toXdr())).not.toThrow();
     });
   });
 
@@ -348,7 +348,7 @@ describe('sep10', () => {
       // The client signs the challenge (as it would in a real auth flow).
       const tx = new Transaction(challengeXdr, Networks.TESTNET);
       tx.sign(clientKeypair);
-      const signedXdr = tx.toXDR();
+      const signedXdr = tx.toXdr();
 
       // Instance B verifies the signed challenge — must succeed despite being a
       // completely separate module instance (i.e. a different "process").
@@ -383,7 +383,7 @@ describe('sep10', () => {
       const challengeXdr = instanceA.buildChallenge(clientKeypair.publicKey());
       const tx = new Transaction(challengeXdr, Networks.TESTNET);
       tx.sign(clientKeypair);
-      const signedXdr = tx.toXDR();
+      const signedXdr = tx.toXdr();
 
       // Instance B (different random keypair) must reject it — proving that
       // sharing the secret is the only way to make cross-instance auth work.

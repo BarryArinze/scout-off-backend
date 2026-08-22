@@ -342,7 +342,7 @@ describe('POST /auth/token', () => {
 
     const res = await request(app)
       .post('/auth/token')
-      .send({ transaction: tx.toXDR() });
+      .send({ transaction: tx.toXdr() });
 
     expect(res.status).toBe(200);
     expect(typeof res.body.token).toBe('string');
@@ -360,7 +360,7 @@ describe('POST /auth/token', () => {
 
     const res = await request(app)
       .post('/auth/token')
-      .send({ transaction: tx.toXDR(), role: 'validator' });
+      .send({ transaction: tx.toXdr(), role: 'validator' });
 
     expect(res.status).toBe(200);
     expect(typeof res.body.token).toBe('string');
@@ -394,7 +394,7 @@ async function getValidatorToken(): Promise<string> {
   tx.sign(kp);
   const tokenRes = await request(app)
     .post('/auth/token')
-    .send({ transaction: tx.toXDR(), role: 'validator' });
+    .send({ transaction: tx.toXdr(), role: 'validator' });
   return tokenRes.body.token;
 }
 
@@ -405,7 +405,7 @@ async function getPlayerToken(): Promise<string> {
   tx.sign(kp);
   const tokenRes = await request(app)
     .post('/auth/token')
-    .send({ transaction: tx.toXDR(), role: 'player' });
+    .send({ transaction: tx.toXdr(), role: 'player' });
   return tokenRes.body.token;
 }
 
@@ -417,7 +417,7 @@ async function getAdminToken(): Promise<string> {
   tx.sign(kp);
   const tokenRes = await request(app)
     .post('/auth/token')
-    .send({ transaction: tx.toXDR(), role: 'admin' });
+    .send({ transaction: tx.toXdr(), role: 'admin' });
   return tokenRes.body.token;
 }
 

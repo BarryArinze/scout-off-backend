@@ -118,33 +118,40 @@ export function postToken(req: Request, res: Response, next: NextFunction): void
 
     res.json({ token: accessToken, accessToken, refreshToken, account, expiresAt });
   } catch (err) {
-    if (err instanceof Error) {
+    // Normalise to Error — the SDK can throw DOMException (from the base64
+    // decoder) or XdrError which, in some JS environments (e.g. Jest's vm
+    // sandbox), may not satisfy `instanceof Error` even though they are
+    // error-like objects.  Convert to a plain Error so the rest of the
+    // handler can treat everything uniformly.
+    const error: Error = err instanceof Error
+      ? err
+      : new Error(String((err as { message?: string })?.message ?? err));
+    {
       const knownAuthErrors = [
         'Invalid challenge signature',
         'Missing source account in challenge',
         'Challenge has expired',
       ];
-      if (knownAuthErrors.includes(err.message)) {
+      if (knownAuthErrors.includes(error.message)) {
         let attemptedWallet: string | null = null;
         try { attemptedWallet = extractAccount((req.body as { transaction?: string }).transaction ?? ''); } catch { /* not extractable */ }
         logger.warn('[auth] failed_token_exchange', {
           correlationId: req.correlationId,
           origin: extractClientIp(req),
           attemptedWallet,
-          reason: err.message,
+          reason: error.message,
         });
-        res.status(401).json({ success: false, error: err.message });
+        res.status(401).json({ success: false, error: error.message });
         return;
       }
       logger.warn('[auth] failed_token_request malformed_xdr', {
         correlationId: req.correlationId,
         origin: extractClientIp(req),
-        reason: err.message,
+        reason: error.message,
       });
-      res.status(400).json({ success: false, error: err.message, code: ErrorCode.VALIDATION_ERROR });
+      res.status(400).json({ success: false, error: error.message, code: ErrorCode.VALIDATION_ERROR });
       return;
     }
-    next(err);
   }
 }
 

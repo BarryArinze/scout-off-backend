@@ -1,7 +1,7 @@
 {
   "name": "scout-off-backend",
   "version": "1.0.0",
-  "description": "Backend API for ScoutOff — decentralized football scouting platform on Stellar",
+  "description": "Backend API for ScoutOff \u2014 decentralized football scouting platform on Stellar",
   "main": "dist/index.js",
   "engines": {
     "node": "20.x",
@@ -44,7 +44,7 @@
     "@opentelemetry/auto-instrumentations-node": "^0.78.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.221.0",
     "@opentelemetry/sdk-node": "^0.221.0",
-    "@stellar/stellar-sdk": "12.1.0",
+    "@stellar/stellar-sdk": "17.0.0",
     "axios": "1.18.1",
     "better-sqlite3": "^11.10.0",
     "compression": "^1.8.1",
@@ -114,8 +114,12 @@
               "diagnostics": false,
               "tsconfig": "<rootDir>/tsconfig.eslint.json"
             }
-          ]
+          ],
+          "^.+\\.js$": "ts-jest"
         },
+        "transformIgnorePatterns": [
+          "/node_modules/(?!(@stellar/stellar-sdk|uint8array-extras|@exodus/bytes|@noble/ed25519|@noble/hashes)/)"
+        ],
         "moduleNameMapper": {
           "^@paralleldrive/cuid2$": "<rootDir>/__mocks__/@paralleldrive/cuid2.js",
           "^multiformats/cid$": "<rootDir>/__mocks__/multiformats/cid.js"
@@ -148,6 +152,9 @@
         ],
         "setupFiles": [
           "<rootDir>/tests/setup-shell.ts"
+        ],
+        "transformIgnorePatterns": [
+          "/node_modules/(?!(@stellar/stellar-sdk|uint8array-extras|@exodus/bytes|@noble/ed25519|@noble/hashes)/)"
         ],
         "globals": {
           "ts-jest": {

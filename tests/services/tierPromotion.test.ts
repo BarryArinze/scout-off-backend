@@ -17,9 +17,13 @@ const { server } = require('../../src/services/stellar') as {
 };
 
 function rawEvent(type: string, payload: Record<string, unknown>, txHash: string, ledger: number) {
+  // In @stellar/stellar-sdk v16+, topic items and value are xdr.ScVal
+  // discriminated-union objects. scValToNative() is called on them in indexer.ts.
+  // Use nativeToScVal() to produce valid ScVal objects the indexer can consume.
+  const { nativeToScVal } = require('@stellar/stellar-sdk');
   return {
-    topic: [{ value: () => type }],
-    value: { value: () => payload },
+    topic: [nativeToScVal(type, { type: 'symbol' })],
+    value: nativeToScVal(payload),
     ledger,
     txHash,
   };

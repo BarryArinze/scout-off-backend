@@ -16,6 +16,7 @@
  */
 
 import { server } from './stellar';
+import { scValToNative } from '@stellar/stellar-sdk';
 import config from '../config';
 import { getDb, persistLastIndexedLedger } from '../db';
 import { normalizePayload, normalizeEventId } from './indexer';
@@ -162,9 +163,11 @@ async function _runReindex(
         (events: typeof batchEvents) => {
           let batchInserted = 0;
           for (const raw of events) {
-            const type = raw.topic[0]?.value() as string;
+            // In @stellar/stellar-sdk v16+, topic items and value are xdr.ScVal
+            // discriminated-union objects; use scValToNative() instead of .value().
+            const type = raw.topic[0] ? scValToNative(raw.topic[0]) as string : '';
             const payload = normalizePayload(
-              (raw.value?.value() as unknown as Record<string, unknown>) ?? {},
+              (raw.value ? scValToNative(raw.value) as Record<string, unknown> : {}) ?? {},
             );
             const eventId = normalizeEventId(config.contractId, raw.ledger, raw.txHash);
             const createdAt = raw.ledgerClosedAt

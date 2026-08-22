@@ -57,7 +57,7 @@ async function getToken(role: string): Promise<string> {
   tx.sign(kp);
   const tokenRes = await request(app)
     .post('/auth/token')
-    .send({ transaction: tx.toXDR(), role });
+    .send({ transaction: tx.toXdr(), role });
   return tokenRes.body.token;
 }
 
