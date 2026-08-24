@@ -111,82 +111,78 @@ const statsQuerySchema = z.object({
 
 /** GET /api/admin/stats */
 export async function getStats(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parsed = statsQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
-        code: ErrorCode.VALIDATION_ERROR,
-      });
-      return;
-    }
-
-    const { window, breakdown } = parsed.data;
-
-    // If no window or breakdown requested, return basic stats (backward compatible)
-    if (!window && !breakdown) {
-      res.json({
-        success: true,
-        data: {
-          players: queryEvents('player_registered').length,
-          milestones: queryEvents('milestone_approved').length,
-          subscriptions: queryEvents('scout_subscribed').length,
-          events: queryEvents().length,
-        },
-      });
-      return;
-    }
-
-    // Default to 30d if window is not specified but breakdown is
-    const windowValue = window ?? '30d';
-
-    // Calculate time window
-    const windowDays = windowValue === '7d' ? 7 : windowValue === '30d' ? 30 : 90;
-    const endDate = new Date();
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - windowDays);
-
-    const startDateMs = startDate.getTime();
-    const endDateMs = endDate.getTime();
-
-    // Generate cache key
-    const cacheKey = `admin:stats:${windowValue}:${breakdown ?? 'none'}`;
-    const cached = await cacheGet<{ data: Record<string, unknown> }>(cacheKey);
-    if (cached) {
-      res.json({ success: true, data: cached.data });
-      return;
-    }
-
-    // Fetch time-series data
-    const newPlayers = getNewPlayersTimeSeries(startDateMs, endDateMs);
-    const milestonesApproved = getMilestonesApprovedTimeSeries(startDateMs, endDateMs);
-    const contactUnlocks = getContactUnlocksTimeSeries(startDateMs, endDateMs);
-    const subscriptionsStarted = getSubscriptionsStartedTimeSeries(startDateMs, endDateMs);
-
-    const data: Record<string, unknown> = {
-      window: windowValue,
-      startDate: startDate.toISOString().split('T')[0],
-      endDate: endDate.toISOString().split('T')[0],
-      newPlayers,
-      milestonesApproved,
-      contactUnlocks,
-      subscriptionsStarted,
-    };
-
-    // Add region breakdown if requested
-    if (breakdown === 'region') {
-      const newPlayersByRegion = getNewPlayersByRegionTimeSeries(startDateMs, endDateMs);
-      data.newPlayersByRegion = newPlayersByRegion;
-    }
-
-    // Cache for 5 minutes (300000ms)
-    await cacheSet(cacheKey, { data }, 5 * 60 * 1000);
-
-    res.json({ success: true, data });
-  } catch (err) {
-    next(err);
+  const parsed = statsQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+      code: ErrorCode.VALIDATION_ERROR,
+    });
+    return;
   }
+
+  const { window, breakdown } = parsed.data;
+
+  // If no window or breakdown requested, return basic stats (backward compatible)
+  if (!window && !breakdown) {
+    res.json({
+      success: true,
+      data: {
+        players: queryEvents('player_registered').length,
+        milestones: queryEvents('milestone_approved').length,
+        subscriptions: queryEvents('scout_subscribed').length,
+        events: queryEvents().length,
+      },
+    });
+    return;
+  }
+
+  // Default to 30d if window is not specified but breakdown is
+  const windowValue = window ?? '30d';
+
+  // Calculate time window
+  const windowDays = windowValue === '7d' ? 7 : windowValue === '30d' ? 30 : 90;
+  const endDate = new Date();
+  const startDate = new Date();
+  startDate.setDate(startDate.getDate() - windowDays);
+
+  const startDateMs = startDate.getTime();
+  const endDateMs = endDate.getTime();
+
+  // Generate cache key
+  const cacheKey = `admin:stats:${windowValue}:${breakdown ?? 'none'}`;
+  const cached = await cacheGet<{ data: Record<string, unknown> }>(cacheKey);
+  if (cached) {
+    res.json({ success: true, data: cached.data });
+    return;
+  }
+
+  // Fetch time-series data
+  const newPlayers = getNewPlayersTimeSeries(startDateMs, endDateMs);
+  const milestonesApproved = getMilestonesApprovedTimeSeries(startDateMs, endDateMs);
+  const contactUnlocks = getContactUnlocksTimeSeries(startDateMs, endDateMs);
+  const subscriptionsStarted = getSubscriptionsStartedTimeSeries(startDateMs, endDateMs);
+
+  const data: Record<string, unknown> = {
+    window: windowValue,
+    startDate: startDate.toISOString().split('T')[0],
+    endDate: endDate.toISOString().split('T')[0],
+    newPlayers,
+    milestonesApproved,
+    contactUnlocks,
+    subscriptionsStarted,
+  };
+
+  // Add region breakdown if requested
+  if (breakdown === 'region') {
+    const newPlayersByRegion = getNewPlayersByRegionTimeSeries(startDateMs, endDateMs);
+    data.newPlayersByRegion = newPlayersByRegion;
+  }
+
+  // Cache for 5 minutes (300000ms)
+  await cacheSet(cacheKey, { data }, 5 * 60 * 1000);
+
+  res.json({ success: true, data });
 }
 
 const isoDateString = z
@@ -204,29 +200,25 @@ const auditQuerySchema = z.object({
 
 /** GET /api/admin/audit (legacy #345 endpoint — backward-compatible) */
 export async function getAuditLog(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parsed = auditQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
-        code: ErrorCode.VALIDATION_ERROR,
-      });
-      return;
-    }
-    const { startDate, endDate, action, limit, offset } = parsed.data;
-    const rows = await getAuditLogs({ action, startDate, endDate, limit, offset });
-    const total = await getAuditLogsCount({ action, startDate, endDate });
-    res.json({
-      success: true,
-      data: rows.map((r) => ({ ...r, query_params: JSON.parse(r.query_params) })),
-      total,
-      limit,
-      offset,
+  const parsed = auditQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+      code: ErrorCode.VALIDATION_ERROR,
     });
-  } catch (err) {
-    next(err);
+    return;
   }
+  const { startDate, endDate, action, limit, offset } = parsed.data;
+  const rows = await getAuditLogs({ action, startDate, endDate, limit, offset });
+  const total = await getAuditLogsCount({ action, startDate, endDate });
+  res.json({
+    success: true,
+    data: rows.map((r) => ({ ...r, query_params: JSON.parse(r.query_params) })),
+    total,
+    limit,
+    offset,
+  });
 }
 
 // ─── Audit trail endpoint (#832) ──────────────────────────────────────────────
@@ -275,44 +267,40 @@ const auditTrailQuerySchema = z.object({
  * @auth Bearer (admin role required)
  */
 export async function getAuditTrail(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parsed = auditTrailQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
-        code: ErrorCode.VALIDATION_ERROR,
-      });
-      return;
-    }
-
-    const { eventType, from, to, page, pageSize } = parsed.data;
-    const offset = (page - 1) * pageSize;
-
-    const rows = await getAuditLogs({
-      action: eventType,
-      startDate: from,
-      endDate: to,
-      limit: pageSize,
-      offset,
+  const parsed = auditTrailQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+      code: ErrorCode.VALIDATION_ERROR,
     });
-
-    const total = await getAuditLogsCount({
-      action: eventType,
-      startDate: from,
-      endDate: to,
-    });
-
-    res.json({
-      success: true,
-      data: rows.map(rowToAuditEntry),
-      total,
-      page,
-      pageSize,
-    });
-  } catch (err) {
-    next(err);
+    return;
   }
+
+  const { eventType, from, to, page, pageSize } = parsed.data;
+  const offset = (page - 1) * pageSize;
+
+  const rows = await getAuditLogs({
+    action: eventType,
+    startDate: from,
+    endDate: to,
+    limit: pageSize,
+    offset,
+  });
+
+  const total = await getAuditLogsCount({
+    action: eventType,
+    startDate: from,
+    endDate: to,
+  });
+
+  res.json({
+    success: true,
+    data: rows.map(rowToAuditEntry),
+    total,
+    page,
+    pageSize,
+  });
 }
 
 /**
@@ -325,12 +313,8 @@ export async function getAuditTrail(req: Request, res: Response, next: NextFunct
  * and incident response.
  */
 export async function getAuditChainVerification(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const result = await verifyAuditChainFull();
-    res.json({ success: true, data: result });
-  } catch (err) {
-    next(err);
-  }
+  const result = await verifyAuditChainFull();
+  res.json({ success: true, data: result });
 }
 
 /** Exported so routes can apply validateQuery(adminDateRangeSchema) */
@@ -405,57 +389,53 @@ const eventsQuerySchema = z
 
 /** GET /api/admin/events */
 export async function getAllEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parsed = eventsQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      sendValidationError(res, parsed.error);
-      return;
-    }
-
-    const { startDate, endDate, from, to, eventType, limit, offset, page, pageSize } = parsed.data;
-
-    // Resolve date range — ?from/?to are aliases for ?startDate/?endDate
-    const resolvedStart = startDate ?? from;
-    const resolvedEnd = endDate ?? to;
-    const startDateObj = resolvedStart ? new Date(resolvedStart) : undefined;
-    const endDateObj = resolvedEnd ? new Date(resolvedEnd) : undefined;
-
-    const eventTypeFilter = eventType as ContractEventType | undefined;
-
-    // Resolve pagination — legacy limit/offset takes precedence when supplied;
-    // falls back to page/pageSize, then defaults (limit=20, offset=0).
-    const resolvedLimit = limit ?? pageSize ?? 20;
-    const resolvedOffset = offset ?? ((page ?? 1) - 1) * resolvedLimit;
-
-    const filter = { type: eventTypeFilter, startDate: startDateObj, endDate: endDateObj };
-
-    // Fetch the page from the DB (date filtering happens at SQL level)
-    const rows = getEventsPage(filter, resolvedLimit, resolvedOffset);
-    const total = countEventsFiltered(filter);
-    const totalPages = Math.ceil(total / resolvedLimit);
-
-    const data = rows.map((r) => ({
-      source: '',
-      type: r.type,
-      payload: r.payload,
-      contractAddress: '',
-      created_at: r.createdAt,
-    }));
-
-    res.json({
-      success: true,
-      data,
-      total,
-      // Return both pagination styles so existing callers keep working
-      limit: resolvedLimit,
-      offset: resolvedOffset,
-      page: Math.floor(resolvedOffset / resolvedLimit) + 1,
-      pageSize: resolvedLimit,
-      totalPages,
-    });
-  } catch (err) {
-    next(err);
+  const parsed = eventsQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    sendValidationError(res, parsed.error);
+    return;
   }
+
+  const { startDate, endDate, from, to, eventType, limit, offset, page, pageSize } = parsed.data;
+
+  // Resolve date range — ?from/?to are aliases for ?startDate/?endDate
+  const resolvedStart = startDate ?? from;
+  const resolvedEnd = endDate ?? to;
+  const startDateObj = resolvedStart ? new Date(resolvedStart) : undefined;
+  const endDateObj = resolvedEnd ? new Date(resolvedEnd) : undefined;
+
+  const eventTypeFilter = eventType as ContractEventType | undefined;
+
+  // Resolve pagination — legacy limit/offset takes precedence when supplied;
+  // falls back to page/pageSize, then defaults (limit=20, offset=0).
+  const resolvedLimit = limit ?? pageSize ?? 20;
+  const resolvedOffset = offset ?? ((page ?? 1) - 1) * resolvedLimit;
+
+  const filter = { type: eventTypeFilter, startDate: startDateObj, endDate: endDateObj };
+
+  // Fetch the page from the DB (date filtering happens at SQL level)
+  const rows = getEventsPage(filter, resolvedLimit, resolvedOffset);
+  const total = countEventsFiltered(filter);
+  const totalPages = Math.ceil(total / resolvedLimit);
+
+  const data = rows.map((r) => ({
+    source: '',
+    type: r.type,
+    payload: r.payload,
+    contractAddress: '',
+    created_at: r.createdAt,
+  }));
+
+  res.json({
+    success: true,
+    data,
+    total,
+    // Return both pagination styles so existing callers keep working
+    limit: resolvedLimit,
+    offset: resolvedOffset,
+    page: Math.floor(resolvedOffset / resolvedLimit) + 1,
+    pageSize: resolvedLimit,
+    totalPages,
+  });
 }
 
 const feesQuerySchema = z
@@ -479,35 +459,27 @@ const feesQuerySchema = z
 
 /** GET /api/admin/fees — returns fees_withdrawn event payloads */
 export async function getFeeSummary(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parsed = feesQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      sendValidationError(res, parsed.error);
-      return;
-    }
-
-    const adminWallet = req.account ?? 'unknown';
-    await logAuditEvent({
-      action: 'fee_history_query',
-      adminWallet,
-      queryParams: req.query as Record<string, unknown>,
-      timestamp: new Date().toISOString(),
-    }).catch(() => {});
-    const withdrawals = queryEvents('fees_withdrawn').map((e) => e.payload as Record<string, unknown>);
-    const body: ApiResponse<Record<string, unknown>[]> = { success: true, data: withdrawals };
-    res.json(body);
-  } catch (err) {
-    next(err);
+  const parsed = feesQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    sendValidationError(res, parsed.error);
+    return;
   }
+
+  const adminWallet = req.account ?? 'unknown';
+  await logAuditEvent({
+    action: 'fee_history_query',
+    adminWallet,
+    queryParams: req.query as Record<string, unknown>,
+    timestamp: new Date().toISOString(),
+  }).catch(() => {});
+  const withdrawals = queryEvents('fees_withdrawn').map((e) => e.payload as Record<string, unknown>);
+  const body: ApiResponse<Record<string, unknown>[]> = { success: true, data: withdrawals };
+  res.json(body);
 }
 
 /** GET /api/admin/validators */
 export async function listValidators(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    res.json({ success: true, data: await getAllValidators() });
-  } catch (err) {
-    next(err);
-  }
+  res.json({ success: true, data: await getAllValidators() });
 }
 
 /**
@@ -737,7 +709,7 @@ export async function revokeValidator(req: Request, res: Response, next: NextFun
  * Returns 409 if the contract is already paused.
  */
 export async function pauseContract(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
+try {
     const adminWallet = req.account ?? 'unknown';
     // Check if admin wallet is in allowed admin wallets
     if (!config.adminWallets.includes(adminWallet)) {
@@ -792,7 +764,7 @@ export async function pauseContract(req: Request, res: Response, next: NextFunct
  * Returns 409 if the contract is not currently paused.
  */
 export async function unpauseContract(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
+try {
     const adminWallet = req.account ?? 'unknown';
     // Check if admin wallet is in allowed admin wallets
     if (!config.adminWallets.includes(adminWallet)) {
@@ -848,32 +820,28 @@ const revokeTokenSchema = z.object({
 
 /** POST /api/admin/tokens/revoke */
 export async function revokeTokenController(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parsed = revokeTokenSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'jti or token is required', code: ErrorCode.VALIDATION_ERROR });
+  const parsed = revokeTokenSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'jti or token is required', code: ErrorCode.VALIDATION_ERROR });
+    return;
+  }
+
+  const defaultExpiresAt = Math.floor(Date.now() / 1000) + 86400;
+  let jti = parsed.data.jti;
+  let expiresAt = defaultExpiresAt;
+
+  if (!jti && parsed.data.token) {
+    const decoded = jwt.decode(parsed.data.token) as jwt.JwtPayload | null;
+    if (!decoded?.jti) {
+      res.status(400).json({ success: false, error: 'Token does not contain a jti claim', code: ErrorCode.VALIDATION_ERROR });
       return;
     }
-
-    const defaultExpiresAt = Math.floor(Date.now() / 1000) + 86400;
-    let jti = parsed.data.jti;
-    let expiresAt = defaultExpiresAt;
-
-    if (!jti && parsed.data.token) {
-      const decoded = jwt.decode(parsed.data.token) as jwt.JwtPayload | null;
-      if (!decoded?.jti) {
-        res.status(400).json({ success: false, error: 'Token does not contain a jti claim', code: ErrorCode.VALIDATION_ERROR });
-        return;
-      }
-      jti = decoded.jti;
-      expiresAt = decoded.exp ?? defaultExpiresAt;
-    }
-
-    revokeToken(jti as string, expiresAt);
-    res.json({ success: true, data: { jti } });
-  } catch (err) {
-    next(err);
+    jti = decoded.jti;
+    expiresAt = decoded.exp ?? defaultExpiresAt;
   }
+
+  revokeToken(jti as string, expiresAt);
+  res.json({ success: true, data: { jti } });
 }
 
 /**
@@ -885,48 +853,44 @@ export async function revokeTokenController(req: Request, res: Response, next: N
  * claims (#279).
  */
 export async function introspectToken(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    // requireRole('admin') has already verified this header's token.
-    // Any `token` field in the request body is intentionally ignored — accepting
-    // an arbitrary token there would let an admin introspect another user's
-    // claims (#279).
-    const callerToken = (req.headers.authorization ?? '').slice(7);
-    const payload = jwt.decode(callerToken) as jwt.JwtPayload | null;
-    if (!payload) {
-      res.status(400).json({ success: false, error: 'Invalid or expired token', code: ErrorCode.TOKEN_INVALID });
-      return;
-    }
-
-    // Revocation check — only meaningful when the token carries a jti claim.
-    const revoked = payload.jti ? isTokenRevoked(payload.jti) : false;
-
-    // A token is valid when it has not expired AND has not been revoked.
-    const nowSec = Math.floor(Date.now() / 1000);
-    const expired = payload.exp !== undefined ? payload.exp <= nowSec : false;
-    const valid = !expired && !revoked;
-
-    // Human-readable ISO 8601 timestamps (supplementary — tests do not require these).
-    const iatIso = payload.iat !== undefined ? new Date(payload.iat * 1000).toISOString() : undefined;
-    const expIso = payload.exp !== undefined ? new Date(payload.exp * 1000).toISOString() : undefined;
-
-    res.json({
-      success: true,
-      data: {
-        // Fields required by existing tests — kept at the top level of data.
-        sub: payload.sub,
-        role: payload.role,
-        iat: payload.iat,
-        exp: payload.exp,
-        // Supplementary fields added by this issue.
-        valid,
-        ...(revoked && { revoked: true }),
-        ...(iatIso !== undefined && { iatIso }),
-        ...(expIso !== undefined && { expIso }),
-      },
-    });
-  } catch (err) {
-    next(err);
+  // requireRole('admin') has already verified this header's token.
+  // Any `token` field in the request body is intentionally ignored — accepting
+  // an arbitrary token there would let an admin introspect another user's
+  // claims (#279).
+  const callerToken = (req.headers.authorization ?? '').slice(7);
+  const payload = jwt.decode(callerToken) as jwt.JwtPayload | null;
+  if (!payload) {
+    res.status(400).json({ success: false, error: 'Invalid or expired token', code: ErrorCode.TOKEN_INVALID });
+    return;
   }
+
+  // Revocation check — only meaningful when the token carries a jti claim.
+  const revoked = payload.jti ? isTokenRevoked(payload.jti) : false;
+
+  // A token is valid when it has not expired AND has not been revoked.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const expired = payload.exp !== undefined ? payload.exp <= nowSec : false;
+  const valid = !expired && !revoked;
+
+  // Human-readable ISO 8601 timestamps (supplementary — tests do not require these).
+  const iatIso = payload.iat !== undefined ? new Date(payload.iat * 1000).toISOString() : undefined;
+  const expIso = payload.exp !== undefined ? new Date(payload.exp * 1000).toISOString() : undefined;
+
+  res.json({
+    success: true,
+    data: {
+      // Fields required by existing tests — kept at the top level of data.
+      sub: payload.sub,
+      role: payload.role,
+      iat: payload.iat,
+      exp: payload.exp,
+      // Supplementary fields added by this issue.
+      valid,
+      ...(revoked && { revoked: true }),
+      ...(iatIso !== undefined && { iatIso }),
+      ...(expIso !== undefined && { expIso }),
+    },
+  });
 }
 
 export const withdrawFeesSchema = z.object({
@@ -1089,35 +1053,31 @@ const reindexSchema = z.object({
  * Returns validator stats: milestones_approved and milestones_rejected.
  */
 export async function getValidatorStatsEndpoint(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const wallet = req.params.wallet;
-    // Validate wallet address
-    if (!isValidStellarAddress(wallet)) {
-      res.status(400).json({ success: false, error: 'Invalid validator wallet address' });
-      return;
-    }
-    const stats = await getValidatorStats(wallet);
-    if (stats) {
-      res.json({
-        success: true,
-        data: {
-          wallet: stats.wallet,
-          milestones_approved: stats.milestones_approved,
-          milestones_rejected: stats.milestones_rejected
-        }
-      });
-    } else {
-      res.json({
-        success: true,
-        data: {
-          wallet,
-          milestones_approved: 0,
-          milestones_rejected: 0
-        }
-      });
-    }
-  } catch (err) {
-    next(err);
+  const wallet = req.params.wallet as string;
+  // Validate wallet address
+  if (!isValidStellarAddress(wallet)) {
+    res.status(400).json({ success: false, error: 'Invalid validator wallet address' });
+    return;
+  }
+  const stats = await getValidatorStats(wallet);
+  if (stats) {
+    res.json({
+      success: true,
+      data: {
+        wallet: stats.wallet,
+        milestones_approved: stats.milestones_approved,
+        milestones_rejected: stats.milestones_rejected
+      }
+    });
+  } else {
+    res.json({
+      success: true,
+      data: {
+        wallet,
+        milestones_approved: 0,
+        milestones_rejected: 0
+      }
+    });
   }
 }
 
@@ -1126,19 +1086,15 @@ export async function getValidatorStatsEndpoint(req: Request, res: Response, nex
  * Resets the indexer's last_ledger to fromLedger so the next poll replays from that point.
  */
 export async function reindex(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parsed = reindexSchema.safeParse(req.body);
-    if (!parsed.success) {
-      sendValidationError(res, parsed.error);
-      return;
-    }
-    const { fromLedger } = parsed.data;
-    const previous = fetchLastIndexedLedger();
-    persistLastIndexedLedger(fromLedger);
-    res.json({ success: true, data: { fromLedger, previous } });
-  } catch (err) {
-    next(err);
+  const parsed = reindexSchema.safeParse(req.body);
+  if (!parsed.success) {
+    sendValidationError(res, parsed.error);
+    return;
   }
+  const { fromLedger } = parsed.data;
+  const previous = fetchLastIndexedLedger();
+  persistLastIndexedLedger(fromLedger);
+  res.json({ success: true, data: { fromLedger, previous } });
 }
 
 const updatePlatformFeeSchema = z.object({
@@ -1150,46 +1106,42 @@ const updatePlatformFeeSchema = z.object({
  * Update platform fee configuration on-chain
  */
 export async function updatePlatformFee(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    if (req.role !== 'admin') {
-      res.status(403).json({ success: false, error: 'Insufficient permissions' });
-      return;
-    }
+  if (req.role !== 'admin') {
+    res.status(403).json({ success: false, error: 'Insufficient permissions' });
+    return;
+  }
 
-    const adminWallet = req.account ?? 'unknown';
-    const parsed = updatePlatformFeeSchema.safeParse(req.body);
+  const adminWallet = req.account ?? 'unknown';
+  const parsed = updatePlatformFeeSchema.safeParse(req.body);
 
-    if (!parsed.success) {
-      await logAuditEvent({
-        action: 'platform_fee_update_attempt',
-        adminWallet,
-        queryParams: { error: 'validation_failed', reason: parsed.error.errors[0]?.message },
-        timestamp: new Date().toISOString(),
-      }).catch(() => {});
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body' });
-      return;
-    }
-
-    const { platformFeeBps } = parsed.data;
-
-    logger.info(`[admin] action=update_platform_fee admin=${adminWallet} platformFeeBps=${platformFeeBps}`);
+  if (!parsed.success) {
     await logAuditEvent({
       action: 'platform_fee_update_attempt',
       adminWallet,
-      queryParams: { platformFeeBps, outcome: 'submitted' },
+      queryParams: { error: 'validation_failed', reason: parsed.error.errors[0]?.message },
       timestamp: new Date().toISOString(),
-      contractAction: 'set_platform_fee_bps',
     }).catch(() => {});
-
-    // NOTE: Contract-level update is simulated. Real invocation will call set_platform_fee_bps() on the Soroban contract.
-    res.status(202).json({
-      success: true,
-      message: `Platform fee update to ${platformFeeBps} bps submitted (simulated)`,
-      transactionId: 'stub-platform-fee-txn-placeholder',
-    });
-  } catch (err) {
-    next(err);
+    res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body' });
+    return;
   }
+
+  const { platformFeeBps } = parsed.data;
+
+  logger.info(`[admin] action=update_platform_fee admin=${adminWallet} platformFeeBps=${platformFeeBps}`);
+  await logAuditEvent({
+    action: 'platform_fee_update_attempt',
+    adminWallet,
+    queryParams: { platformFeeBps, outcome: 'submitted' },
+    timestamp: new Date().toISOString(),
+    contractAction: 'set_platform_fee_bps',
+  }).catch(() => {});
+
+  // NOTE: Contract-level update is simulated. Real invocation will call set_platform_fee_bps() on the Soroban contract.
+  res.status(202).json({
+    success: true,
+    message: `Platform fee update to ${platformFeeBps} bps submitted (simulated)`,
+    transactionId: 'stub-platform-fee-txn-placeholder',
+  });
 }
 
 /**
@@ -1197,21 +1149,17 @@ export async function updatePlatformFee(req: Request, res: Response, next: NextF
  * List all pending multi-admin actions (expired ones are purged on read).
  */
 export async function getPendingActions(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const actions = (await listPendingActions()).map((a) => ({
-      id: a.id,
-      actionType: a.action_type,
-      proposer: a.proposer,
-      payload: JSON.parse(a.payload),
-      collectedSignatures: a.collected_signatures,
-      requiredSignatures: a.required_signatures,
-      expiresAt: a.expires_at,
-      createdAt: a.created_at,
-    }));
-    res.json({ success: true, data: actions });
-  } catch (err) {
-    next(err);
-  }
+  const actions = (await listPendingActions()).map((a) => ({
+    id: a.id,
+    actionType: a.action_type,
+    proposer: a.proposer,
+    payload: JSON.parse(a.payload),
+    collectedSignatures: a.collected_signatures,
+    requiredSignatures: a.required_signatures,
+    expiresAt: a.expires_at,
+    createdAt: a.created_at,
+  }));
+  res.json({ success: true, data: actions });
 }
 
 /**
@@ -1219,30 +1167,26 @@ export async function getPendingActions(req: Request, res: Response, next: NextF
  * Get details of a specific pending action including collected signers.
  */
 export async function getPendingActionById(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const details = await getActionDetails(req.params.id);
-    if (!details) {
-      res.status(404).json({ success: false, error: 'Action not found', code: ErrorCode.NOT_FOUND });
-      return;
-    }
-    res.json({
-      success: true,
-      data: {
-        id: details.action.id,
-        actionType: details.action.action_type,
-        proposer: details.action.proposer,
-        payload: JSON.parse(details.action.payload),
-        status: details.action.status,
-        collectedSignatures: details.action.collected_signatures,
-        requiredSignatures: details.action.required_signatures,
-        expiresAt: details.action.expires_at,
-        createdAt: details.action.created_at,
-        signers: details.signatures.map((s) => ({ wallet: s.signer, signedAt: s.signed_at })),
-      },
-    });
-  } catch (err) {
-    next(err);
+  const details = await getActionDetails(req.params.id as string);
+  if (!details) {
+    res.status(404).json({ success: false, error: 'Action not found', code: ErrorCode.NOT_FOUND });
+    return;
   }
+  res.json({
+    success: true,
+    data: {
+      id: details.action.id,
+      actionType: details.action.action_type,
+      proposer: details.action.proposer,
+      payload: JSON.parse(details.action.payload),
+      status: details.action.status,
+      collectedSignatures: details.action.collected_signatures,
+      requiredSignatures: details.action.required_signatures,
+      expiresAt: details.action.expires_at,
+      createdAt: details.action.created_at,
+      signers: details.signatures.map((s) => ({ wallet: s.signer, signedAt: s.signed_at })),
+    },
+  });
 }
 
 /**
@@ -1250,7 +1194,7 @@ export async function getPendingActionById(req: Request, res: Response, next: Ne
  * Co-sign a pending multi-admin action.
  */
 export async function approvePendingAction(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
+try {
     const adminWallet = req.account ?? 'unknown';
 
     if (!config.adminWallets.includes(adminWallet)) {
@@ -1258,7 +1202,7 @@ export async function approvePendingAction(req: Request, res: Response, next: Ne
       return;
     }
 
-    const result = await approveAction(req.params.id, adminWallet);
+    const result = await approveAction(req.params.id as string, adminWallet);
 
     if (result.status === 'duplicate') {
       res.status(409).json({
@@ -1528,90 +1472,86 @@ export async function processBatch(
  * @auth Bearer (admin role required)
  */
 export async function importValidators(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const adminWallet = req.account ?? 'unknown';
-    const contentType = (req.headers['content-type'] ?? '').toLowerCase();
+  const adminWallet = req.account ?? 'unknown';
+  const contentType = (req.headers['content-type'] ?? '').toLowerCase();
 
-    let entries: ImportValidatorEntry[];
+  let entries: ImportValidatorEntry[];
 
-    if (contentType.includes('text/csv') || contentType.includes('text/plain')) {
-      // ── CSV path ──────────────────────────────────────────────────────────
-      const rawBody = req.body as string;
-      if (typeof rawBody !== 'string' || !rawBody.trim()) {
-        res.status(400).json({ success: false, error: 'CSV body is empty', code: ErrorCode.VALIDATION_ERROR });
-        return;
-      }
-      entries = parseCsvBody(rawBody);
-    } else {
-      // ── JSON path (default) ───────────────────────────────────────────────
-      const jsonBody = req.body as { validators?: unknown };
-      if (!jsonBody || !Array.isArray(jsonBody.validators)) {
-        res.status(400).json({
-          success: false,
-          error: 'Request body must contain a "validators" array or use Content-Type: text/csv',
-          code: ErrorCode.VALIDATION_ERROR,
-        });
-        return;
-      }
-
-      // Coerce each item — we accept { wallet } at minimum; label/region are optional strings
-      entries = (jsonBody.validators as Array<unknown>).map((item) => {
-        if (typeof item === 'string') return { wallet: item };
-        if (item && typeof item === 'object') {
-          const obj = item as Record<string, unknown>;
-          return {
-            wallet: typeof obj['wallet'] === 'string' ? obj['wallet'] : '',
-            label: typeof obj['label'] === 'string' ? obj['label'] : undefined,
-            region: typeof obj['region'] === 'string' ? obj['region'] : undefined,
-          };
-        }
-        return { wallet: '' };
-      });
+  if (contentType.includes('text/csv') || contentType.includes('text/plain')) {
+    // ── CSV path ──────────────────────────────────────────────────────────
+    const rawBody = req.body as string;
+    if (typeof rawBody !== 'string' || !rawBody.trim()) {
+      res.status(400).json({ success: false, error: 'CSV body is empty', code: ErrorCode.VALIDATION_ERROR });
+      return;
     }
-
-    if (entries.length === 0) {
-      res.status(400).json({ success: false, error: 'No validator entries found in request', code: ErrorCode.VALIDATION_ERROR });
+    entries = parseCsvBody(rawBody);
+  } else {
+    // ── JSON path (default) ───────────────────────────────────────────────
+    const jsonBody = req.body as { validators?: unknown };
+    if (!jsonBody || !Array.isArray(jsonBody.validators)) {
+      res.status(400).json({
+        success: false,
+        error: 'Request body must contain a "validators" array or use Content-Type: text/csv',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
       return;
     }
 
-    const results = await processBatch(entries, adminWallet);
+    // Coerce each item — we accept { wallet } at minimum; label/region are optional strings
+    entries = (jsonBody.validators as Array<unknown>).map((item) => {
+      if (typeof item === 'string') return { wallet: item };
+      if (item && typeof item === 'object') {
+        const obj = item as Record<string, unknown>;
+        return {
+          wallet: typeof obj['wallet'] === 'string' ? obj['wallet'] : '',
+          label: typeof obj['label'] === 'string' ? obj['label'] : undefined,
+          region: typeof obj['region'] === 'string' ? obj['region'] : undefined,
+        };
+      }
+      return { wallet: '' };
+    });
+  }
 
-    const registered = results.filter((r) => r.status === 'registered').length;
-    const pending = results.filter((r) => r.status === 'pending_approval').length;
-    const duplicates = results.filter((r) => r.status === 'duplicate').length;
-    const invalid = results.filter((r) => r.status === 'invalid').length;
+  if (entries.length === 0) {
+    res.status(400).json({ success: false, error: 'No validator entries found in request', code: ErrorCode.VALIDATION_ERROR });
+    return;
+  }
 
-    logger.info(
-      `[admin] action=import_validators admin=${adminWallet} total=${results.length} registered=${registered} pending=${pending} duplicates=${duplicates} invalid=${invalid}`,
-    );
+  const results = await processBatch(entries, adminWallet);
 
-    await logAuditEvent({
-      action: 'bulk_validator_import',
-      adminWallet,
-      queryParams: {
+  const registered = results.filter((r) => r.status === 'registered').length;
+  const pending = results.filter((r) => r.status === 'pending_approval').length;
+  const duplicates = results.filter((r) => r.status === 'duplicate').length;
+  const invalid = results.filter((r) => r.status === 'invalid').length;
+
+  logger.info(
+    `[admin] action=import_validators admin=${adminWallet} total=${results.length} registered=${registered} pending=${pending} duplicates=${duplicates} invalid=${invalid}`,
+  );
+
+  await logAuditEvent({
+    action: 'bulk_validator_import',
+    adminWallet,
+    queryParams: {
+      total: results.length,
+      registered: registered + pending,
+      duplicates,
+      invalid,
+    },
+    timestamp: new Date().toISOString(),
+  }).catch(() => {});
+
+  res.status(200).json({
+    success: true,
+    data: {
+      results,
+      summary: {
         total: results.length,
         registered: registered + pending,
         duplicates,
         invalid,
       },
-      timestamp: new Date().toISOString(),
-    }).catch(() => {});
-
-    res.status(200).json({
-      success: true,
-      data: {
-        results,
-        summary: {
-          total: results.length,
-          registered: registered + pending,
-          duplicates,
-          invalid,
-        },
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
+    },
+  });
 }
 
 // ─── POST /api/admin/fees/withdraw ─────────────────────────────────────────

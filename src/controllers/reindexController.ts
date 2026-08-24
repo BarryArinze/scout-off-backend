@@ -64,7 +64,7 @@ export function triggerReindex(
   res: Response,
   next: NextFunction,
 ): void {
-  try {
+try {
     const parsed = reindexBodySchema.safeParse(req.body);
     if (!parsed.success) {
       const firstError = parsed.error.errors[0];
@@ -134,23 +134,19 @@ export function reindexStatusHandler(
   res: Response,
   next: NextFunction,
 ): void {
-  try {
-    const s = getReindexStatus();
-    res.json({
-      success: true,
-      data: {
-        status: s.status,
-        from_ledger: s.fromLedger,
-        to_ledger: s.toLedger,
-        ledgers_processed: s.ledgersProcessed,
-        ledgers_total: s.ledgersTotal,
-        events_inserted: s.eventsInserted,
-        started_at: s.startedAt,
-        completed_at: s.completedAt,
-        error_message: s.errorMessage,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
+  const s = getReindexStatus();
+  res.json({
+    success: true,
+    data: {
+      status: s.status,
+      from_ledger: s.fromLedger,
+      to_ledger: s.toLedger,
+      ledgers_processed: s.ledgersProcessed,
+      ledgers_total: s.ledgersTotal,
+      events_inserted: s.eventsInserted,
+      started_at: s.startedAt,
+      completed_at: s.completedAt,
+      error_message: s.errorMessage,
+    },
+  });
 }

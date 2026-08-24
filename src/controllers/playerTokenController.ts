@@ -84,38 +84,34 @@ export function getPlayerTokenHolders(
   res: Response,
   next: NextFunction,
 ): void {
-  try {
-    if (!featureFlagGuard(res)) return;
+  if (!featureFlagGuard(res)) return;
 
-    const { playerId } = req.params;
+  const {playerId} = req.params as {playerId: string};
 
-    const supply = tokenSupply.get(playerId);
-    if (supply === undefined) {
-      res.status(404).json({ success: false, error: 'No tokens have been issued for this player.' });
-      return;
-    }
-
-    const holders = holderRegistry.get(playerId) ?? new Map<string, number>();
-    let soldTokens = 0;
-    const holderList: Array<{ holder: string; tokens: number }> = [];
-
-    for (const [holder, tokens] of holders.entries()) {
-      holderList.push({ holder, tokens });
-      soldTokens += tokens;
-    }
-
-    res.json({
-      success: true,
-      data: {
-        playerId,
-        totalSupply: supply,
-        soldTokens,
-        holders: holderList,
-      },
-    });
-  } catch (err) {
-    next(err);
+  const supply = tokenSupply.get(playerId);
+  if (supply === undefined) {
+    res.status(404).json({ success: false, error: 'No tokens have been issued for this player.' });
+    return;
   }
+
+  const holders = holderRegistry.get(playerId) ?? new Map<string, number>();
+  let soldTokens = 0;
+  const holderList: Array<{ holder: string; tokens: number }> = [];
+
+  for (const [holder, tokens] of holders.entries()) {
+    holderList.push({ holder, tokens });
+    soldTokens += tokens;
+  }
+
+  res.json({
+    success: true,
+    data: {
+      playerId,
+      totalSupply: supply,
+      soldTokens,
+      holders: holderList,
+    },
+  });
 }
 
 // ── POST /api/players/:playerId/tokens/buy ────────────────────────────────────
@@ -143,65 +139,61 @@ export async function buyPlayerToken(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    if (!featureFlagGuard(res)) return;
+  if (!featureFlagGuard(res)) return;
 
-    const { playerId } = req.params;
+  const {playerId} = req.params as {playerId: string};
 
-    const parsed = buyTokenSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors.map((e) => e.message).join('; '),
-      });
-      return;
-    }
-
-    const { amount, buyerWallet } = parsed.data;
-
-    const supply = tokenSupply.get(playerId);
-    if (supply === undefined) {
-      res.status(404).json({ success: false, error: 'No tokens have been issued for this player.' });
-      return;
-    }
-
-    // Acquire the per-player mutex before reading remaining supply and writing
-    // the updated balance. This ensures no other concurrent request can slip
-    // between the check and the write for the same playerId.
-    await getMutex(playerId).withLock(async () => {
-      const holders = holderRegistry.get(playerId) ?? new Map<string, number>();
-      const currentSold = Array.from(holders.values()).reduce((a, b) => a + b, 0);
-      const remaining = supply - currentSold;
-
-      if (amount > remaining) {
-        // Use 409 Conflict to distinguish a lost-race (supply exhausted by a
-        // concurrent purchase) from a plain validation error (400).
-        res.status(409).json({
-          success: false,
-          error: `Supply exhausted: ${remaining} token(s) remaining. Concurrent purchase may have claimed the remaining supply — try a smaller amount.`,
-          code: 'TOKEN_SUPPLY_EXHAUSTED',
-        });
-        return;
-      }
-
-      const prev = holders.get(buyerWallet) ?? 0;
-      const newBalance = prev + amount;
-      holders.set(buyerWallet, newBalance);
-      holderRegistry.set(playerId, holders);
-
-      logger.info(`[playerToken] playerId=${playerId} buyer=${buyerWallet} amount=${amount} newBalance=${newBalance}`);
-
-      res.json({
-        success: true,
-        data: {
-          playerId,
-          buyerWallet,
-          amount,
-          newBalance,
-        },
-      });
+  const parsed = buyTokenSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors.map((e) => e.message).join('; '),
     });
-  } catch (err) {
-    next(err);
+    return;
   }
+
+  const { amount, buyerWallet } = parsed.data;
+
+  const supply = tokenSupply.get(playerId);
+  if (supply === undefined) {
+    res.status(404).json({ success: false, error: 'No tokens have been issued for this player.' });
+    return;
+  }
+
+  // Acquire the per-player mutex before reading remaining supply and writing
+  // the updated balance. This ensures no other concurrent request can slip
+  // between the check and the write for the same playerId.
+  await getMutex(playerId).withLock(async () => {
+    const holders = holderRegistry.get(playerId) ?? new Map<string, number>();
+    const currentSold = Array.from(holders.values()).reduce((a, b) => a + b, 0);
+    const remaining = supply - currentSold;
+
+    if (amount > remaining) {
+      // Use 409 Conflict to distinguish a lost-race (supply exhausted by a
+      // concurrent purchase) from a plain validation error (400).
+      res.status(409).json({
+        success: false,
+        error: `Supply exhausted: ${remaining} token(s) remaining. Concurrent purchase may have claimed the remaining supply — try a smaller amount.`,
+        code: 'TOKEN_SUPPLY_EXHAUSTED',
+      });
+      return;
+    }
+
+    const prev = holders.get(buyerWallet) ?? 0;
+    const newBalance = prev + amount;
+    holders.set(buyerWallet, newBalance);
+    holderRegistry.set(playerId, holders);
+
+    logger.info(`[playerToken] playerId=${playerId} buyer=${buyerWallet} amount=${amount} newBalance=${newBalance}`);
+
+    res.json({
+      success: true,
+      data: {
+        playerId,
+        buyerWallet,
+        amount,
+        newBalance,
+      },
+    });
+  });
 }

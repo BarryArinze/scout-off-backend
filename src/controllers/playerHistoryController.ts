@@ -99,46 +99,42 @@ export async function getPlayerHistory(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const idResult = playerIdSchema.safeParse(req.params.playerId);
-    if (!idResult.success) {
-      res.status(400).json({
-        success: false,
-        error: idResult.error.errors[0]?.message ?? "Invalid playerId",
-        code: ErrorCode.VALIDATION_ERROR,
-      });
-      return;
-    }
-
-    const playerId = sanitizeInput(req.params.playerId);
-
-    const player = await findPlayerByIdOrWallet(playerId);
-    if (!player) {
-      res.status(404).json({
-        success: false,
-        error: "Player not found",
-        code: ErrorCode.PLAYER_NOT_FOUND,
-      });
-      return;
-    }
-
-    // Newest-first for list view (DESC by changed_at)
-    const rows = await getPlayerProfileHistory(playerId);
-
-    // Build version numbers: version = total - index (so oldest = v1, newest = vN)
-    const total = rows.length;
-    const data: PlayerProfileHistoryItem[] = rows.map((r, idx) => ({
-      version: total - idx, // newest row gets the highest version
-      metadataUri: r.metadata_uri,
-      changedAt: r.changed_at,
-      txHash: r.tx_hash,
-    }));
-
-    const body: ApiResponse<PlayerProfileHistoryItem[]> = { success: true, data };
-    res.json(body);
-  } catch (err) {
-    next(err);
+  const idResult = playerIdSchema.safeParse(req.params.playerId as string);
+  if (!idResult.success) {
+    res.status(400).json({
+      success: false,
+      error: idResult.error.errors[0]?.message ?? "Invalid playerId",
+      code: ErrorCode.VALIDATION_ERROR,
+    });
+    return;
   }
+
+  const playerId = sanitizeInput(req.params.playerId as string);
+
+  const player = await findPlayerByIdOrWallet(playerId);
+  if (!player) {
+    res.status(404).json({
+      success: false,
+      error: "Player not found",
+      code: ErrorCode.PLAYER_NOT_FOUND,
+    });
+    return;
+  }
+
+  // Newest-first for list view (DESC by changed_at)
+  const rows = await getPlayerProfileHistory(playerId);
+
+  // Build version numbers: version = total - index (so oldest = v1, newest = vN)
+  const total = rows.length;
+  const data: PlayerProfileHistoryItem[] = rows.map((r, idx) => ({
+    version: total - idx, // newest row gets the highest version
+    metadataUri: r.metadata_uri,
+    changedAt: r.changed_at,
+    txHash: r.tx_hash,
+  }));
+
+  const body: ApiResponse<PlayerProfileHistoryItem[]> = { success: true, data };
+  res.json(body);
 }
 
 /**
@@ -156,64 +152,60 @@ export async function getPlayerHistoryVersion(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const idResult = playerIdSchema.safeParse(req.params.playerId);
-    if (!idResult.success) {
-      res.status(400).json({
-        success: false,
-        error: idResult.error.errors[0]?.message ?? "Invalid playerId",
-        code: ErrorCode.VALIDATION_ERROR,
-      });
-      return;
-    }
-
-    const versionResult = versionParamSchema.safeParse(req.params.version);
-    if (!versionResult.success) {
-      res.status(400).json({
-        success: false,
-        error: versionResult.error.errors[0]?.message ?? "Invalid version",
-        code: ErrorCode.VALIDATION_ERROR,
-      });
-      return;
-    }
-
-    const playerId = sanitizeInput(req.params.playerId);
-    const version = versionResult.data;
-
-    const player = await findPlayerByIdOrWallet(playerId);
-    if (!player) {
-      res.status(404).json({
-        success: false,
-        error: "Player not found",
-        code: ErrorCode.PLAYER_NOT_FOUND,
-      });
-      return;
-    }
-
-    // Fetch oldest-first so index 0 = version 1
-    const rows = await getPlayerProfileHistoryVersioned(playerId);
-    const row = rows[version - 1];
-
-    if (!row) {
-      res.status(404).json({
-        success: false,
-        error: `Version ${version} not found — player has ${rows.length} history entry(s)`,
-        code: ErrorCode.NOT_FOUND,
-      });
-      return;
-    }
-
-    const data: PlayerProfileHistoryItem = {
-      version: row.version,
-      metadataUri: row.metadata_uri,
-      changedAt: row.changed_at,
-      txHash: row.tx_hash,
-    };
-
-    res.json({ success: true, data });
-  } catch (err) {
-    next(err);
+  const idResult = playerIdSchema.safeParse(req.params.playerId as string);
+  if (!idResult.success) {
+    res.status(400).json({
+      success: false,
+      error: idResult.error.errors[0]?.message ?? "Invalid playerId",
+      code: ErrorCode.VALIDATION_ERROR,
+    });
+    return;
   }
+
+  const versionResult = versionParamSchema.safeParse(req.params.version as string);
+  if (!versionResult.success) {
+    res.status(400).json({
+      success: false,
+      error: versionResult.error.errors[0]?.message ?? "Invalid version",
+      code: ErrorCode.VALIDATION_ERROR,
+    });
+    return;
+  }
+
+  const playerId = sanitizeInput(req.params.playerId as string);
+  const version = versionResult.data;
+
+  const player = await findPlayerByIdOrWallet(playerId);
+  if (!player) {
+    res.status(404).json({
+      success: false,
+      error: "Player not found",
+      code: ErrorCode.PLAYER_NOT_FOUND,
+    });
+    return;
+  }
+
+  // Fetch oldest-first so index 0 = version 1
+  const rows = await getPlayerProfileHistoryVersioned(playerId);
+  const row = rows[version - 1];
+
+  if (!row) {
+    res.status(404).json({
+      success: false,
+      error: `Version ${version} not found — player has ${rows.length} history entry(s)`,
+      code: ErrorCode.NOT_FOUND,
+    });
+    return;
+  }
+
+  const data: PlayerProfileHistoryItem = {
+    version: row.version,
+    metadataUri: row.metadata_uri,
+    changedAt: row.changed_at,
+    txHash: row.tx_hash,
+  };
+
+  res.json({ success: true, data });
 }
 
 /**
@@ -233,71 +225,67 @@ export async function getPlayerHistoryDiff(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const idResult = playerIdSchema.safeParse(req.params.playerId);
-    if (!idResult.success) {
-      res.status(400).json({
-        success: false,
-        error: idResult.error.errors[0]?.message ?? "Invalid playerId",
-        code: ErrorCode.VALIDATION_ERROR,
-      });
-      return;
-    }
-
-    const versionResult = versionParamSchema.safeParse(req.params.version);
-    if (!versionResult.success) {
-      res.status(400).json({
-        success: false,
-        error: versionResult.error.errors[0]?.message ?? "Invalid version",
-        code: ErrorCode.VALIDATION_ERROR,
-      });
-      return;
-    }
-
-    const playerId = sanitizeInput(req.params.playerId);
-    const version = versionResult.data;
-
-    const player = await findPlayerByIdOrWallet(playerId);
-    if (!player) {
-      res.status(404).json({
-        success: false,
-        error: "Player not found",
-        code: ErrorCode.PLAYER_NOT_FOUND,
-      });
-      return;
-    }
-
-    // Fetch oldest-first so index 0 = version 1
-    const rows = await getPlayerProfileHistoryVersioned(playerId);
-    const currRow = rows[version - 1];
-
-    if (!currRow) {
-      res.status(404).json({
-        success: false,
-        error: `Version ${version} not found — player has ${rows.length} history entry(s)`,
-        code: ErrorCode.NOT_FOUND,
-      });
-      return;
-    }
-
-    const prevRow = version > 1 ? rows[version - 2] : null;
-
-    const prevSnapshot = prevRow
-      ? rowToSnapshot(prevRow.metadata_uri)
-      : {};
-    const currSnapshot = rowToSnapshot(currRow.metadata_uri);
-
-    const diff = diffObjects(prevSnapshot, currSnapshot);
-
-    res.json({
-      success: true,
-      data: {
-        version,
-        previousVersion: prevRow ? version - 1 : null,
-        diff,
-      },
+  const idResult = playerIdSchema.safeParse(req.params.playerId as string);
+  if (!idResult.success) {
+    res.status(400).json({
+      success: false,
+      error: idResult.error.errors[0]?.message ?? "Invalid playerId",
+      code: ErrorCode.VALIDATION_ERROR,
     });
-  } catch (err) {
-    next(err);
+    return;
   }
+
+  const versionResult = versionParamSchema.safeParse(req.params.version as string);
+  if (!versionResult.success) {
+    res.status(400).json({
+      success: false,
+      error: versionResult.error.errors[0]?.message ?? "Invalid version",
+      code: ErrorCode.VALIDATION_ERROR,
+    });
+    return;
+  }
+
+  const playerId = sanitizeInput(req.params.playerId as string);
+  const version = versionResult.data;
+
+  const player = await findPlayerByIdOrWallet(playerId);
+  if (!player) {
+    res.status(404).json({
+      success: false,
+      error: "Player not found",
+      code: ErrorCode.PLAYER_NOT_FOUND,
+    });
+    return;
+  }
+
+  // Fetch oldest-first so index 0 = version 1
+  const rows = await getPlayerProfileHistoryVersioned(playerId);
+  const currRow = rows[version - 1];
+
+  if (!currRow) {
+    res.status(404).json({
+      success: false,
+      error: `Version ${version} not found — player has ${rows.length} history entry(s)`,
+      code: ErrorCode.NOT_FOUND,
+    });
+    return;
+  }
+
+  const prevRow = version > 1 ? rows[version - 2] : null;
+
+  const prevSnapshot = prevRow
+    ? rowToSnapshot(prevRow.metadata_uri)
+    : {};
+  const currSnapshot = rowToSnapshot(currRow.metadata_uri);
+
+  const diff = diffObjects(prevSnapshot, currSnapshot);
+
+  res.json({
+    success: true,
+    data: {
+      version,
+      previousVersion: prevRow ? version - 1 : null,
+      diff,
+    },
+  });
 }

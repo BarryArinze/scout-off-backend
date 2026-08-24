@@ -278,96 +278,92 @@ export async function processPlayerImportBatch(
  * @auth Bearer (admin role required)
  */
 export async function importPlayers(req: Request, res: Response, next: NextFunction) {
-  try {
-    const adminWallet = req.account ?? 'unknown';
-    const contentType = (req.headers['content-type'] ?? '').toLowerCase();
-    const allowPartial = req.query['allowPartial'] !== 'false';
+  const adminWallet = req.account ?? 'unknown';
+  const contentType = (req.headers['content-type'] ?? '').toLowerCase();
+  const allowPartial = req.query['allowPartial'] !== 'false';
 
-    let entries: unknown[];
+  let entries: unknown[];
 
-    if (contentType.includes('text/csv') || contentType.includes('text/plain')) {
-      const rawBody = req.body as string;
-      if (typeof rawBody !== 'string' || !rawBody.trim()) {
-        res.status(400).json({ success: false, error: 'CSV body is empty', code: ErrorCode.VALIDATION_ERROR });
-        return;
-      }
-      entries = parsePlayerCsvBody(rawBody);
-      if (entries.length === 0) {
-        res.status(400).json({ success: false, error: 'No player entries found in request', code: ErrorCode.VALIDATION_ERROR });
-        return;
-      }
-      if (entries.length > config.playerImport.maxBatchSize) {
-        res.status(400).json({
-          success: false,
-          error: `Batch exceeds maximum size of ${config.playerImport.maxBatchSize} entries`,
-          code: ErrorCode.VALIDATION_ERROR,
-        });
-        return;
-      }
-    } else {
-      const parsed = importPlayersBodySchema.safeParse(req.body);
-      if (!parsed.success) {
-        res.status(400).json({
-          success: false,
-          error: parsed.error.errors[0]?.message ?? 'Request body must contain a "players" array or use Content-Type: text/csv',
-          code: ErrorCode.VALIDATION_ERROR,
-        });
-        return;
-      }
-      entries = parsed.data.players;
+  if (contentType.includes('text/csv') || contentType.includes('text/plain')) {
+    const rawBody = req.body as string;
+    if (typeof rawBody !== 'string' || !rawBody.trim()) {
+      res.status(400).json({ success: false, error: 'CSV body is empty', code: ErrorCode.VALIDATION_ERROR });
+      return;
     }
-
+    entries = parsePlayerCsvBody(rawBody);
     if (entries.length === 0) {
       res.status(400).json({ success: false, error: 'No player entries found in request', code: ErrorCode.VALIDATION_ERROR });
       return;
     }
-
-    // HTTP 413 for oversized batches (spec requirement).
     if (entries.length > config.playerImport.maxBatchSize) {
-      res.status(413).json({
+      res.status(400).json({
         success: false,
         error: `Batch exceeds maximum size of ${config.playerImport.maxBatchSize} entries`,
-        code: ErrorCode.PAYLOAD_TOO_LARGE,
+        code: ErrorCode.VALIDATION_ERROR,
       });
       return;
     }
-
-    const results = await processPlayerImportBatch(entries, allowPartial);
-
-    const succeeded = results.filter((r) => r.status === 'success').length;
-    const failed = results.filter((r) => r.status === 'error').length;
-
-    if (succeeded > 0) {
-      await invalidatePlayerCache();
+  } else {
+    const parsed = importPlayersBodySchema.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Request body must contain a "players" array or use Content-Type: text/csv',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
     }
-
-    logger.info(
-      `[admin] action=import_players admin=${adminWallet} total=${results.length} succeeded=${succeeded} failed=${failed} allowPartial=${allowPartial}`,
-    );
-
-    // Single audit event per import attempt — rows_attempted, rows_inserted, rows_failed.
-    await logAuditEvent({
-      action: 'bulk_player_import',
-      adminWallet,
-      queryParams: { rows_attempted: results.length, rows_inserted: succeeded, rows_failed: failed, allowPartial },
-      timestamp: new Date().toISOString(),
-    }).catch(() => {});
-
-    // HTTP status rules:
-    //   allowPartial (default) → 200, regardless of per-row failures
-    //   allowPartial=false + any failure → 422 Unprocessable Entity
-    let httpStatus = 200;
-    let overallSuccess = true;
-    if (!allowPartial && failed > 0) {
-      httpStatus = 422;
-      overallSuccess = false;
-    }
-
-    res.status(httpStatus).json({
-      success: overallSuccess,
-      data: { results, summary: { total: results.length, succeeded, failed } },
-    });
-  } catch (err) {
-    next(err);
+    entries = parsed.data.players;
   }
+
+  if (entries.length === 0) {
+    res.status(400).json({ success: false, error: 'No player entries found in request', code: ErrorCode.VALIDATION_ERROR });
+    return;
+  }
+
+  // HTTP 413 for oversized batches (spec requirement).
+  if (entries.length > config.playerImport.maxBatchSize) {
+    res.status(413).json({
+      success: false,
+      error: `Batch exceeds maximum size of ${config.playerImport.maxBatchSize} entries`,
+      code: ErrorCode.PAYLOAD_TOO_LARGE,
+    });
+    return;
+  }
+
+  const results = await processPlayerImportBatch(entries, allowPartial);
+
+  const succeeded = results.filter((r) => r.status === 'success').length;
+  const failed = results.filter((r) => r.status === 'error').length;
+
+  if (succeeded > 0) {
+    await invalidatePlayerCache();
+  }
+
+  logger.info(
+    `[admin] action=import_players admin=${adminWallet} total=${results.length} succeeded=${succeeded} failed=${failed} allowPartial=${allowPartial}`,
+  );
+
+  // Single audit event per import attempt — rows_attempted, rows_inserted, rows_failed.
+  await logAuditEvent({
+    action: 'bulk_player_import',
+    adminWallet,
+    queryParams: { rows_attempted: results.length, rows_inserted: succeeded, rows_failed: failed, allowPartial },
+    timestamp: new Date().toISOString(),
+  }).catch(() => {});
+
+  // HTTP status rules:
+  //   allowPartial (default) → 200, regardless of per-row failures
+  //   allowPartial=false + any failure → 422 Unprocessable Entity
+  let httpStatus = 200;
+  let overallSuccess = true;
+  if (!allowPartial && failed > 0) {
+    httpStatus = 422;
+    overallSuccess = false;
+  }
+
+  res.status(httpStatus).json({
+    success: overallSuccess,
+    data: { results, summary: { total: results.length, succeeded, failed } },
+  });
 }

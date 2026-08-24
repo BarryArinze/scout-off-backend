@@ -150,82 +150,78 @@ async function scoutHasPlayerAccess(scoutWallet: string, playerId: string): Prom
 
 /** GET /api/scouts/:wallet/subscription */
 export async function getSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
+  const {wallet} = req.params as {wallet: string};
 
-    const now = Math.floor(Date.now() / 1000);
-    const graceSeconds = gracePeriodSeconds();
+  const now = Math.floor(Date.now() / 1000);
+  const graceSeconds = gracePeriodSeconds();
 
-    // On-chain verification stub — falls back to local DB / indexed events when stub returns inactive
-    const onChain = await isSubscribed(wallet);
-    if (onChain.active) {
-      res.json({
-        success: true,
-        data: {
-          active: true,
-          tier: 'basic',
-          expiresAt: onChain.expiresAt,
-          remainingDays: null,
-          gracePeriodActive: false,
-        },
-      });
-      return;
-    }
+  // On-chain verification stub — falls back to local DB / indexed events when stub returns inactive
+  const onChain = await isSubscribed(wallet);
+  if (onChain.active) {
+    res.json({
+      success: true,
+      data: {
+        active: true,
+        tier: 'basic',
+        expiresAt: onChain.expiresAt,
+        remainingDays: null,
+        gracePeriodActive: false,
+      },
+    });
+    return;
+  }
 
-    // Check local subscriptions table first
-    const localSub = await getLatestSubscription(wallet);
-    if (localSub) {
-      const active = localSub.expires_at > now;
-      const gracePeriodActive = !active && localSub.expires_at > now - graceSeconds;
-      const remainingDays = active ? Math.ceil((localSub.expires_at - now) / 86400) : 0;
-      res.json({
-        success: true,
-        data: {
-          active: active || gracePeriodActive,
-          tier: localSub.tier,
-          expiresAt: localSub.expires_at,
-          remainingDays,
-          gracePeriodActive,
-        },
-      });
-      return;
-    }
-
-    // Fall back to indexed events
-    const subs = queryEvents('scout_subscribed').filter((e) => e.payload.scout === wallet);
-    const latest = subs.at(-1);
-    if (!latest) {
-      res.json({
-        success: true,
-        data: { active: false, tier: null, expiresAt: null, remainingDays: 0, gracePeriodActive: false },
-      });
-      return;
-    }
-    const expiresAt = latest.payload.subscription_expiry as number;
-    const active = expiresAt > now;
-    const gracePeriodActive = !active && expiresAt > now - graceSeconds;
-    const remainingDays = active ? Math.ceil((expiresAt - now) / 86400) : 0;
+  // Check local subscriptions table first
+  const localSub = await getLatestSubscription(wallet);
+  if (localSub) {
+    const active = localSub.expires_at > now;
+    const gracePeriodActive = !active && localSub.expires_at > now - graceSeconds;
+    const remainingDays = active ? Math.ceil((localSub.expires_at - now) / 86400) : 0;
     res.json({
       success: true,
       data: {
         active: active || gracePeriodActive,
-        tier: (latest.payload.tier as string) ?? 'basic',
-        expiresAt,
+        tier: localSub.tier,
+        expiresAt: localSub.expires_at,
         remainingDays,
         gracePeriodActive,
       },
     });
-  } catch (err) {
-    next(err);
+    return;
   }
+
+  // Fall back to indexed events
+  const subs = queryEvents('scout_subscribed').filter((e) => e.payload.scout === wallet);
+  const latest = subs.at(-1);
+  if (!latest) {
+    res.json({
+      success: true,
+      data: { active: false, tier: null, expiresAt: null, remainingDays: 0, gracePeriodActive: false },
+    });
+    return;
+  }
+  const expiresAt = latest.payload.subscription_expiry as number;
+  const active = expiresAt > now;
+  const gracePeriodActive = !active && expiresAt > now - graceSeconds;
+  const remainingDays = active ? Math.ceil((expiresAt - now) / 86400) : 0;
+  res.json({
+    success: true,
+    data: {
+      active: active || gracePeriodActive,
+      tier: (latest.payload.tier as string) ?? 'basic',
+      expiresAt,
+      remainingDays,
+      gracePeriodActive,
+    },
+  });
 }
 
 // ─── POST /api/scouts/:wallet/subscribe ───────────────────────────────────────
 
 /** POST /api/scouts/:wallet/subscribe — new subscription */
 export async function subscribe(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
+try {
+    const {wallet} = req.params as {wallet: string};
     // Ownership is enforced by requireWalletOwner() at the route level; the
     // shared guard is re-invoked here so direct callers (unit tests) get the
     // same protection without duplicating the comparison inline.
@@ -293,8 +289,8 @@ export async function subscribe(req: Request, res: Response, next: NextFunction)
  * Returns 200 for renewal, 201 for new subscription.
  */
 export async function renewSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
+try {
+    const {wallet} = req.params as {wallet: string};
     const parsed = subscribeSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request body' });
@@ -348,8 +344,8 @@ export async function renewSubscription(req: Request, res: Response, next: NextF
  * Records cancellation on-chain first; DB row is only updated after confirmation.
  */
 export async function cancelSubscription(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
+try {
+    const {wallet} = req.params as {wallet: string};
 
     const existingSub = await getLatestSubscription(wallet);
     if (!existingSub) {
@@ -393,35 +389,31 @@ export async function cancelSubscription(req: Request, res: Response, next: Next
 
 /** GET /api/scouts/:wallet/contacts */
 export async function getUnlockedContacts(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
-    const { playerId } = req.query as { playerId?: string };
+  const {wallet} = req.params as {wallet: string};
+  const { playerId } = req.query as { playerId?: string };
 
-    let contacts = await getContactUnlocksByScout(wallet);
+  let contacts = await getContactUnlocksByScout(wallet);
 
-    if (playerId) {
-      contacts = contacts.filter((c) => c.player_id === playerId);
-    }
-
-    res.json({
-      success: true,
-      data: contacts.map((c) => ({
-        playerId: c.player_id,
-        contact_status: 'unlocked',
-        unlockedAt: c.unlocked_at,
-      })),
-    });
-  } catch (err) {
-    next(err);
+  if (playerId) {
+    contacts = contacts.filter((c) => c.player_id === playerId);
   }
+
+  res.json({
+    success: true,
+    data: contacts.map((c) => ({
+      playerId: c.player_id,
+      contact_status: 'unlocked',
+      unlockedAt: c.unlocked_at,
+    })),
+  });
 }
 
 // ─── POST /api/scouts/:wallet/contacts/:playerId/unlock ───────────────────────
 
 /** POST /api/scouts/:wallet/contacts/:playerId/unlock */
 export async function unlockContact(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet, playerId } = req.params;
+try {
+    const {wallet, playerId} = req.params as {wallet: string, playerId: string};
     if (!wallet || !playerId) {
       res.status(400).json({ success: false, error: 'wallet and playerId are required', code: ErrorCode.VALIDATION_ERROR });
       return;
@@ -519,12 +511,8 @@ export async function unlockContact(req: Request, res: Response, next: NextFunct
 
 /** GET /api/scouts/:wallet/trial-offers — on-chain trial offer event history */
 export async function listTrialOffers(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
-    res.json({ success: true, data: await getTrialOffers(wallet) });
-  } catch (err) {
-    next(err);
-  }
+  const {wallet} = req.params as {wallet: string};
+  res.json({ success: true, data: await getTrialOffers(wallet) });
 }
 
 /**
@@ -536,8 +524,8 @@ export async function listTrialOffers(req: Request, res: Response, next: NextFun
  * `trial_offer_events` + `trial_offers` persistence, Elite Tier promotion and SSE broadcast.
  */
 export async function createTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
+try {
+    const {wallet} = req.params as {wallet: string};
 
     const parsed = trialOfferSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -664,179 +652,171 @@ const paymentHistoryQuerySchema = z.object({
 
 /** GET /api/scouts/:wallet/payments — payment history */
 export async function getPaymentHistory(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet } = req.params;
+  const {wallet} = req.params as {wallet: string};
 
-    const parsed = paymentHistoryQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid query parameters', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const { from, to, type, page, pageSize, format } = parsed.data;
-
-    const fromDate = from ? new Date(from) : null;
-    const toDate = to ? new Date(to) : null;
-
-    if (fromDate && isNaN(fromDate.getTime())) {
-      res.status(400).json({ success: false, error: 'Invalid from date', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    if (toDate && isNaN(toDate.getTime())) {
-      res.status(400).json({ success: false, error: 'Invalid to date', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-
-    // ── Build combined payment list ───────────────────────────────────────────
-    const payments: PaymentRecord[] = [];
-
-    // Contact unlock payments
-    if (!type || type === 'contact_unlock') {
-      const unlocks = await getContactUnlocksByScout(wallet);
-      for (const u of unlocks) {
-        const ts = new Date(u.unlocked_at * 1000).toISOString();
-        if (fromDate && new Date(ts) < fromDate) continue;
-        if (toDate && new Date(ts) > toDate) continue;
-        payments.push({
-          id: u.tx_hash ?? null,
-          type: 'contact_unlock',
-          amount_xlm: '0',
-          player_id: u.player_id,
-          tier: null,
-          tx_hash: u.tx_hash ?? null,
-          created_at: ts,
-          // legacy aliases
-          transactionId: u.tx_hash ?? null,
-          amount: '0',
-          token: 'XLM',
-          timestamp: ts,
-        });
-      }
-
-      // Also pull from contact_unlocked contract events for tx_hash + fee info
-      // (these may contain fee amounts that the DB row doesn't store)
-      const contactEvents = queryEvents('contact_unlocked').filter(
-        (e) => e.payload.scout === wallet,
-      );
-      for (const e of contactEvents) {
-        const ts = (e.payload.timestamp as string | undefined) ?? new Date(0).toISOString();
-        if (fromDate && new Date(ts) < fromDate) continue;
-        if (toDate && new Date(ts) > toDate) continue;
-        const txHash = (e.payload.tx_hash as string | undefined) ?? null;
-        const playerId = (e.payload.player_id as string | undefined) ?? (e.payload.playerId as string | undefined) ?? null;
-        const fee = (e.payload.fee ?? '0') as string;
-        // A DB row for this tx may already be in the list (pushed above,
-        // always with amount '0' since the contact_unlocks table doesn't
-        // store fee). Enrich it with the event's fee instead of skipping —
-        // otherwise the fee info this loop exists to attach never reaches
-        // the DB-sourced entry.
-        const existing = txHash
-          ? payments.find((p) => p.type === 'contact_unlock' && p.tx_hash === txHash)
-          : undefined;
-        if (existing) {
-          existing.amount = fee;
-          existing.amount_xlm = fee;
-        } else {
-          payments.push({
-            id: txHash,
-            type: 'contact_unlock',
-            amount_xlm: fee,
-            player_id: playerId,
-            tier: null,
-            tx_hash: txHash,
-            created_at: ts,
-            transactionId: txHash,
-            amount: fee,
-            token: 'XLM',
-            timestamp: ts,
-          });
-        }
-      }
-    }
-
-    // Subscription payments
-    if (!type || type === 'subscription') {
-      const subs = await getSubscriptionsByScout(wallet);
-      for (const s of subs) {
-        const ts = new Date(s.created_at * 1000).toISOString();
-        if (fromDate && new Date(ts) < fromDate) continue;
-        if (toDate && new Date(ts) > toDate) continue;
-        payments.push({
-          id: String(s.id),
-          type: 'subscription',
-          amount_xlm: '0',
-          player_id: null,
-          tier: s.tier,
-          tx_hash: null,
-          created_at: ts,
-          // legacy aliases
-          transactionId: null,
-          amount: '0',
-          token: 'XLM',
-          timestamp: ts,
-        });
-      }
-    }
-
-    // Sort by created_at descending (newest first)
-    payments.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-
-    const total = payments.length;
-
-    // ── CSV export ────────────────────────────────────────────────────────────
-    if (format === 'csv') {
-      const csvHeader = 'id,type,amount_xlm,player_id,tier,tx_hash,created_at\n';
-      const csvRows = payments.map((p) =>
-        [
-          p.id ?? '',
-          p.type,
-          p.amount_xlm,
-          p.player_id ?? '',
-          p.tier ?? '',
-          p.tx_hash ?? '',
-          p.created_at,
-        ]
-          .map((v) => `"${String(v).replace(/"/g, '""')}"`)
-          .join(','),
-      );
-      res.setHeader('Content-Type', 'text/csv');
-      res.setHeader('Content-Disposition', 'attachment; filename="payments.csv"');
-      res.status(200).send(csvHeader + csvRows.join('\n'));
-      return;
-    }
-
-    // ── Paginated JSON response ───────────────────────────────────────────────
-    const offset = (page - 1) * pageSize;
-    const pageData = payments.slice(offset, offset + pageSize);
-
-    res.json({ success: true, data: pageData, total, page, pageSize });
-  } catch (err) {
-    next(err);
+  const parsed = paymentHistoryQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid query parameters', code: ErrorCode.VALIDATION_ERROR });
+    return;
   }
+  const { from, to, type, page, pageSize, format } = parsed.data;
+
+  const fromDate = from ? new Date(from) : null;
+  const toDate = to ? new Date(to) : null;
+
+  if (fromDate && isNaN(fromDate.getTime())) {
+    res.status(400).json({ success: false, error: 'Invalid from date', code: ErrorCode.VALIDATION_ERROR });
+    return;
+  }
+  if (toDate && isNaN(toDate.getTime())) {
+    res.status(400).json({ success: false, error: 'Invalid to date', code: ErrorCode.VALIDATION_ERROR });
+    return;
+  }
+
+  // ── Build combined payment list ───────────────────────────────────────────
+  const payments: PaymentRecord[] = [];
+
+  // Contact unlock payments
+  if (!type || type === 'contact_unlock') {
+    const unlocks = await getContactUnlocksByScout(wallet);
+    for (const u of unlocks) {
+      const ts = new Date(u.unlocked_at * 1000).toISOString();
+      if (fromDate && new Date(ts) < fromDate) continue;
+      if (toDate && new Date(ts) > toDate) continue;
+      payments.push({
+        id: u.tx_hash ?? null,
+        type: 'contact_unlock',
+        amount_xlm: '0',
+        player_id: u.player_id,
+        tier: null,
+        tx_hash: u.tx_hash ?? null,
+        created_at: ts,
+        // legacy aliases
+        transactionId: u.tx_hash ?? null,
+        amount: '0',
+        token: 'XLM',
+        timestamp: ts,
+      });
+    }
+
+    // Also pull from contact_unlocked contract events for tx_hash + fee info
+    // (these may contain fee amounts that the DB row doesn't store)
+    const contactEvents = queryEvents('contact_unlocked').filter(
+      (e) => e.payload.scout === wallet,
+    );
+    for (const e of contactEvents) {
+      const ts = (e.payload.timestamp as string | undefined) ?? new Date(0).toISOString();
+      if (fromDate && new Date(ts) < fromDate) continue;
+      if (toDate && new Date(ts) > toDate) continue;
+      const txHash = (e.payload.tx_hash as string | undefined) ?? null;
+      const playerId = (e.payload.player_id as string | undefined) ?? (e.payload.playerId as string | undefined) ?? null;
+      const fee = (e.payload.fee ?? '0') as string;
+      // A DB row for this tx may already be in the list (pushed above,
+      // always with amount '0' since the contact_unlocks table doesn't
+      // store fee). Enrich it with the event's fee instead of skipping —
+      // otherwise the fee info this loop exists to attach never reaches
+      // the DB-sourced entry.
+      const existing = txHash
+        ? payments.find((p) => p.type === 'contact_unlock' && p.tx_hash === txHash)
+        : undefined;
+      if (existing) {
+        existing.amount = fee;
+        existing.amount_xlm = fee;
+      } else {
+        payments.push({
+          id: txHash,
+          type: 'contact_unlock',
+          amount_xlm: fee,
+          player_id: playerId,
+          tier: null,
+          tx_hash: txHash,
+          created_at: ts,
+          transactionId: txHash,
+          amount: fee,
+          token: 'XLM',
+          timestamp: ts,
+        });
+      }
+    }
+  }
+
+  // Subscription payments
+  if (!type || type === 'subscription') {
+    const subs = await getSubscriptionsByScout(wallet);
+    for (const s of subs) {
+      const ts = new Date(s.created_at * 1000).toISOString();
+      if (fromDate && new Date(ts) < fromDate) continue;
+      if (toDate && new Date(ts) > toDate) continue;
+      payments.push({
+        id: String(s.id),
+        type: 'subscription',
+        amount_xlm: '0',
+        player_id: null,
+        tier: s.tier,
+        tx_hash: null,
+        created_at: ts,
+        // legacy aliases
+        transactionId: null,
+        amount: '0',
+        token: 'XLM',
+        timestamp: ts,
+      });
+    }
+  }
+
+  // Sort by created_at descending (newest first)
+  payments.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  const total = payments.length;
+
+  // ── CSV export ────────────────────────────────────────────────────────────
+  if (format === 'csv') {
+    const csvHeader = 'id,type,amount_xlm,player_id,tier,tx_hash,created_at\n';
+    const csvRows = payments.map((p) =>
+      [
+        p.id ?? '',
+        p.type,
+        p.amount_xlm,
+        p.player_id ?? '',
+        p.tier ?? '',
+        p.tx_hash ?? '',
+        p.created_at,
+      ]
+        .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+        .join(','),
+    );
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="payments.csv"');
+    res.status(200).send(csvHeader + csvRows.join('\n'));
+    return;
+  }
+
+  // ── Paginated JSON response ───────────────────────────────────────────────
+  const offset = (page - 1) * pageSize;
+  const pageData = payments.slice(offset, offset + pageSize);
+
+  res.json({ success: true, data: pageData, total, page, pageSize });
 }
 
 /** GET /api/scouts/:wallet/contacts/:playerId */
 export async function getContactDetails(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { wallet, playerId } = req.params;
+  const {wallet, playerId} = req.params as {wallet: string, playerId: string};
 
-    const player = await getPlayerById(playerId);
-    if (!player) {
-      res.status(404).json({ success: false, error: 'Player not found' });
-      return;
-    }
-
-    const hasUnlocked = await hasContactUnlock(wallet, playerId);
-
-    if (!hasUnlocked) {
-      res.status(403).json({ success: false, error: 'Contact not unlocked' });
-      return;
-    }
-
-    res.json({
-      success: true,
-      data: contactDetailsBody(player),
-    });
-  } catch (err) {
-    next(err);
+  const player = await getPlayerById(playerId);
+  if (!player) {
+    res.status(404).json({ success: false, error: 'Player not found' });
+    return;
   }
+
+  const hasUnlocked = await hasContactUnlock(wallet, playerId);
+
+  if (!hasUnlocked) {
+    res.status(403).json({ success: false, error: 'Contact not unlocked' });
+    return;
+  }
+
+  res.json({
+    success: true,
+    data: contactDetailsBody(player),
+  });
 }

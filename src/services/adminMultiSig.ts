@@ -287,7 +287,7 @@ export async function approveAction(
   if (existingSig) {
     return {
       actionId,
-      collected: txResult.collected,
+      collected: action.collected_signatures,
       required: action.required_signatures,
       status: 'duplicate',
     };
@@ -308,7 +308,7 @@ export async function approveAction(
       actionType: action.action_type,
       collected,
       required: action.required_signatures,
-      outcome: thresholdReached ? 'threshold_met' : 'partially_signed',
+      outcome: collected >= action.required_signatures ? 'threshold_met' : 'partially_signed',
     },
     timestamp: new Date().toISOString(),
   }).catch(() => {});

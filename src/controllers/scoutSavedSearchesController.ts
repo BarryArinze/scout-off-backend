@@ -85,54 +85,50 @@ export async function createSavedSearch(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const parsed = createSavedSearchSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
-      });
-      return;
-    }
+  const parsed = createSavedSearchSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid request body',
+    });
+    return;
+  }
 
-    const { name, filters } = parsed.data;
-    const wallet = req.params.wallet;
+  const { name, filters } = parsed.data;
+  const wallet = req.params.wallet as string;
 
-    // Enforce 20 saved searches limit
-    const currentCount = await countSavedSearchesByScout(wallet);
-    if (currentCount >= 20) {
-      res.status(422).json({
-        success: false,
-        error: 'Maximum of 20 saved searches per scout',
-      });
-      return;
-    }
+  // Enforce 20 saved searches limit
+  const currentCount = await countSavedSearchesByScout(wallet);
+  if (currentCount >= 20) {
+    res.status(422).json({
+      success: false,
+      error: 'Maximum of 20 saved searches per scout',
+    });
+    return;
+  }
 
-    const now = Math.floor(Date.now() / 1000);
-    const filtersJson = JSON.stringify(filters);
+  const now = Math.floor(Date.now() / 1000);
+  const filtersJson = JSON.stringify(filters);
 
-    const id = await insertSavedSearch({
+  const id = await insertSavedSearch({
+    scout_wallet: wallet,
+    name,
+    filters: filtersJson,
+    created_at: now,
+  });
+
+  logger.info({ scout: wallet, id, name, action: 'saved_search_created' });
+
+  res.status(201).json({
+    success: true,
+    data: {
+      id,
       scout_wallet: wallet,
       name,
-      filters: filtersJson,
+      filters,
       created_at: now,
-    });
-
-    logger.info({ scout: wallet, id, name, action: 'saved_search_created' });
-
-    res.status(201).json({
-      success: true,
-      data: {
-        id,
-        scout_wallet: wallet,
-        name,
-        filters,
-        created_at: now,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
+    },
+  });
 }
 
 /**
@@ -151,21 +147,17 @@ export async function listSavedSearches(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const rows = await getSavedSearchesByScout(req.params.wallet);
+  const rows = await getSavedSearchesByScout(req.params.wallet as string);
 
-    const data = rows.map((row) => ({
-      id:           row.id,
-      scout_wallet: row.scout_wallet,
-      name:         row.name,
-      filters:      JSON.parse(row.filters) as SavedSearchFilters,
-      created_at:   row.created_at,
-    }));
+  const data = rows.map((row) => ({
+    id:           row.id,
+    scout_wallet: row.scout_wallet,
+    name:         row.name,
+    filters:      JSON.parse(row.filters) as SavedSearchFilters,
+    created_at:   row.created_at,
+  }));
 
-    res.json({ success: true, data });
-  } catch (err) {
-    next(err);
-  }
+  res.json({ success: true, data });
 }
 
 /**
@@ -187,25 +179,21 @@ export async function deleteSavedSearchHandler(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid saved search id' });
-      return;
-    }
-
-    const removed = await deleteSavedSearch(id, req.params.wallet);
-    if (!removed) {
-      res.status(404).json({ success: false, error: 'Saved search not found' });
-      return;
-    }
-
-    logger.info({ scout: req.params.wallet, id, action: 'saved_search_deleted' });
-
-    res.json({ success: true, data: { removed: true, id } });
-  } catch (err) {
-    next(err);
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid saved search id' });
+    return;
   }
+
+  const removed = await deleteSavedSearch(id, req.params.wallet as string);
+  if (!removed) {
+    res.status(404).json({ success: false, error: 'Saved search not found' });
+    return;
+  }
+
+  logger.info({ scout: req.params.wallet as string, id, action: 'saved_search_deleted' });
+
+  res.json({ success: true, data: { removed: true, id } });
 }
 
 /**
@@ -227,62 +215,58 @@ export async function updateSavedSearchHandler(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid saved search id' });
-      return;
-    }
-
-    const parsed = updateSavedSearchSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
-      });
-      return;
-    }
-
-    const { name, filters } = parsed.data;
-    const wallet = req.params.wallet;
-
-    // Build updates object
-    const updates: { name?: string; filters?: string } = {};
-    if (name !== undefined) {
-      updates.name = name;
-    }
-    if (filters !== undefined) {
-      updates.filters = JSON.stringify(filters);
-    }
-
-    const updated = await updateSavedSearch(id, wallet, updates);
-    if (!updated) {
-      res.status(404).json({ success: false, error: 'Saved search not found' });
-      return;
-    }
-
-    // Fetch the updated row to return
-    const row = await getSavedSearchById(id, wallet);
-    if (!row) {
-      res.status(404).json({ success: false, error: 'Saved search not found' });
-      return;
-    }
-
-    logger.info({ scout: wallet, id, action: 'saved_search_updated' });
-
-    res.json({
-      success: true,
-      data: {
-        id: row.id,
-        scout_wallet: row.scout_wallet,
-        name: row.name,
-        filters: JSON.parse(row.filters) as SavedSearchFilters,
-        created_at: row.created_at,
-      },
-    });
-  } catch (err) {
-    next(err);
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid saved search id' });
+    return;
   }
+
+  const parsed = updateSavedSearchSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid request body',
+    });
+    return;
+  }
+
+  const { name, filters } = parsed.data;
+  const wallet = req.params.wallet as string;
+
+  // Build updates object
+  const updates: { name?: string; filters?: string } = {};
+  if (name !== undefined) {
+    updates.name = name;
+  }
+  if (filters !== undefined) {
+    updates.filters = JSON.stringify(filters);
+  }
+
+  const updated = await updateSavedSearch(id, wallet, updates);
+  if (!updated) {
+    res.status(404).json({ success: false, error: 'Saved search not found' });
+    return;
+  }
+
+  // Fetch the updated row to return
+  const row = await getSavedSearchById(id, wallet);
+  if (!row) {
+    res.status(404).json({ success: false, error: 'Saved search not found' });
+    return;
+  }
+
+  logger.info({ scout: wallet, id, action: 'saved_search_updated' });
+
+  res.json({
+    success: true,
+    data: {
+      id: row.id,
+      scout_wallet: row.scout_wallet,
+      name: row.name,
+      filters: JSON.parse(row.filters) as SavedSearchFilters,
+      created_at: row.created_at,
+    },
+  });
 }
 
 /**
@@ -304,54 +288,50 @@ export async function runSavedSearch(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid saved search id' });
-      return;
-    }
-
-    const wallet = req.params.wallet;
-    const row = await getSavedSearchById(id, wallet);
-    if (!row) {
-      res.status(404).json({ success: false, error: 'Saved search not found' });
-      return;
-    }
-
-    // Parse filters from saved search
-    const filters = JSON.parse(row.filters) as SavedSearchFilters;
-
-    // Parse pagination params
-    const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string, 10) || 20));
-    const offset = (page - 1) * pageSize;
-
-    // Query players with the saved filters
-    const players = await queryPlayers({
-      region: filters.region,
-      position: filters.position,
-      minTier: filters.minTier,
-      limit: pageSize,
-      offset,
-    });
-
-    // Get total count for pagination
-    const total = await countPlayers({
-      region: filters.region,
-      position: filters.position,
-      minTier: filters.minTier,
-    });
-
-    res.json({
-      success: true,
-      data: {
-        players,
-        total,
-        page,
-        pageSize,
-      },
-    });
-  } catch (err) {
-    next(err);
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid saved search id' });
+    return;
   }
+
+  const wallet = req.params.wallet as string;
+  const row = await getSavedSearchById(id, wallet);
+  if (!row) {
+    res.status(404).json({ success: false, error: 'Saved search not found' });
+    return;
+  }
+
+  // Parse filters from saved search
+  const filters = JSON.parse(row.filters) as SavedSearchFilters;
+
+  // Parse pagination params
+  const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string, 10) || 20));
+  const offset = (page - 1) * pageSize;
+
+  // Query players with the saved filters
+  const players = await queryPlayers({
+    region: filters.region,
+    position: filters.position,
+    minTier: filters.minTier,
+    limit: pageSize,
+    offset,
+  });
+
+  // Get total count for pagination
+  const total = await countPlayers({
+    region: filters.region,
+    position: filters.position,
+    minTier: filters.minTier,
+  });
+
+  res.json({
+    success: true,
+    data: {
+      players,
+      total,
+      page,
+      pageSize,
+    },
+  });
 }

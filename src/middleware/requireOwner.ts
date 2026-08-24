@@ -16,7 +16,7 @@ export function isOwner(account: string | undefined, targetId: string): boolean 
  */
 export function requireOwner(req: Request, res: Response, next: NextFunction): void {
   const account = req.account;
-  const { playerId } = req.params;
+  const playerId = req.params.playerId as string;
   if (!isOwner(account, playerId)) {
     sendForbidden(res, 'Forbidden: not the profile owner');
     return;
@@ -83,7 +83,7 @@ export function checkWalletOwnership(
     return true;
   }
 
-  const { wallet } = req.params;
+  const wallet = req.params.wallet as string;
   if (!wallet) {
     sendForbidden(res, 'Forbidden');
     return false;

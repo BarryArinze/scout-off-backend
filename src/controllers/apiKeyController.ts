@@ -215,51 +215,47 @@ export async function issueApiKey(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const parsed = issueKeySchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid body' });
-      return;
-    }
+  const parsed = issueKeySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid body' });
+    return;
+  }
 
-    const scopesResult = normalizeRequestedScopes(parsed.data.scopes);
-    if (!scopesResult.ok) {
-      res.status(400).json({ success: false, error: scopesResult.error });
-      return;
-    }
+  const scopesResult = normalizeRequestedScopes(parsed.data.scopes);
+  if (!scopesResult.ok) {
+    res.status(400).json({ success: false, error: scopesResult.error });
+    return;
+  }
 
-    const { key, keyHash, lookupHash } = generateApiKey();
-    const now = Math.floor(Date.now() / 1000);
+  const { key, keyHash, lookupHash } = generateApiKey();
+  const now = Math.floor(Date.now() / 1000);
 
-    const grantedScopes = scopesResult.scopes;
-    const id = await insertApiKey({
-      key_hash: keyHash,
-      scout_wallet: req.params.wallet,
+  const grantedScopes = scopesResult.scopes;
+  const id = await insertApiKey({
+    key_hash: keyHash,
+    scout_wallet: req.params.wallet as string,
+    label: parsed.data.label,
+    created_at: now,
+    scopes: grantedScopes.length > 0 ? grantedScopes : undefined,
+    // Indexed lookup value (#1033). Persisted alongside the salted
+    // verification hash so this key never touches the transitional scan
+    // path; deliberately absent from the response body below.
+    lookup_hash: lookupHash,
+  });
+
+  logger.info({ scout: req.params.wallet as string, action: 'api_key_issued', keyId: id, scopes: grantedScopes.length > 0 ? grantedScopes : null });
+
+  res.status(201).json({
+    success: true,
+    data: {
+      id,
+      key,          // plaintext — returned once only
       label: parsed.data.label,
       created_at: now,
-      scopes: grantedScopes.length > 0 ? grantedScopes : undefined,
-      // Indexed lookup value (#1033). Persisted alongside the salted
-      // verification hash so this key never touches the transitional scan
-      // path; deliberately absent from the response body below.
-      lookup_hash: lookupHash,
-    });
-
-    logger.info({ scout: req.params.wallet, action: 'api_key_issued', keyId: id, scopes: grantedScopes.length > 0 ? grantedScopes : null });
-
-    res.status(201).json({
-      success: true,
-      data: {
-        id,
-        key,          // plaintext — returned once only
-        label: parsed.data.label,
-        created_at: now,
-        // Empty array == legacy/unrestricted key (omitted scopes).
-        scopes: grantedScopes,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
+      // Empty array == legacy/unrestricted key (omitted scopes).
+      scopes: grantedScopes,
+    },
+  });
 }
 
 /**
@@ -273,29 +269,25 @@ export async function listApiKeys(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const rows: ApiKeyRow[] = await listApiKeysByWallet(req.params.wallet);
+  const rows: ApiKeyRow[] = await listApiKeysByWallet(req.params.wallet as string);
 
-    res.json({
-      success: true,
-      data: rows.map((r) => ({
-        id: r.id,
-        label: r.label,
-        key_prefix: r.key_hash.slice(0, 8) + '…', // display hint only
-        created_at: r.created_at,
-        last_used_at: r.last_used_at ?? null,
-        revoked: r.revoked_at !== null,
-        revoked_at: r.revoked_at ?? null,
-        // Set only while a rotation grace period is in effect (#676); null
-        // once the key is either permanently revoked or never rotated.
-        scheduled_revocation_at: r.revoked_at === null ? (r.revoke_after ?? null) : null,
-        // Empty array = legacy/unrestricted key; otherwise the granted scope list.
-        scopes: r.scopes ? (JSON.parse(r.scopes) as string[]) : [],
-      })),
-    });
-  } catch (err) {
-    next(err);
-  }
+  res.json({
+    success: true,
+    data: rows.map((r) => ({
+      id: r.id,
+      label: r.label,
+      key_prefix: r.key_hash.slice(0, 8) + '…', // display hint only
+      created_at: r.created_at,
+      last_used_at: r.last_used_at ?? null,
+      revoked: r.revoked_at !== null,
+      revoked_at: r.revoked_at ?? null,
+      // Set only while a rotation grace period is in effect (#676); null
+      // once the key is either permanently revoked or never rotated.
+      scheduled_revocation_at: r.revoked_at === null ? (r.revoke_after ?? null) : null,
+      // Empty array = legacy/unrestricted key; otherwise the granted scope list.
+      scopes: r.scopes ? (JSON.parse(r.scopes) as string[]) : [],
+    })),
+  });
 }
 
 /**
@@ -309,25 +301,21 @@ export async function revokeApiKey(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid API key id' });
-      return;
-    }
-
-    const revoked = await revokeApiKeyById(id, req.params.wallet);
-    if (!revoked) {
-      res.status(404).json({ success: false, error: 'API key not found' });
-      return;
-    }
-
-    logger.info({ scout: req.params.wallet, action: 'api_key_revoked', keyId: id });
-
-    res.json({ success: true, data: { id, revoked: true } });
-  } catch (err) {
-    next(err);
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid API key id' });
+    return;
   }
+
+  const revoked = await revokeApiKeyById(id, req.params.wallet as string);
+  if (!revoked) {
+    res.status(404).json({ success: false, error: 'API key not found' });
+    return;
+  }
+
+  logger.info({ scout: req.params.wallet as string, action: 'api_key_revoked', keyId: id });
+
+  res.json({ success: true, data: { id, revoked: true } });
 }
 
 /**
@@ -348,66 +336,62 @@ export async function rotateApiKey(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid API key id' });
-      return;
-    }
-
-    const parsed = rotateKeySchema.safeParse(req.body ?? {});
-    if (!parsed.success) {
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid body' });
-      return;
-    }
-
-    const oldRow = await getApiKeyById(id, req.params.wallet);
-    if (!oldRow || oldRow.revoked_at !== null) {
-      res.status(404).json({ success: false, error: 'API key not found' });
-      return;
-    }
-
-    const inheritedScopes = parseApiKeyScopes(oldRow.scopes, (message) => logger.warn(message));
-
-    const { key, keyHash, lookupHash } = generateApiKey();
-    const now = Math.floor(Date.now() / 1000);
-    const newId = await insertApiKey({
-      key_hash: keyHash,
-      scout_wallet: req.params.wallet,
-      label: oldRow.label,
-      created_at: now,
-      scopes: inheritedScopes ?? undefined,
-      lookup_hash: lookupHash,
-    });
-
-    const revokesAt = now + parsed.data.gracePeriodSeconds;
-    await scheduleApiKeyRevocation(id, req.params.wallet, revokesAt);
-
-    logger.info({
-      scout: req.params.wallet,
-      action: 'api_key_rotated',
-      oldKeyId: id,
-      newKeyId: newId,
-      revokesAt,
-    });
-
-    res.status(201).json({
-      success: true,
-      data: {
-        newKey: {
-          id: newId,
-          key,          // plaintext — returned once only
-          label: oldRow.label,
-          created_at: now,
-          scopes: inheritedScopes ?? [],
-        },
-        oldKey: {
-          id,
-          revokesAt,
-        },
-      },
-    });
-  } catch (err) {
-    next(err);
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid API key id' });
+    return;
   }
+
+  const parsed = rotateKeySchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid body' });
+    return;
+  }
+
+  const oldRow = await getApiKeyById(id, req.params.wallet as string);
+  if (!oldRow || oldRow.revoked_at !== null) {
+    res.status(404).json({ success: false, error: 'API key not found' });
+    return;
+  }
+
+  const inheritedScopes = parseApiKeyScopes(oldRow.scopes, (message) => logger.warn(message));
+
+  const { key, keyHash, lookupHash } = generateApiKey();
+  const now = Math.floor(Date.now() / 1000);
+  const newId = await insertApiKey({
+    key_hash: keyHash,
+    scout_wallet: req.params.wallet as string,
+    label: oldRow.label,
+    created_at: now,
+    scopes: inheritedScopes ?? undefined,
+    lookup_hash: lookupHash,
+  });
+
+  const revokesAt = now + parsed.data.gracePeriodSeconds;
+  await scheduleApiKeyRevocation(id, req.params.wallet as string, revokesAt);
+
+  logger.info({
+    scout: req.params.wallet as string,
+    action: 'api_key_rotated',
+    oldKeyId: id,
+    newKeyId: newId,
+    revokesAt,
+  });
+
+  res.status(201).json({
+    success: true,
+    data: {
+      newKey: {
+        id: newId,
+        key,          // plaintext — returned once only
+        label: oldRow.label,
+        created_at: now,
+        scopes: inheritedScopes ?? [],
+      },
+      oldKey: {
+        id,
+        revokesAt,
+      },
+    },
+  });
 }

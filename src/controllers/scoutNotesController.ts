@@ -33,41 +33,37 @@ export async function putScoutNote(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const { playerId } = req.params;
-    const parsed = upsertNoteSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
-      });
-      return;
-    }
-
-    const sanitizedNote = sanitizeInput(parsed.data.note);
-    const now = Math.floor(Date.now() / 1000);
-
-    await upsertScoutNote({
-      scout_wallet: req.params.wallet,
-      player_id: playerId,
-      note_text: sanitizedNote,
-      updated_at: now,
+  const {playerId} = req.params as {playerId: string};
+  const parsed = upsertNoteSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid request body',
     });
-
-    logger.info({ scout: req.params.wallet, playerId, action: 'scout_note_upserted' });
-
-    res.status(200).json({
-      success: true,
-      data: {
-        scout_wallet: req.params.wallet,
-        player_id: playerId,
-        note: sanitizedNote,
-        updated_at: now,
-      },
-    });
-  } catch (err) {
-    next(err);
+    return;
   }
+
+  const sanitizedNote = sanitizeInput(parsed.data.note);
+  const now = Math.floor(Date.now() / 1000);
+
+  await upsertScoutNote({
+    scout_wallet: req.params.wallet as string,
+    player_id: playerId,
+    note_text: sanitizedNote,
+    updated_at: now,
+  });
+
+  logger.info({ scout: req.params.wallet as string, playerId, action: 'scout_note_upserted' });
+
+  res.status(200).json({
+    success: true,
+    data: {
+      scout_wallet: req.params.wallet as string,
+      player_id: playerId,
+      note: sanitizedNote,
+      updated_at: now,
+    },
+  });
 }
 
 /**
@@ -83,27 +79,23 @@ export async function getScoutNoteHandler(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const { playerId } = req.params;
-    const row = await getScoutNote(req.params.wallet, playerId);
+  const {playerId} = req.params as {playerId: string};
+  const row = await getScoutNote(req.params.wallet as string, playerId);
 
-    if (!row) {
-      res.status(404).json({ success: false, error: 'Note not found' });
-      return;
-    }
-
-    res.json({
-      success: true,
-      data: {
-        scout_wallet: row.scout_wallet,
-        player_id: row.player_id,
-        note: row.note_text,
-        updated_at: row.updated_at,
-      },
-    });
-  } catch (err) {
-    next(err);
+  if (!row) {
+    res.status(404).json({ success: false, error: 'Note not found' });
+    return;
   }
+
+  res.json({
+    success: true,
+    data: {
+      scout_wallet: row.scout_wallet,
+      player_id: row.player_id,
+      note: row.note_text,
+      updated_at: row.updated_at,
+    },
+  });
 }
 
 /**
@@ -118,21 +110,17 @@ export async function listScoutNotesHandler(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const rows = await getScoutNotes(req.params.wallet);
+  const rows = await getScoutNotes(req.params.wallet as string);
 
-    res.json({
-      success: true,
-      data: rows.map((r) => ({
-        scout_wallet: r.scout_wallet,
-        player_id: r.player_id,
-        note: r.note_text,
-        updated_at: r.updated_at,
-      })),
-    });
-  } catch (err) {
-    next(err);
-  }
+  res.json({
+    success: true,
+    data: rows.map((r) => ({
+      scout_wallet: r.scout_wallet,
+      player_id: r.player_id,
+      note: r.note_text,
+      updated_at: r.updated_at,
+    })),
+  });
 }
 
 // ─── Multi-note CRUD (#488 v2) ────────────────────────────────────────────────
@@ -166,44 +154,40 @@ export async function createPlayerNote(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const parsed = noteContentSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
-      });
-      return;
-    }
+  const parsed = noteContentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid request body',
+    });
+    return;
+  }
 
-    const { playerId } = req.params;
-    const sanitized = sanitizeInput(parsed.data.content);
-    const now = Math.floor(Date.now() / 1000);
+  const {playerId} = req.params as {playerId: string};
+  const sanitized = sanitizeInput(parsed.data.content);
+  const now = Math.floor(Date.now() / 1000);
 
-    const id = await insertScoutPlayerNote({
-      scout_wallet: req.params.wallet,
+  const id = await insertScoutPlayerNote({
+    scout_wallet: req.params.wallet as string,
+    player_id: playerId,
+    content: sanitized,
+    created_at: now,
+    updated_at: now,
+  });
+
+  logger.info({ scout: req.params.wallet as string, playerId, noteId: id, action: 'player_note_created' });
+
+  res.status(201).json({
+    success: true,
+    data: {
+      id,
+      scout_wallet: req.params.wallet as string,
       player_id: playerId,
       content: sanitized,
       created_at: now,
       updated_at: now,
-    });
-
-    logger.info({ scout: req.params.wallet, playerId, noteId: id, action: 'player_note_created' });
-
-    res.status(201).json({
-      success: true,
-      data: {
-        id,
-        scout_wallet: req.params.wallet,
-        player_id: playerId,
-        content: sanitized,
-        created_at: now,
-        updated_at: now,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
+    },
+  });
 }
 
 /**
@@ -221,24 +205,20 @@ export async function listPlayerNotes(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const { playerId } = req.params;
-    const rows = await getScoutPlayerNotes(req.params.wallet, playerId);
+  const {playerId} = req.params as {playerId: string};
+  const rows = await getScoutPlayerNotes(req.params.wallet as string, playerId);
 
-    res.json({
-      success: true,
-      data: rows.map((r) => ({
-        id: r.id,
-        scout_wallet: r.scout_wallet,
-        player_id: r.player_id,
-        content: r.content,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-      })),
-    });
-  } catch (err) {
-    next(err);
-  }
+  res.json({
+    success: true,
+    data: rows.map((r) => ({
+      id: r.id,
+      scout_wallet: r.scout_wallet,
+      player_id: r.player_id,
+      content: r.content,
+      created_at: r.created_at,
+      updated_at: r.updated_at,
+    })),
+  });
 }
 
 /**
@@ -259,53 +239,49 @@ export async function updatePlayerNote(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const { playerId, noteId } = req.params;
-    const id = parseInt(noteId, 10);
-    if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid note id' });
-      return;
-    }
+  const {playerId, noteId} = req.params as {playerId: string, noteId: string};
+  const id = parseInt(noteId, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid note id' });
+    return;
+  }
 
-    const parsed = noteContentSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
-      });
-      return;
-    }
+  const parsed = noteContentSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid request body',
+    });
+    return;
+  }
 
-    const sanitized = sanitizeInput(parsed.data.content);
-    const now = Math.floor(Date.now() / 1000);
+  const sanitized = sanitizeInput(parsed.data.content);
+  const now = Math.floor(Date.now() / 1000);
 
-    const updated = await updateScoutPlayerNote({
+  const updated = await updateScoutPlayerNote({
+    id,
+    scout_wallet: req.params.wallet as string,
+    content: sanitized,
+    updated_at: now,
+  });
+
+  if (!updated) {
+    res.status(404).json({ success: false, error: 'Note not found' });
+    return;
+  }
+
+  logger.info({ scout: req.params.wallet as string, playerId, noteId: id, action: 'player_note_updated' });
+
+  res.json({
+    success: true,
+    data: {
       id,
-      scout_wallet: req.params.wallet,
+      scout_wallet: req.params.wallet as string,
+      player_id: playerId,
       content: sanitized,
       updated_at: now,
-    });
-
-    if (!updated) {
-      res.status(404).json({ success: false, error: 'Note not found' });
-      return;
-    }
-
-    logger.info({ scout: req.params.wallet, playerId, noteId: id, action: 'player_note_updated' });
-
-    res.json({
-      success: true,
-      data: {
-        id,
-        scout_wallet: req.params.wallet,
-        player_id: playerId,
-        content: sanitized,
-        updated_at: now,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
+    },
+  });
 }
 
 /**
@@ -324,25 +300,21 @@ export async function deletePlayerNote(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const { playerId, noteId } = req.params;
-    const id = parseInt(noteId, 10);
-    if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid note id' });
-      return;
-    }
-
-    const removed = await deleteScoutPlayerNote(id, req.params.wallet);
-
-    if (!removed) {
-      res.status(404).json({ success: false, error: 'Note not found' });
-      return;
-    }
-
-    logger.info({ scout: req.params.wallet, playerId, noteId: id, action: 'player_note_deleted' });
-
-    res.json({ success: true, data: { removed: true, id } });
-  } catch (err) {
-    next(err);
+  const {playerId, noteId} = req.params as {playerId: string, noteId: string};
+  const id = parseInt(noteId, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid note id' });
+    return;
   }
+
+  const removed = await deleteScoutPlayerNote(id, req.params.wallet as string);
+
+  if (!removed) {
+    res.status(404).json({ success: false, error: 'Note not found' });
+    return;
+  }
+
+  logger.info({ scout: req.params.wallet as string, playerId, noteId: id, action: 'player_note_deleted' });
+
+  res.json({ success: true, data: { removed: true, id } });
 }

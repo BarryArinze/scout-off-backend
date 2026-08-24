@@ -59,15 +59,11 @@ export async function getFeatureFlags(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    // Force re-read from DB by clearing cache first
-    clearFeatureFlagCache();
-    const rows = await getAllFeatureFlags();
-    const flags = rows.map(serializeFlag);
-    res.json({ success: true, data: flags });
-  } catch (err) {
-    next(err);
-  }
+  // Force re-read from DB by clearing cache first
+  clearFeatureFlagCache();
+  const rows = await getAllFeatureFlags();
+  const flags = rows.map(serializeFlag);
+  res.json({ success: true, data: flags });
 }
 
 /**
@@ -86,28 +82,24 @@ export async function updateFeatureFlag(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const parsed = updateFeatureFlagBodySchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
-      });
-      return;
-    }
-
-    const { name, enabled } = parsed.data;
-    const updatedBy = req.account ?? 'unknown';
-
-    await setFeatureFlag(name, enabled, updatedBy);
-
-    res.json({
-      success: true,
-      data: { name, enabled, updated_by: updatedBy },
+  const parsed = updateFeatureFlagBodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid request body',
     });
-  } catch (err) {
-    next(err);
+    return;
   }
+
+  const { name, enabled } = parsed.data;
+  const updatedBy = req.account ?? 'unknown';
+
+  await setFeatureFlag(name, enabled, updatedBy);
+
+  res.json({
+    success: true,
+    data: { name, enabled, updated_by: updatedBy },
+  });
 }
 
 /**
@@ -130,51 +122,47 @@ export async function toggleFeatureFlag(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const { name } = req.params;
+  const {name} = req.params as {name: string};
 
-    if (!flagNameRegex.test(name)) {
-      res.status(400).json({
-        success: false,
-        error: 'Flag name must be snake_case starting with a letter',
-      });
-      return;
-    }
-
-    const parsed = toggleFlagBodySchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
-      });
-      return;
-    }
-
-    const { enabled } = parsed.data;
-
-    // Verify the flag exists in the DB before toggling
-    const existing = await getFeatureFlag(name);
-    if (!existing) {
-      res.status(404).json({
-        success: false,
-        error: `Feature flag '${name}' not found`,
-      });
-      return;
-    }
-
-    const updatedBy = req.account ?? 'unknown';
-    await setFeatureFlag(name, enabled, updatedBy);
-
-    res.json({
-      success: true,
-      data: {
-        name,
-        enabled,
-        updated_by: updatedBy,
-        updated_at: Date.now(),
-      },
+  if (!flagNameRegex.test(name)) {
+    res.status(400).json({
+      success: false,
+      error: 'Flag name must be snake_case starting with a letter',
     });
-  } catch (err) {
-    next(err);
+    return;
   }
+
+  const parsed = toggleFlagBodySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid request body',
+    });
+    return;
+  }
+
+  const { enabled } = parsed.data;
+
+  // Verify the flag exists in the DB before toggling
+  const existing = await getFeatureFlag(name);
+  if (!existing) {
+    res.status(404).json({
+      success: false,
+      error: `Feature flag '${name}' not found`,
+    });
+    return;
+  }
+
+  const updatedBy = req.account ?? 'unknown';
+  await setFeatureFlag(name, enabled, updatedBy);
+
+  res.json({
+    success: true,
+    data: {
+      name,
+      enabled,
+      updated_by: updatedBy,
+      updated_at: Date.now(),
+    },
+  });
 }

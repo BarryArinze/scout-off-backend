@@ -126,7 +126,7 @@ function getCorrelationId(req: Request): string {
 }
 
 export async function submitMilestoneEvidence(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
+try {
     const { playerId, milestoneType, evidenceUri } = milestoneSchema.parse(req.body);
 
     let evidenceCid: string;
@@ -172,50 +172,46 @@ export async function submitMilestoneEvidence(req: Request, res: Response, next:
 
 /** GET /api/validators/milestones/pending or /api/validators/:wallet/milestones/pending */
 export async function getPendingMilestones(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { region, position, playerId, page, pageSize } = pendingQuerySchema.parse(req.query);
-    const validatorWallet = req.params.wallet || req.account;
-    const { data, total } = await getPendingMilestonesFromDb({
-      validatorWallet: validatorWallet,
-      region,
-      position,
-      playerId,
-      page,
-      pageSize,
-    });
+  const { region, position, playerId, page, pageSize } = pendingQuerySchema.parse(req.query);
+  const validatorWallet = req.params.wallet as string || req.account;
+  const { data, total } = await getPendingMilestonesFromDb({
+    validatorWallet: validatorWallet,
+    region,
+    position,
+    playerId,
+    page,
+    pageSize,
+  });
 
-    // Transform to the desired output format
-    const milestones = data.map((m) => ({
-      milestoneId: m.milestone_id,
-      playerId: m.player_id,
-      milestoneType: m.milestone_type,
-      evidenceUri: m.evidence_uri,
-      submittedAt: m.submitted_at,
-    }));
+  // Transform to the desired output format
+  const milestones = data.map((m) => ({
+    milestoneId: m.milestone_id,
+    playerId: m.player_id,
+    milestoneType: m.milestone_type,
+    evidenceUri: m.evidence_uri,
+    submittedAt: m.submitted_at,
+  }));
 
-    const currentValidatorWallet = req.account ?? 'unknown';
-    await recordAudit(
-      currentValidatorWallet,
-      'pending_milestones_viewed', 
-      { 
-        region: region ?? null, 
-        position: position ?? null,
-        validatorWallet,
-        pendingCount: total,
-      }, 
-      'pending milestones viewed'
-    );
+  const currentValidatorWallet = req.account ?? 'unknown';
+  await recordAudit(
+    currentValidatorWallet,
+    'pending_milestones_viewed', 
+    { 
+      region: region ?? null, 
+      position: position ?? null,
+      validatorWallet,
+      pendingCount: total,
+    }, 
+    'pending milestones viewed'
+  );
 
-    res.json({ 
-      success: true, 
-      data: milestones, 
-      total, 
-      page: page || 1, 
-      pageSize: pageSize || 20 
-    });
-  } catch (err) {
-    next(err);
-  }
+  res.json({ 
+    success: true, 
+    data: milestones, 
+    total, 
+    page: page || 1, 
+    pageSize: pageSize || 20 
+  });
 }
 
 export const bulkApproveSchema = z.object({
@@ -223,7 +219,7 @@ export const bulkApproveSchema = z.object({
 });
 
 export async function approveBulkMilestones(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
+try {
     const { milestoneIds } = bulkApproveSchema.parse(req.body);
     const validatorWallet = req.account ?? 'unknown';
     const correlationId = getCorrelationId(req);
