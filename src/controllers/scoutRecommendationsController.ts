@@ -380,60 +380,56 @@ export async function getScoutRecommendations(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const { wallet } = req.params;
+  const {wallet} = req.params as {wallet: string};
 
-    // ── Ownership guard ──────────────────────────────────────────────────────
-    // Enforced by requireWalletOwner() at the route level; re-invoked here so
-    // direct callers (unit tests) get the same protection from the shared
-    // implementation instead of an inline copy.
-    if (!checkWalletOwnership(req, res)) return;
+  // ── Ownership guard ──────────────────────────────────────────────────────
+  // Enforced by requireWalletOwner() at the route level; re-invoked here so
+  // direct callers (unit tests) get the same protection from the shared
+  // implementation instead of an inline copy.
+  if (!checkWalletOwnership(req, res)) return;
 
-    // ── Query param validation ───────────────────────────────────────────────
-    const parsed = recQuerySchema.safeParse(req.query);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
-      });
-      return;
-    }
-
-    const { cursor, pageSize: pageSizeParam } = parsed.data;
-    const pageSize = pageSizeParam ?? PAGE_SIZE;
-
-    // ── Cache check ──────────────────────────────────────────────────────────
-    // We cache the full ranked list, not a single page, so pagination works
-    // across cache hits without re-querying the DB.
-    const cacheKey = `recommendations:${wallet}`;
-    let cachedResult = await cacheGet<{ ranked: ScoredPlayer[]; prefs: ScoutPreferences }>(cacheKey);
-
-    if (!cachedResult) {
-      logger.debug({ wallet, action: 'recommendations_cache_miss' });
-      cachedResult = await buildRecommendations(wallet);
-      await cacheSet(cacheKey, cachedResult, CACHE_TTL_MS);
-    } else {
-      logger.debug({ wallet, action: 'recommendations_cache_hit' });
-    }
-
-    const { ranked, prefs } = cachedResult;
-
-    // ── Apply pagination ─────────────────────────────────────────────────────
-    const { page, nextCursor } = applyPagination(ranked, cursor, pageSize);
-
-    const response: RecommendationsPage = {
-      data: page.map(({ _score: _s, ...rest }) => serializePlayer(rest as PlayerRow)),
-      nextCursor,
-      meta: {
-        preferredRegion: prefs.region,
-        preferredPosition: prefs.position,
-        minTier: prefs.minTier,
-        totalCandidates: ranked.length,
-      },
-    };
-
-    res.json({ success: true, ...response });
-  } catch (err) {
-    next(err);
+  // ── Query param validation ───────────────────────────────────────────────
+  const parsed = recQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+    });
+    return;
   }
+
+  const { cursor, pageSize: pageSizeParam } = parsed.data;
+  const pageSize = pageSizeParam ?? PAGE_SIZE;
+
+  // ── Cache check ──────────────────────────────────────────────────────────
+  // We cache the full ranked list, not a single page, so pagination works
+  // across cache hits without re-querying the DB.
+  const cacheKey = `recommendations:${wallet}`;
+  let cachedResult = await cacheGet<{ ranked: ScoredPlayer[]; prefs: ScoutPreferences }>(cacheKey);
+
+  if (!cachedResult) {
+    logger.debug({ wallet, action: 'recommendations_cache_miss' });
+    cachedResult = await buildRecommendations(wallet);
+    await cacheSet(cacheKey, cachedResult, CACHE_TTL_MS);
+  } else {
+    logger.debug({ wallet, action: 'recommendations_cache_hit' });
+  }
+
+  const { ranked, prefs } = cachedResult;
+
+  // ── Apply pagination ─────────────────────────────────────────────────────
+  const { page, nextCursor } = applyPagination(ranked, cursor, pageSize);
+
+  const response: RecommendationsPage = {
+    data: page.map(({ _score: _s, ...rest }) => serializePlayer(rest as PlayerRow)),
+    nextCursor,
+    meta: {
+      preferredRegion: prefs.region,
+      preferredPosition: prefs.position,
+      minTier: prefs.minTier,
+      totalCandidates: ranked.length,
+    },
+  };
+
+  res.json({ success: true, ...response });
 }

@@ -118,44 +118,40 @@ async function resolveOwnedPendingOffer(
  * - 409: offer already responded to
  */
 export async function acceptTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { playerId, offerId } = req.params;
+  const {playerId, offerId} = req.params as {playerId: string, offerId: string};
 
-    const offer = await resolveOwnedPendingOffer(playerId, offerId, req, res, 'accept');
-    if (!offer) return;
+  const offer = await resolveOwnedPendingOffer(playerId, offerId, req, res, 'accept');
+  if (!offer) return;
 
-    const now = Math.floor(Date.now() / 1000);
-    await respondToTrialOffer({ offer_id: offerId, status: 'accepted', responded_at: now });
+  const now = Math.floor(Date.now() / 1000);
+  await respondToTrialOffer({ offer_id: offerId, status: 'accepted', responded_at: now });
 
-    logger.info(`[trialOffer] accepted offerId=${offerId} playerId=${playerId}`);
+  logger.info(`[trialOffer] accepted offerId=${offerId} playerId=${playerId}`);
 
-    // Notify the scout via SSE that their trial offer was accepted.
-    broadcaster.broadcast({
-      type: 'trial_offer_accepted',
-      payload: {
-        offer_id: offerId,
-        player_id: playerId,
-        scout: offer.scout_wallet,
-        responded_at: now,
-      },
-    });
+  // Notify the scout via SSE that their trial offer was accepted.
+  broadcaster.broadcast({
+    type: 'trial_offer_accepted',
+    payload: {
+      offer_id: offerId,
+      player_id: playerId,
+      scout: offer.scout_wallet,
+      responded_at: now,
+    },
+  });
 
-    // NOTE: On-chain record of the response is a future step.
-    // When the Soroban contract supports `respond_to_offer(offer_id, accepted: bool)`,
-    // invoke it here via stellarService.respondToTrialOffer(offerId, 'accepted').
+  // NOTE: On-chain record of the response is a future step.
+  // When the Soroban contract supports `respond_to_offer(offer_id, accepted: bool)`,
+  // invoke it here via stellarService.respondToTrialOffer(offerId, 'accepted').
 
-    res.status(200).json({
-      success: true,
-      data: {
-        offerId,
-        playerId,
-        status: 'accepted',
-        respondedAt: now,
-      },
-    });
-  } catch (err) {
-    next(err);
-  }
+  res.status(200).json({
+    success: true,
+    data: {
+      offerId,
+      playerId,
+      status: 'accepted',
+      respondedAt: now,
+    },
+  });
 }
 
 // ─── POST /api/players/:playerId/trial-offers/:offerId/reject ─────────────────
@@ -168,52 +164,48 @@ export async function acceptTrialOffer(req: Request, res: Response, next: NextFu
  * - 409: offer already responded to
  */
 export async function rejectTrialOffer(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const { playerId, offerId } = req.params;
+  const {playerId, offerId} = req.params as {playerId: string, offerId: string};
 
-    // Reject-specific: parse the optional reason before any lookup or seeding,
-    // so an invalid body can never reach a side effect. The route also applies
-    // validateBody(rejectOfferSchema), so this is the direct-invocation guard.
-    const bodyParsed = rejectOfferSchema.safeParse(req.body);
-    if (!bodyParsed.success) {
-      res.status(400).json({ success: false, error: bodyParsed.error.errors[0]?.message ?? 'Invalid request body' });
-      return;
-    }
-    const reason = bodyParsed.data.reason;
-
-    const offer = await resolveOwnedPendingOffer(playerId, offerId, req, res, 'reject');
-    if (!offer) return;
-
-    const now = Math.floor(Date.now() / 1000);
-    await respondToTrialOffer({ offer_id: offerId, status: 'rejected', reject_reason: reason, responded_at: now });
-
-    logger.info(`[trialOffer] rejected offerId=${offerId} playerId=${playerId} reason=${reason ?? 'none'}`);
-
-    // Notify the scout via SSE that their trial offer was rejected.
-    broadcaster.broadcast({
-      type: 'trial_offer_rejected',
-      payload: {
-        offer_id: offerId,
-        player_id: playerId,
-        scout: offer.scout_wallet,
-        reason: reason ?? null,
-        responded_at: now,
-      },
-    });
-
-    // NOTE: On-chain record of the response is a future step (see acceptTrialOffer above).
-
-    res.status(200).json({
-      success: true,
-      data: {
-        offerId,
-        playerId,
-        status: 'rejected',
-        reason: reason ?? null,
-        respondedAt: now,
-      },
-    });
-  } catch (err) {
-    next(err);
+  // Reject-specific: parse the optional reason before any lookup or seeding,
+  // so an invalid body can never reach a side effect. The route also applies
+  // validateBody(rejectOfferSchema), so this is the direct-invocation guard.
+  const bodyParsed = rejectOfferSchema.safeParse(req.body);
+  if (!bodyParsed.success) {
+    res.status(400).json({ success: false, error: bodyParsed.error.errors[0]?.message ?? 'Invalid request body' });
+    return;
   }
+  const reason = bodyParsed.data.reason;
+
+  const offer = await resolveOwnedPendingOffer(playerId, offerId, req, res, 'reject');
+  if (!offer) return;
+
+  const now = Math.floor(Date.now() / 1000);
+  await respondToTrialOffer({ offer_id: offerId, status: 'rejected', reject_reason: reason, responded_at: now });
+
+  logger.info(`[trialOffer] rejected offerId=${offerId} playerId=${playerId} reason=${reason ?? 'none'}`);
+
+  // Notify the scout via SSE that their trial offer was rejected.
+  broadcaster.broadcast({
+    type: 'trial_offer_rejected',
+    payload: {
+      offer_id: offerId,
+      player_id: playerId,
+      scout: offer.scout_wallet,
+      reason: reason ?? null,
+      responded_at: now,
+    },
+  });
+
+  // NOTE: On-chain record of the response is a future step (see acceptTrialOffer above).
+
+  res.status(200).json({
+    success: true,
+    data: {
+      offerId,
+      playerId,
+      status: 'rejected',
+      reason: reason ?? null,
+      respondedAt: now,
+    },
+  });
 }

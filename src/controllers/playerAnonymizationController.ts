@@ -38,9 +38,9 @@ export async function anonymizePlayer(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
+try {
     // ── Validate playerId path param ─────────────────────────────────────────
-    const idResult = playerIdSchema.safeParse(req.params.playerId);
+    const idResult = playerIdSchema.safeParse(req.params.playerId as string);
     if (!idResult.success) {
       res.status(400).json({
         success: false,
@@ -49,7 +49,7 @@ export async function anonymizePlayer(
       });
       return;
     }
-    const playerId = req.params.playerId;
+    const playerId = req.params.playerId as string;
 
     // ── Fetch player ─────────────────────────────────────────────────────────
     const player = await getPlayerById(playerId);

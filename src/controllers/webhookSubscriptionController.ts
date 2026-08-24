@@ -98,46 +98,42 @@ export async function registerWebhook(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const parsed = registerWebhookSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid request body',
-      });
-      return;
-    }
-
-    const { url, eventTypes } = parsed.data;
-    const subscription = createWebhookSubscription(
-      url,
-      undefined, // auto-generate secret
-      req.params.wallet,
-      eventTypes,
-    );
-
-    logger.info({
-      scout: req.params.wallet,
-      subscriptionId: subscription.id,
-      url,
-      action: 'webhook_registered',
+  const parsed = registerWebhookSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid request body',
     });
-
-    res.status(201).json({
-      success: true,
-      data: {
-        id: subscription.id,
-        url: subscription.url,
-        secret: subscription.secret, // plaintext — returned only once
-        eventTypes: subscription.event_types
-          ? (JSON.parse(subscription.event_types) as string[])
-          : null,
-        createdAt: subscription.created_at,
-      },
-    });
-  } catch (err) {
-    next(err);
+    return;
   }
+
+  const { url, eventTypes } = parsed.data;
+  const subscription = createWebhookSubscription(
+    url,
+    undefined, // auto-generate secret
+    req.params.wallet as string,
+    eventTypes,
+  );
+
+  logger.info({
+    scout: req.params.wallet as string,
+    subscriptionId: subscription.id,
+    url,
+    action: 'webhook_registered',
+  });
+
+  res.status(201).json({
+    success: true,
+    data: {
+      id: subscription.id,
+      url: subscription.url,
+      secret: subscription.secret, // plaintext — returned only once
+      eventTypes: subscription.event_types
+        ? (JSON.parse(subscription.event_types) as string[])
+        : null,
+      createdAt: subscription.created_at,
+    },
+  });
 }
 
 /**
@@ -155,16 +151,12 @@ export async function listWebhooks(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const rows = getWebhookSubscriptionsByScout(req.params.wallet);
+  const rows = getWebhookSubscriptionsByScout(req.params.wallet as string);
 
-    res.json({
-      success: true,
-      data: rows.map((row) => serializeSubscription(row)),
-    });
-  } catch (err) {
-    next(err);
-  }
+  res.json({
+    success: true,
+    data: rows.map((row) => serializeSubscription(row)),
+  });
 }
 
 /**
@@ -183,25 +175,21 @@ export async function deleteWebhook(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const id = parseInt(req.params.id, 10);
-    if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid subscription id' });
-      return;
-    }
-
-    const removed = deleteWebhookSubscription(id, req.params.wallet);
-    if (!removed) {
-      res.status(404).json({ success: false, error: 'Webhook subscription not found' });
-      return;
-    }
-
-    logger.info({ scout: req.params.wallet, subscriptionId: id, action: 'webhook_deleted' });
-
-    res.json({ success: true, data: { removed: true, id } });
-  } catch (err) {
-    next(err);
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ success: false, error: 'Invalid subscription id' });
+    return;
   }
+
+  const removed = deleteWebhookSubscription(id, req.params.wallet as string);
+  if (!removed) {
+    res.status(404).json({ success: false, error: 'Webhook subscription not found' });
+    return;
+  }
+
+  logger.info({ scout: req.params.wallet as string, subscriptionId: id, action: 'webhook_deleted' });
+
+  res.json({ success: true, data: { removed: true, id } });
 }
 
 /**
@@ -223,8 +211,8 @@ export async function testWebhook(
   res: Response,
   next: NextFunction,
 ): Promise<void> {
-  try {
-    const id = parseInt(req.params.id, 10);
+try {
+    const id = parseInt(req.params.id as string, 10);
     if (isNaN(id)) {
       res.status(400).json({ success: false, error: 'Invalid subscription id' });
       return;
@@ -237,7 +225,7 @@ export async function testWebhook(
     }
 
     // Ownership check: the subscription must belong to this scout
-    if (row.scout_wallet !== req.params.wallet) {
+    if (row.scout_wallet !== req.params.wallet as string) {
       sendForbidden(res, 'Forbidden: subscription belongs to another scout');
       return;
     }
@@ -266,7 +254,7 @@ export async function testWebhook(
         return;
       }
 
-      logger.info({ scout: req.params.wallet, subscriptionId: id, url: row.url, action: 'webhook_test_sent' });
+      logger.info({ scout: req.params.wallet as string, subscriptionId: id, url: row.url, action: 'webhook_test_sent' });
 
       res.json({
         success: true,

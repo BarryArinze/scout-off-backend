@@ -66,30 +66,26 @@ function issueRefreshToken(account: string, role: string): { token: string; jti:
 
 /** GET /auth/challenge?account=G... */
 export function getChallenge(req: Request, res: Response, next: NextFunction): void {
-  try {
-    const parsed = challengeSchema.safeParse(req.query);
-    if (!parsed.success) {
-      logger.warn('[auth] failed_challenge_request', {
-        correlationId: req.correlationId,
-        origin: extractClientIp(req),
-        attemptedAccount: (req.query.account as string) ?? null,
-        reason: parsed.error.errors[0]?.message,
-      });
-      res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request', code: ErrorCode.VALIDATION_ERROR });
-      return;
-    }
-    const challenge = buildChallenge(parsed.data.account);
-    res.json({ challenge, networkPassphrase: config.networkPassphrase });
-  } catch (err) {
-    next(err);
+  const parsed = challengeSchema.safeParse(req.query);
+  if (!parsed.success) {
+    logger.warn('[auth] failed_challenge_request', {
+      correlationId: req.correlationId,
+      origin: extractClientIp(req),
+      attemptedAccount: (req.query.account as string) ?? null,
+      reason: parsed.error.errors[0]?.message,
+    });
+    res.status(400).json({ success: false, error: parsed.error.errors[0]?.message ?? 'Invalid request', code: ErrorCode.VALIDATION_ERROR });
+    return;
   }
+  const challenge = buildChallenge(parsed.data.account);
+  res.json({ challenge, networkPassphrase: config.networkPassphrase });
 }
 
 // ─── POST /auth/token ──────────────────────────────────────────────────────────
 
 /** POST /auth/token  { transaction: "<signed XDR>", role?: "validator" } */
 export function postToken(req: Request, res: Response, next: NextFunction): void {
-  try {
+try {
     const parsed = tokenSchema.safeParse(req.body);
     if (!parsed.success) {
       logger.warn('[auth] failed_token_request invalid_body', {
@@ -164,7 +160,7 @@ export function postToken(req: Request, res: Response, next: NextFunction): void
  * issues a new access + refresh token pair, and revokes the old refresh jti.
  */
 export async function postRefresh(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
+try {
     const parsed = refreshSchema.safeParse(req.body);
     if (!parsed.success) {
       res.status(400).json({
@@ -241,7 +237,7 @@ const logoutSchema = z.object({
  * if a refreshToken body param is provided, its jti too.
  */
 export function postLogout(req: Request, res: Response, next: NextFunction): void {
-  try {
+try {
     // The access token is already verified by requireAuth middleware.
     // We need to revoke its jti.
     const header = req.headers.authorization ?? '';

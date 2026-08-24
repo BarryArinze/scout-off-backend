@@ -92,69 +92,65 @@ export function formatEventCsvRow(row: EventExportRow): string {
 const DISCONNECT_CHECK_INTERVAL = 500;
 
 export async function exportEvents(req: Request, res: Response, next: NextFunction): Promise<void> {
-  try {
-    const parsed = adminDateRangeSchema.safeParse(req.query ?? {});
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
-      });
-      return;
-    }
-
-    const { startDate, endDate, eventType } = parsed.data;
-    const eventTypeFilter = eventType as ContractEventType | undefined;
-
-    res.status(200);
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', 'attachment; filename="events.csv"');
-
-    res.write('event_type,ledger,timestamp,payload\n');
-
-    const iterable = getEventsIterable({ type: eventTypeFilter, startDate, endDate });
-
-    // Clean up the SQLite cursor when the client disconnects mid-stream, and
-    // record the disconnect so the loop below can notice it even when no
-    // write ever blocks (see the disconnect-handling note above).
-    let clientDisconnected = false;
-    if (typeof req.on === 'function') {
-      req.on('close', () => {
-        clientDisconnected = true;
-        iterable.return?.();
-      });
-    }
-
-    let rowCount = 0;
-
-    for (const row of iterable) {
-      rowCount++;
-      const line = formatEventCsvRow(row);
-
-      if (!res.write(line)) {
-        // Internal buffer is full — wait for drain before writing more
-        await new Promise<void>((resolve) => res.once('drain', resolve));
-      }
-
-      if (rowCount % DISCONNECT_CHECK_INTERVAL === 0) {
-        // Yield to the event loop so a pending 'close' event — which Node
-        // cannot dispatch while this loop keeps the call stack busy — gets a
-        // chance to run and flip clientDisconnected.
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        if (clientDisconnected || res.writableEnded || res.destroyed) {
-          return;
-        }
-      }
-    }
-
-    if (clientDisconnected || res.writableEnded || res.destroyed) {
-      return;
-    }
-
-    // Footer: lets the client detect a truncated export (missing this line
-    // means the stream was interrupted before all rows were sent).
-    res.write(`__EOF__,${rowCount},,\n`);
-    res.end();
-  } catch (err) {
-    next(err);
+  const parsed = adminDateRangeSchema.safeParse(req.query ?? {});
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+    });
+    return;
   }
+
+  const { startDate, endDate, eventType } = parsed.data;
+  const eventTypeFilter = eventType as ContractEventType | undefined;
+
+  res.status(200);
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="events.csv"');
+
+  res.write('event_type,ledger,timestamp,payload\n');
+
+  const iterable = getEventsIterable({ type: eventTypeFilter, startDate, endDate });
+
+  // Clean up the SQLite cursor when the client disconnects mid-stream, and
+  // record the disconnect so the loop below can notice it even when no
+  // write ever blocks (see the disconnect-handling note above).
+  let clientDisconnected = false;
+  if (typeof req.on === 'function') {
+    req.on('close', () => {
+      clientDisconnected = true;
+      iterable.return?.();
+    });
+  }
+
+  let rowCount = 0;
+
+  for (const row of iterable) {
+    rowCount++;
+    const line = formatEventCsvRow(row);
+
+    if (!res.write(line)) {
+      // Internal buffer is full — wait for drain before writing more
+      await new Promise<void>((resolve) => res.once('drain', resolve));
+    }
+
+    if (rowCount % DISCONNECT_CHECK_INTERVAL === 0) {
+      // Yield to the event loop so a pending 'close' event — which Node
+      // cannot dispatch while this loop keeps the call stack busy — gets a
+      // chance to run and flip clientDisconnected.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      if (clientDisconnected || res.writableEnded || res.destroyed) {
+        return;
+      }
+    }
+  }
+
+  if (clientDisconnected || res.writableEnded || res.destroyed) {
+    return;
+  }
+
+  // Footer: lets the client detect a truncated export (missing this line
+  // means the stream was interrupted before all rows were sent).
+  res.write(`__EOF__,${rowCount},,\n`);
+  res.end();
 }
