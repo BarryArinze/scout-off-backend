@@ -444,6 +444,54 @@ curl -X POST "http://localhost:3000/api/scouts/G.../api-keys/42/rotate" \
 - Rotating an already-revoked or unknown key id returns `404`. Rotating
   requires the `write:api_keys` scope, same as issuing and revoking.
 
+### API key expiry (#674)
+
+Server-to-server keys embedded in long-lived configuration, CI secrets, or
+third-party integrations are easy to forget. Without an automatic expiry a
+leaked or forgotten key stays valid indefinitely — every such key is a
+permanent liability with no natural decay.
+
+**Default lifetime.** Keys issued without an explicit `expiresInDays` value
+expire after `API_KEY_DEFAULT_TTL_DAYS` days (default: **90 days**). The
+`expires_at` timestamp (unix seconds) is returned at issuance and included
+in `GET .../api-keys` list responses:
+
+```bash
+curl -X POST "http://localhost:3000/api/scouts/G.../api-keys" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{ "label": "ci-bot" }'
+# → { "data": { "id": 42, "key": "...", "expires_at": 1763308800, ... } }
+```
+
+**Requesting a specific lifetime.** Pass `expiresInDays` to override the
+default:
+
+```bash
+# 30-day key
+-d '{ "label": "short-lived", "expiresInDays": 30 }'
+
+# No expiry (explicit opt-in — use sparingly)
+-d '{ "label": "permanent", "expiresInDays": 0 }'
+```
+
+**Enforcement.** Expiry is enforced live — every active-key query used for
+`X-API-Key` authentication checks `expires_at IS NULL OR expires_at > now`,
+so an expired key stops resolving immediately with no background sweep. An
+expired key returns the same `401 Unauthorized` as a revoked or unknown key;
+the body message is `"Invalid or revoked API key"`.
+
+**Rotation and expiry.** When a key is rotated (`POST .../api-keys/:id/rotate`),
+the replacement key inherits the original lifetime: if the old key was issued
+with a 90-day lifetime, the new key also gets a fresh 90-day window from the
+time of rotation. A key with no expiry (`expires_at: null`) produces a
+no-expiry replacement.
+
+**Configuring the default.** Set `API_KEY_DEFAULT_TTL_DAYS` to change the
+server-wide default (see [DEPLOYMENT.md](../DEPLOYMENT.md#api-key-expiry--api_key_default_ttl_days-674)).
+Set to `0` to disable automatic expiry globally (not recommended for
+production).
+
 ### GraphQL scope enforcement
 
 GraphQL accepts the same `X-API-Key` header. Restricted keys are enforced on

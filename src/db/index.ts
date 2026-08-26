@@ -1730,6 +1730,13 @@ export interface ApiKeyRow {
    * getActiveApiKeyByLookupHash().
    */
   revoke_after: number | null;
+  /**
+   * Hard expiry timestamp in Unix seconds (db/026_api_key_expiry.sql, #674).
+   * NULL means the key never expires on its own (explicit no-expiry).
+   * Keys whose expires_at is in the past are rejected by auth with a
+   * distinct "expired" error rather than "invalid key".
+   */
+  expires_at: number | null;
 }
 
 /**
@@ -1754,10 +1761,12 @@ export async function insertApiKey(p: {
   created_at: number;
   scopes?: string[];
   lookup_hash?: string;
+  /** Unix timestamp (seconds) when the key expires. NULL = no expiry. */
+  expires_at?: number | null;
 }): Promise<number> {
   const sql = `
-    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at, scopes, lookup_hash)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO api_keys (key_hash, scout_wallet, label, created_at, scopes, lookup_hash, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     RETURNING id
   `;
   return timedQueryAsync(sql, async () => {
@@ -1768,6 +1777,7 @@ export async function insertApiKey(p: {
       p.created_at,
       p.scopes ? JSON.stringify(p.scopes) : null,
       p.lookup_hash ?? null,
+      p.expires_at ?? null,
     ]);
     return info.lastId;
   });
@@ -1805,13 +1815,18 @@ export async function revokeApiKeyById(id: number, scoutWallet: string): Promise
 }
 
 /**
- * SQL fragment excluding both permanently revoked rows and rows past their
- * scheduled rotation deadline (db/025_api_key_rotation.sql, #676). Shared by
- * every "active key" query so a key mid-grace-period keeps authenticating
- * right up to (and not past) `revoke_after`, with no background job needed
- * to flip it over.
+ * SQL fragment excluding:
+ *  - permanently revoked rows (revoked_at IS NOT NULL)
+ *  - rows past their scheduled rotation deadline (#676)
+ *  - rows past their hard expiry timestamp (#674)
+ *
+ * Shared by every "active key" query so enforcement is consistent and
+ * requires no background sweep.
+ *
+ * Callers must bind `now` (unix seconds) twice: once for revoke_after and
+ * once for expires_at.
  */
-const ACTIVE_KEY_SQL = `revoked_at IS NULL AND (revoke_after IS NULL OR revoke_after > ?)`;
+const ACTIVE_KEY_SQL = `revoked_at IS NULL AND (revoke_after IS NULL OR revoke_after > ?) AND (expires_at IS NULL OR expires_at > ?)`;
 
 /**
  * Look up an API key row by its full hash value (including salt prefix).
@@ -1820,10 +1835,10 @@ const ACTIVE_KEY_SQL = `revoked_at IS NULL AND (revoke_after IS NULL OR revoke_a
  */
 export async function getApiKeyByHash(keyHash: string): Promise<ApiKeyRow | null> {
   const now = Math.floor(Date.now() / 1000);
-  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded `col IS NULL AND (col IS NULL OR col > ?)` fragment; values are bound via params.
+  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded fragment; values are bound via params.
   const sql = `SELECT * FROM api_keys WHERE key_hash = ? AND ${ACTIVE_KEY_SQL} LIMIT 1`;
   return timedQueryAsync(sql, async () =>
-    (await getDriver().get<ApiKeyRow>(sql, [keyHash, now])) ?? null,
+    (await getDriver().get<ApiKeyRow>(sql, [keyHash, now, now])) ?? null,
   );
 }
 
@@ -1849,9 +1864,9 @@ export async function getApiKeyById(id: number, scoutWallet: string): Promise<Ap
  */
 export async function getAllActiveApiKeys(): Promise<ApiKeyRow[]> {
   const now = Math.floor(Date.now() / 1000);
-  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded `col IS NULL AND (col IS NULL OR col > ?)` fragment; values are bound via params.
+  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded fragment; values are bound via params.
   const sql = `SELECT * FROM api_keys WHERE ${ACTIVE_KEY_SQL}`;
-  return timedQueryAsync(sql, () => getDriver().all<ApiKeyRow>(sql, [now]));
+  return timedQueryAsync(sql, () => getDriver().all<ApiKeyRow>(sql, [now, now]));
 }
 
 /**
@@ -1868,10 +1883,10 @@ export async function getAllActiveApiKeys(): Promise<ApiKeyRow[]> {
  */
 export async function getActiveApiKeyByLookupHash(lookupHash: string): Promise<ApiKeyRow | null> {
   const now = Math.floor(Date.now() / 1000);
-  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded `col IS NULL AND (col IS NULL OR col > ?)` fragment; values are bound via params.
+  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded fragment; values are bound via params.
   const sql = `SELECT * FROM api_keys WHERE lookup_hash = ? AND ${ACTIVE_KEY_SQL} LIMIT 1`;
   return timedQueryAsync(sql, async () =>
-    (await getDriver().get<ApiKeyRow>(sql, [lookupHash, now])) ?? null,
+    (await getDriver().get<ApiKeyRow>(sql, [lookupHash, now, now])) ?? null,
   );
 }
 
@@ -1884,9 +1899,9 @@ export async function getActiveApiKeyByLookupHash(lookupHash: string): Promise<A
  */
 export async function getActiveApiKeysAwaitingLookupHash(): Promise<ApiKeyRow[]> {
   const now = Math.floor(Date.now() / 1000);
-  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded `col IS NULL AND (col IS NULL OR col > ?)` fragment; values are bound via params.
+  // sql-injection-check-ignore: ACTIVE_KEY_SQL is a hardcoded fragment; values are bound via params.
   const sql = `SELECT * FROM api_keys WHERE lookup_hash IS NULL AND ${ACTIVE_KEY_SQL}`;
-  return timedQueryAsync(sql, () => getDriver().all<ApiKeyRow>(sql, [now]));
+  return timedQueryAsync(sql, () => getDriver().all<ApiKeyRow>(sql, [now, now]));
 }
 
 /**

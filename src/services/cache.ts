@@ -72,6 +72,23 @@ function createStore(): CacheStore {
 
 const store: CacheStore = createStore();
 
+/**
+ * Prefix every raw cache key with the configured namespace so that two
+ * deployments (e.g. staging + production, or a blue/green pair) sharing the
+ * same Redis cluster never read or overwrite each other's entries (#672).
+ *
+ * The namespace defaults to NODE_ENV — providing isolation out-of-the-box —
+ * and can be overridden with the CACHE_NAMESPACE environment variable for
+ * more fine-grained control (e.g. `blue`, `green`, `staging-pr-123`).
+ *
+ * The separator `:` is consistent with the existing key convention
+ * (`players:list:…`, `players:…`, `milestones:…`) so that SCAN patterns
+ * and `deleteByPrefix` calls naturally extend to the namespaced form.
+ */
+export function namespacedKey(rawKey: string): string {
+  return `${config.cacheNamespace}:${rawKey}`;
+}
+
 function errMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -79,7 +96,7 @@ function errMessage(err: unknown): string {
 /** Fetch a cached value. Returns undefined if missing or expired. */
 export async function cacheGet<T>(key: string): Promise<T | undefined> {
   try {
-    const value = await store.get<T>(key);
+    const value = await store.get<T>(namespacedKey(key));
     if (value !== undefined) {
       recordCacheHit();
     } else {
@@ -102,7 +119,7 @@ export async function cacheSet<T>(
   ttlMs: number = config.playerCacheTtlMs
 ): Promise<void> {
   try {
-    await store.set(key, value, ttlMs);
+    await store.set(namespacedKey(key), value, ttlMs);
   } catch (err) {
     // Best-effort write: a Redis failure must not break the request that
     // produced the value.
@@ -123,9 +140,9 @@ export async function cacheSet<T>(
  */
 export async function invalidatePlayerCache(playerId?: string): Promise<void> {
   try {
-    await store.deleteByPrefix('players:list');
+    await store.deleteByPrefix(namespacedKey('players:list'));
     if (playerId) {
-      await store.del(`players:${playerId}`);
+      await store.del(namespacedKey(`players:${playerId}`));
     }
     await publishInvalidation();
   } catch (err) {
@@ -137,7 +154,7 @@ export async function invalidatePlayerCache(playerId?: string): Promise<void> {
 
 export async function invalidateMilestoneCache(playerId: string): Promise<void> {
   try {
-    await store.del(`milestones:${playerId}`);
+    await store.del(namespacedKey(`milestones:${playerId}`));
   } catch (err) {
     logger.warn(`[cache] milestone cache invalidation failed for "${playerId}": ${errMessage(err)}`);
   }
@@ -175,7 +192,7 @@ export function createInvalidationHandler(
   return async (channel: string, _message: string): Promise<void> => {
     if (channel !== INVALIDATION_CHANNEL) return;
     try {
-      await storeToUse.deleteByPrefix('players:list');
+      await storeToUse.deleteByPrefix(namespacedKey('players:list'));
     } catch (err) {
       logger.warn(
         `[cache] failed to clear local player-list cache after "${INVALIDATION_CHANNEL}" message: ${errMessage(err)}`

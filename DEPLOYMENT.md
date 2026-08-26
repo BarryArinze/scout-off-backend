@@ -359,6 +359,55 @@ helm uninstall scout-off-backend --namespace <your-namespace>
 > **Note:** Uninstalling the chart does **not** delete the `scout-off-secrets`
 > Secret. Delete it manually if you are tearing down the environment entirely.
 
+## Cache Configuration
+
+### CACHE_NAMESPACE — preventing key collisions on shared Redis (#672)
+
+When two or more deployments (staging + production, or a blue/green pair) share the same Redis
+instance, cache keys must be namespaced so they cannot collide. Without a namespace, a cache
+write from staging could silently be served to production requests (or vice versa).
+
+| Variable | Default | Description |
+|---|---|---|
+| `CACHE_NAMESPACE` | `NODE_ENV` value | Prefix prepended to every cache key. |
+| `REDIS_URL` | _(unset — in-memory)_ | Redis connection URL. When unset, an in-memory store is used and namespacing is a no-op. |
+| `PLAYER_CACHE_TTL_MS` | `60000` | TTL for player list cache entries (ms). |
+
+**Default behavior:** `CACHE_NAMESPACE` defaults to `NODE_ENV`, so `development`, `test`,
+`staging`, and `production` environments are always distinct out-of-the-box without any
+operator action.
+
+**When to override:** Set `CACHE_NAMESPACE` explicitly when two deployments share both the
+same `NODE_ENV` *and* the same Redis instance — e.g., two production pods in a blue/green
+cutover using separate logical namespaces:
+
+```bash
+# Blue deployment
+CACHE_NAMESPACE=production-blue
+
+# Green deployment
+CACHE_NAMESPACE=production-green
+```
+
+> **Helm:** Add `CACHE_NAMESPACE` to the Kubernetes Secret alongside `REDIS_URL`:
+> ```bash
+> kubectl create secret generic scout-off-secrets ... \
+>   --from-literal=REDIS_URL=redis://:password@host:6379 \
+>   --from-literal=CACHE_NAMESPACE=production
+> ```
+
+### API Key Expiry — API_KEY_DEFAULT_TTL_DAYS (#674)
+
+Server-to-server API keys default to a 90-day lifetime so that forgotten or leaked keys
+automatically decay rather than remaining valid indefinitely.
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_KEY_DEFAULT_TTL_DAYS` | `90` | Default key lifetime in days. `0` disables automatic expiry. |
+
+Callers can override the default at issuance time by passing `expiresInDays` in the
+`POST /api/scouts/:wallet/api-keys` request body (see [docs/auth.md](docs/auth.md#api-keys)).
+
 ## Build & Start
 
 ```bash

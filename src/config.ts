@@ -414,6 +414,28 @@ const config = {
   /** TTL for player list cache entries in milliseconds. */
   playerCacheTtlMs: parseNumericEnv('PLAYER_CACHE_TTL_MS', process.env.PLAYER_CACHE_TTL_MS, 60000, { min: 0, integer: true }),
 
+  /**
+   * Cache key namespace prefix. Prepended to every key written to the cache
+   * store so that two deployments (e.g. staging + production) sharing the
+   * same Redis instance cannot collide (#672).
+   *
+   * Defaults to the current NODE_ENV so keys are always environment-scoped
+   * without any explicit operator configuration. Override with CACHE_NAMESPACE
+   * to distinguish blue/green pairs or other same-environment deployments that
+   * share infrastructure.
+   *
+   * Example: with CACHE_NAMESPACE=production, the key `players:list:…` is
+   * stored under `production:players:list:…` in Redis.
+   */
+  cacheNamespace: process.env.CACHE_NAMESPACE ?? (rawNodeEnv || 'development'),
+
+  /**
+   * Default API key expiry in days. Keys issued without an explicit
+   * expiresInDays value expire after this many days from issuance (#674).
+   * Set to 0 to disable the default expiry (not recommended for production).
+   */
+  apiKeyDefaultTtlDays: parseNumericEnv('API_KEY_DEFAULT_TTL_DAYS', process.env.API_KEY_DEFAULT_TTL_DAYS, 90, { min: 0, integer: true }),
+
   /** Access token TTL in seconds (default: 15 minutes). Configurable via JWT_ACCESS_TTL_SECONDS. */
   jwtAccessTtlSeconds: parseNumericEnv('JWT_ACCESS_TTL_SECONDS', process.env.JWT_ACCESS_TTL_SECONDS, 900, { min: 1, integer: true }),
 
