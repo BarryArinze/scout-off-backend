@@ -6,6 +6,7 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
 
 - [Getting Started](#getting-started)
 - [Seeding the Database](#seeding-the-database)
+- [Choosing an Issue](#choosing-an-issue)
 - [Contribution Workflow](#contribution-workflow)
 - [Code Quality Standards](#code-quality-standards)
 - [Security & Dependency Review](#security--dependency-review)
@@ -188,6 +189,18 @@ the seed:
 rm scout-off.db   # or whatever DB_PATH points at in your .env
 npm run seed
 ```
+
+## Choosing an Issue
+
+All open issues carry a `difficulty` label — `easy`, `medium`, or `hard` — assigned by maintainers during triage. Use these labels to find work that matches your current experience level with the codebase.
+
+- **`difficulty: easy`** — Self-contained changes usually limited to a single file or module. No deep knowledge of the codebase, Stellar, or Soroban is required. Typical examples: fixing a typo in docs, adding a missing test case, adding a small helper function, or updating a configuration value. **If this is your first contribution, start here.** Issues tagged `good first issue` are always `easy` — the `good first issue` label is a subset of `easy` issues that maintainers consider especially well-scoped and well-documented for a newcomer.
+
+- **`difficulty: medium`** — Requires understanding two or more modules, or involves a non-trivial design or data-model decision. Some prior exposure to the project is helpful. Typical examples: adding a new API route with input validation, extending the indexer to handle a new event type, or improving test coverage across a feature area.
+
+- **`difficulty: hard`** — Spans multiple layers of the stack (Soroban contract + backend + docs), requires deep domain knowledge (SEP-10, Stellar transaction semantics, or security-sensitive flows), or has meaningful performance implications. Typical examples: implementing the pay-to-contact flow end-to-end, introducing distributed caching, or hardening auth middleware against timing attacks.
+
+> **Tip:** After claiming an `easy` or `medium` issue, it's fine to open a draft PR early and ask questions in the comments — maintainers are happy to give design feedback before you invest too much time.
 
 ## Contribution Workflow
 
