@@ -587,11 +587,23 @@ wait for maintainer confirmation.
 Difficulty labels help new contributors find issues that match their experience
 level. They are assigned by maintainers at triage time, not by the reporter.
 
-| Label | Description |
-|-------|-------------|
-| `easy` | Self-contained change in a single file or module. No deep knowledge of the codebase or Stellar/Soroban required. Good first issues. Examples: add a missing test case, fix a typo in docs, add a helper function. |
-| `medium` | Requires understanding two or more modules, or involves a non-trivial algorithm / data-model change. Some prior exposure to the project is helpful. Examples: extend the indexer to handle a new event type, add a new API route with validation. |
-| `hard` | Spans multiple layers of the stack (contract + backend + docs), requires deep domain knowledge (Soroban, SEP-10), or has significant performance or security implications. Examples: implement pay-to-contact flow end-to-end; introduce distributed caching; harden auth middleware against timing attacks. |
+The repo uses two label naming conventions. The **canonical** set uses the
+`difficulty:` prefix (`difficulty: easy`, `difficulty: medium`,
+`difficulty: hard`). Bare labels without the prefix (`easy`, `medium`,
+`hard`) are legacy aliases and are gradually being migrated to the prefixed
+form. When filtering by difficulty, use the prefixed labels for the most
+complete results.
+
+An additional `difficulty: extreme` label exists for issues that require
+deep, cross-cutting architectural changes — these go beyond `hard` in scope
+or risk and are typically reserved for core contributors.
+
+| Label | Canonical form | Description |
+|-------|---------------|-------------|
+| Easy | `difficulty: easy` | Self-contained change in a single file or module. No deep knowledge of the codebase or Stellar/Soroban required. Good first issues. Examples: add a missing test case, fix a typo in docs, add a helper function. |
+| Medium | `difficulty: medium` | Requires understanding two or more modules, or involves a non-trivial algorithm / data-model change. Some prior exposure to the project is helpful. Examples: extend the indexer to handle a new event type, add a new API route with validation. |
+| Hard | `difficulty: hard` | Spans multiple layers of the stack (contract + backend + docs), requires deep domain knowledge (Soroban, SEP-10), or has significant performance or security implications. Examples: implement pay-to-contact flow end-to-end; introduce distributed caching; harden auth middleware against timing attacks. |
+| Extreme | `difficulty: extreme` | Cross-cutting architectural changes spanning most of the stack. Reserved for core contributors with deep domain expertise. These issues are rare and typically require design discussion before implementation begins. |
 
 ---
 
@@ -699,3 +711,6 @@ ScoutOff is part of the Drips funding wave program. Funded contributors receive 
 ---
 
 **Thank you for contributing to ScoutOff!** Your work helps connect talented footballers with opportunities. 🙌
+
+SHA: 22d84cc3bd4ad4e2b033604e4dfc3ac8ee365919
+MATCH: True
