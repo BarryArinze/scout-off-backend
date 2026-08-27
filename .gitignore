@@ -1,5 +1,7 @@
 node_modules/
 dist/
+ci_log.txt
+job_log.txt
 .env
 *.js.map
 contracts/target/
