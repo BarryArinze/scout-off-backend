@@ -1,5 +1,27 @@
 # Deployment Notes — ScoutOff Backend
 
+## ⚠️ SQLite + Multi-Replica Deployments
+
+**If you deploy with more than one replica (pod/instance), you MUST switch to PostgreSQL.** The default database driver is SQLite — a single-writer, file-local database. Running multiple replicas with SQLite will cause:
+
+- **Write conflicts**: only one replica can hold the write lock at a time
+- **Data inconsistency**: each replica maintains its own independent database file, so writes on replica A are invisible to replica B
+- **Unpredictable SSE behaviour**: SSE streams are scoped to a single process, so clients connected to different replicas see different state
+
+The Helm chart defaults to autoscaling with `replicaCount ≥ 2` (see `charts/scout-off-backend/values.yaml`), which is incompatible with the default `DB_DRIVER=sqlite` setting.
+
+### Fix
+
+To run multi-replica deployments, set in your `.env` or Helm values:
+
+```env
+DB_DRIVER=postgres
+DATABASE_URL=postgresql://user:password@host:5432/scoutoff
+```
+
+This mismatch will be enforced by a startup check in a future release; for now it is a critical configuration trap that every operator must be aware of.
+
+
 ## Environment Setup
 
 Copy `.env.example` to `.env` and fill in all required values before starting the server.
