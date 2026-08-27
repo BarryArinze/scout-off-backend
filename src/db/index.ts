@@ -2151,6 +2151,66 @@ export async function countBookmarksInFolder(folderId: number): Promise<number> 
   });
 }
 
+/**
+ * Joined row returned by getBookmarkedPlayersWithDetails().
+ * Combines bookmark metadata with the bookmarked player's full profile.
+ */
+export interface BookmarkedPlayerRow extends PlayerRow {
+  bookmarked_at: number;
+  bookmark_folder_id: number | null;
+  bookmark_note: string | null;
+}
+
+/**
+ * Fetch all bookmarked players for a scout in a single JOIN query, eliminating
+ * the N+1 pattern of calling getPlayerById() once per bookmark row.
+ *
+ * Returns rows ordered by bookmark creation time (newest first), matching the
+ * ordering of getBookmarksByScout(). Bookmarks whose player_id no longer
+ * exists in the players table are silently dropped (INNER JOIN semantics).
+ *
+ * @param scoutWallet  The scout's Stellar wallet address.
+ * @param folderId     Optional folder filter. When provided, only bookmarks in
+ *                     that folder are returned.
+ */
+export async function getBookmarkedPlayersWithDetails(
+  scoutWallet: string,
+  folderId?: number | null,
+): Promise<BookmarkedPlayerRow[]> {
+  let sql: string;
+  let params: (string | number | null)[];
+
+  if (folderId !== undefined) {
+    sql = `
+      SELECT
+        p.*,
+        b.created_at AS bookmarked_at,
+        b.folder_id  AS bookmark_folder_id,
+        b.note       AS bookmark_note
+      FROM scout_bookmarks b
+      INNER JOIN players p ON p.player_id = b.player_id
+      WHERE b.scout_wallet = ? AND b.folder_id = ?
+      ORDER BY b.created_at DESC
+    `;
+    params = [scoutWallet, folderId];
+  } else {
+    sql = `
+      SELECT
+        p.*,
+        b.created_at AS bookmarked_at,
+        b.folder_id  AS bookmark_folder_id,
+        b.note       AS bookmark_note
+      FROM scout_bookmarks b
+      INNER JOIN players p ON p.player_id = b.player_id
+      WHERE b.scout_wallet = ?
+      ORDER BY b.created_at DESC
+    `;
+    params = [scoutWallet];
+  }
+
+  return timedQueryAsync(sql, () => getDriver().all<BookmarkedPlayerRow>(sql, params));
+}
+
 // ─── Scout saved-search helpers (#486) ───────────────────────────────────────
 
 export interface SavedSearchRow {
