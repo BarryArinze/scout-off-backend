@@ -2,6 +2,11 @@ node_modules/
 dist/
 .env
 *.js.map
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+backups/
 contracts/target/
 contracts/**/test_snapshots/
 coverage/
