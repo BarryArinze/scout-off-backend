@@ -575,8 +575,10 @@ Alert on consecutive failures (≥ 2) to catch Stellar RPC or IPFS outages early
 
 Recommended metrics to track:
 - HTTP 5xx error rate
-- Event indexer lag (gap between latest on-chain event and last indexed event)
+- Event indexer lag (gap between latest on-chain event and last indexed event, exposed as `indexer_ledger_lag` on `GET /metrics`)
 - SQLite file size growth
+
+For what to do when these signals go wrong — indexer lag, stale tiers, missing webhooks, RPC/IPFS outages, DB slowness, plus reindex/replay, dead-letter drain, cache flush, circuit-breaker, and pause/unpause procedures — see the [Operator Runbook](docs/runbook.md).
 
 ### Docker Compose Healthcheck
 
