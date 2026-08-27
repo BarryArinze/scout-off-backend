@@ -12,6 +12,7 @@
  */
 
 import { GraphQLError } from 'graphql';
+import config from '../config';
 import {
   getPlayerById,
   queryPlayers,
@@ -206,7 +207,7 @@ const Query = {
       };
     }
 
-    const gracePeriodSecs = (24 + 0) * 3600; // mirrors config.subscriptionGracePeriodHours
+    const gracePeriodSecs = config.subscriptionGracePeriodHours * 3600;
     const inGrace = now > sub.expires_at && now <= sub.expires_at + gracePeriodSecs;
     const active = sub.expires_at > now || inGrace;
     const remainingDays = Math.max(0, Math.ceil((sub.expires_at - now) / 86400));

@@ -261,29 +261,33 @@ app.get('/health', async (_req, res) => {
 async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | 'disabled'>> {
   const services: Record<string, 'ok' | 'unavailable' | 'disabled'> = {};
 
-  services.db = (await probeDbWritable()) === 'ok' ? 'ok' : 'unavailable';
-
-  try {
-    await checkHealth();
-    services.ipfs = 'ok';
-  } catch {
-    services.ipfs = 'unavailable';
-  }
-
-  if (config.stellarHealthCheckEnabled) {
-    if (stellarBreaker.state === 'OPEN') {
-      services.stellar = 'unavailable';
-    } else {
+  const [dbResult, ipfsResult, stellarResult] = await Promise.all([
+    (async (): Promise<'ok' | 'unavailable'> => {
+      return (await probeDbWritable()) === 'ok' ? 'ok' : 'unavailable';
+    })(),
+    (async (): Promise<'ok' | 'unavailable'> => {
+      try {
+        await checkHealth();
+        return 'ok';
+      } catch {
+        return 'unavailable';
+      }
+    })(),
+    (async (): Promise<'ok' | 'unavailable' | 'disabled'> => {
+      if (!config.stellarHealthCheckEnabled) return 'disabled';
+      if (stellarBreaker.state === 'OPEN') return 'unavailable';
       try {
         const stellarOk = await stellarHealth();
-        services.stellar = stellarOk ? 'ok' : 'unavailable';
+        return stellarOk ? 'ok' : 'unavailable';
       } catch {
-        services.stellar = 'unavailable';
+        return 'unavailable';
       }
-    }
-  } else {
-    services.stellar = 'disabled';
-  }
+    })(),
+  ]);
+
+  services.db = dbResult;
+  services.ipfs = ipfsResult;
+  services.stellar = stellarResult;
 
   return services;
 }

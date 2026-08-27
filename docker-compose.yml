@@ -103,8 +103,11 @@ services:
   # locally. The backend falls back to an in-memory cache automatically if
   # REDIS_URL is unset, so this service can be removed (along with the
   # depends_on above) without breaking anything.
+  # Pinned to match the version CI and production use (see .github/workflows/ci.yml).
+  # Bump procedure: update this tag, ci.yml's redis service tag, and the
+  # production Redis version together, then re-run the test suite.
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: scout-off-redis
     restart: unless-stopped
     expose:
@@ -119,8 +122,11 @@ services:
   # To use PostgreSQL instead of SQLite:
   # 1. docker-compose up -d postgres
   # 2. Set DATABASE_URL and DB_DRIVER environment variables in the backend service
+  # Pinned to match the version CI and production use (see .github/workflows/ci.yml).
+  # Bump procedure: update this tag, ci.yml's postgres service tag, and the
+  # production PostgreSQL version together, then re-run the test suite.
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16.4-alpine
     container_name: scout-off-postgres
     restart: unless-stopped
     environment:
