@@ -1,9 +1,10 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { getTrialOfferById, respondToTrialOffer, insertTrialOffer, TrialOfferRow } from '../db';
+import { getTrialOfferById, respondToTrialOffer, insertTrialOffer, cancelTrialOffer, TrialOfferRow } from '../db';
 import { queryEvents } from '../db';
 import { logger } from '../utils/logger';
 import { broadcaster } from '../services/eventBroadcaster';
+import config from '../config';
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -76,12 +77,17 @@ async function resolveOwnedPendingOffer(
       return null;
     }
     // Insert the offer from on-chain data so we can record the response
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = config.trialOfferTtlMs > 0
+      ? now + Math.floor(config.trialOfferTtlMs / 1000)
+      : null;
     await insertTrialOffer({
       offer_id: offerId,
       scout_wallet: event.payload.scout as string,
       player_id: playerId,
       details_uri: (event.payload.details_uri ?? '') as string,
-      created_at: Math.floor(Date.now() / 1000),
+      created_at: now,
+      expires_at: expiresAt,
     });
     offer = await getTrialOfferById(offerId);
   }
@@ -93,6 +99,28 @@ async function resolveOwnedPendingOffer(
 
   if (offer.player_id !== playerId) {
     res.status(403).json({ success: false, error: 'Forbidden: offer does not belong to this player' });
+    return null;
+  }
+
+  // Check expiry before status — an expired offer is distinct from one that
+  // was already responded to and gives a clearer error message.
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (offer.expires_at !== null && offer.expires_at !== undefined && nowSec > offer.expires_at) {
+    res.status(410).json({
+      success: false,
+      error: 'Trial offer has expired',
+      data: { status: 'expired', expiresAt: offer.expires_at },
+    });
+    return null;
+  }
+
+  // Check cancellation
+  if (offer.cancelled_at !== null && offer.cancelled_at !== undefined) {
+    res.status(410).json({
+      success: false,
+      error: 'Trial offer has been withdrawn by the scout',
+      data: { status: 'cancelled', cancelledAt: offer.cancelled_at },
+    });
     return null;
   }
 
@@ -206,6 +234,92 @@ export async function rejectTrialOffer(req: Request, res: Response, next: NextFu
       status: 'rejected',
       reason: reason ?? null,
       respondedAt: now,
+    },
+  });
+}
+
+// ─── DELETE /api/scouts/:wallet/trial-offers/:offerId ─────────────────────────
+
+/**
+ * Cancel (withdraw) a pending trial offer submitted by the authenticated scout.
+ *
+ * Only the originating scout may cancel their own offer, and only while it is
+ * still pending — i.e. the player has not yet accepted or rejected it.
+ *
+ * After cancellation the player's accept/reject attempts return 410 Gone.
+ *
+ * - 200: offer cancelled
+ * - 403: authenticated wallet is not the offer's originating scout
+ * - 404: offer not found
+ * - 409: offer already responded to (accepted/rejected) or already cancelled
+ */
+export async function cancelTrialOfferHandler(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const { offerId } = req.params as { offerId: string };
+  const scoutWallet = req.params.wallet as string;
+
+  const offer = await getTrialOfferById(offerId);
+
+  if (!offer) {
+    res.status(404).json({ success: false, error: 'Trial offer not found' });
+    return;
+  }
+
+  if (offer.scout_wallet !== scoutWallet) {
+    logger.warn(
+      `[trialOffer] cancel_denied offerId=${offerId} reason=not_owner account=${req.account}`,
+    );
+    res.status(403).json({ success: false, error: 'Forbidden: you did not submit this trial offer' });
+    return;
+  }
+
+  if (offer.status !== 'pending') {
+    res.status(409).json({
+      success: false,
+      error: `Cannot cancel an offer that is already ${offer.status}`,
+      data: { status: offer.status },
+    });
+    return;
+  }
+
+  if (offer.cancelled_at !== null && offer.cancelled_at !== undefined) {
+    res.status(409).json({
+      success: false,
+      error: 'Offer has already been cancelled',
+      data: { status: 'cancelled', cancelledAt: offer.cancelled_at },
+    });
+    return;
+  }
+
+  const cancelled = await cancelTrialOffer(offerId, scoutWallet);
+
+  if (!cancelled) {
+    // Race: another request beat us to it
+    res.status(409).json({
+      success: false,
+      error: 'Offer could not be cancelled — it may have just been responded to',
+    });
+    return;
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  logger.info(`[trialOffer] cancelled offerId=${offerId} scout=${scoutWallet}`);
+
+  broadcaster.broadcast({
+    type: 'trial_offer_cancelled',
+    payload: {
+      offer_id: offerId,
+      player_id: offer.player_id,
+      scout: scoutWallet,
+      cancelled_at: now,
+    },
+  });
+
+  res.status(200).json({
+    success: true,
+    data: {
+      offerId,
+      status: 'cancelled',
+      cancelledAt: now,
     },
   });
 }

@@ -13,6 +13,7 @@ import {
   trialOfferSchema,
   unlockContactSchema,
 } from '../controllers/scoutController';
+import { cancelTrialOfferHandler } from '../controllers/trialOfferController';
 import { getScoutRecommendations } from '../controllers/scoutRecommendationsController';
 import {
   putScoutNote,
@@ -285,6 +286,32 @@ router.route('/:wallet/trial-offers')
     createTrialOffer,
   )
   .all(methodNotAllowed(['GET', 'POST', 'HEAD']));
+
+/**
+ * DELETE /api/scouts/:wallet/trial-offers/:offerId
+ *
+ * Cancel (withdraw) a pending trial offer submitted by this scout.
+ * Only the originating scout may cancel their own offer, and only while it is
+ * still in 'pending' status — the player has not yet accepted or rejected it.
+ *
+ * After cancellation, the player's accept/reject attempts return 410 Gone.
+ *
+ * @param wallet  {string} - Scout's Stellar public key
+ * @param offerId {string} - Trial offer ID to cancel
+ * @response 200 { success: true, data: { offerId, status: 'cancelled', cancelledAt } }
+ * @response 403 { success: false, error: string } - Wallet mismatch or offer belongs to another scout
+ * @response 404 { success: false, error: string } - Trial offer not found
+ * @response 409 { success: false, error: string } - Offer already accepted/rejected or already cancelled
+ * @auth Bearer (scout role required; wallet must match authenticated account)
+ */
+router.route('/:wallet/trial-offers/:offerId')
+  .delete(
+    requireRole('scout'),
+    requireWalletOwner({ validateAddress: false }),
+    requireApiKeyScope('write:trial_offers'),
+    cancelTrialOfferHandler,
+  )
+  .all(methodNotAllowed(['DELETE']));
 
 /**
  * GET /api/scouts/:wallet/recommendations

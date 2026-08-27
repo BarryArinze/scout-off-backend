@@ -104,7 +104,7 @@ mutating endpoints require the matching scope and return `403` with
 |-------|-------------|
 | `write:contacts` | `POST /scouts/:wallet/contacts/:playerId/unlock` |
 | `write:subscriptions` | `POST/PUT/DELETE /scouts/:wallet/subscribe` |
-| `write:trial_offers` | `POST /scouts/:wallet/trial-offers` (and its deprecated alias `/trial-offer`) |
+| `write:trial_offers` | `POST /scouts/:wallet/trial-offers` (and its deprecated alias `/trial-offer`); `DELETE /scouts/:wallet/trial-offers/:offerId` |
 | `write:webhooks` | `POST /scouts/:wallet/webhooks`, `DELETE .../:id`, `POST .../:id/test` |
 | `write:api_keys` | `POST /scouts/:wallet/api-keys`, `DELETE .../:id` |
 | `write:bookmarks` | bookmark & bookmark-folder mutations |
