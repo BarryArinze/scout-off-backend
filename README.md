@@ -763,6 +763,20 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
    - Admin monitors platform fees and calls `withdraw_fees` to collect revenue
    - Emergency `pause_contract` available as a circuit breaker
 
+## Documentation
+
+The backend's guides live in [`docs/`](docs/README.md), indexed by topic:
+
+- [docs/README.md](docs/README.md) — index of every doc in `docs/`
+- [docs/auth.md](docs/auth.md) — SEP-10 authentication, JWT lifecycle, API keys, SSE revocation
+- [docs/events.md](docs/events.md) — SSE event stream: connecting, filtering, frame format, reconnection limits
+- [docs/webhooks.md](docs/webhooks.md) — outbound webhooks, signatures, dead-letter queue, replay
+- [docs/ip-reputation.md](docs/ip-reputation.md) — IP reputation scoring and admin whitelist/blacklist controls
+- [docs/runbook.md](docs/runbook.md) — operator runbook: indexer lag, reindex/replay, dead-letter drain, cache flush, circuit breaker, pause/unpause
+- [docs/performance.md](docs/performance.md) — latency budgets and load-testing
+
+Operator topics (secrets rotation, data privacy, Postgres migration, deployment) are listed in the index and in [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Configuration
 
 ### Key Environment Variables
