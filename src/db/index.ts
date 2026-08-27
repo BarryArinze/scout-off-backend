@@ -1424,6 +1424,10 @@ export interface TrialOfferRow {
   reject_reason: string | null;
   responded_at: number | null;
   created_at: number;
+  /** Unix epoch seconds after which accept/reject is rejected. NULL = no expiry (pre-migration rows). */
+  expires_at: number | null;
+  /** Unix epoch seconds when the originating scout withdrew the offer. NULL = not cancelled. */
+  cancelled_at: number | null;
 }
 
 export async function getTrialOfferById(offerId: string): Promise<TrialOfferRow | null> {
@@ -1439,10 +1443,11 @@ export async function insertTrialOffer(p: {
   player_id: string;
   details_uri: string;
   created_at: number;
+  expires_at?: number | null;
 }): Promise<void> {
-  const sql = `INSERT INTO trial_offers (offer_id, scout_wallet, player_id, details_uri, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (offer_id) DO NOTHING`;
+  const sql = `INSERT INTO trial_offers (offer_id, scout_wallet, player_id, details_uri, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (offer_id) DO NOTHING`;
   await timedQueryAsync(sql, () =>
-    getDriver().run(sql, [p.offer_id, p.scout_wallet, p.player_id, p.details_uri, p.created_at])
+    getDriver().run(sql, [p.offer_id, p.scout_wallet, p.player_id, p.details_uri, p.created_at, p.expires_at ?? null])
   );
 }
 
@@ -1456,6 +1461,25 @@ export async function respondToTrialOffer(p: {
   await timedQueryAsync(sql, () =>
     getDriver().run(sql, [p.status, p.reject_reason ?? null, p.responded_at, p.offer_id])
   );
+}
+
+/**
+ * Cancel (withdraw) a still-pending trial offer.
+ * Only succeeds when the offer exists, belongs to the given scout, and is
+ * still in 'pending' status. Returns true when the cancellation was applied,
+ * false when no matching pending offer was found.
+ */
+export async function cancelTrialOffer(offerId: string, scoutWallet: string): Promise<boolean> {
+  const now = Math.floor(Date.now() / 1000);
+  const sql = `
+    UPDATE trial_offers
+    SET status = 'cancelled', cancelled_at = ?
+    WHERE offer_id = ? AND scout_wallet = ? AND status = 'pending'
+  `;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [now, offerId, scoutWallet]);
+    return info.changes > 0;
+  });
 }
 
 /**

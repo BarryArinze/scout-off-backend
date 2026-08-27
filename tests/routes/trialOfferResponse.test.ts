@@ -43,6 +43,7 @@ jest.mock('../../src/db', () => ({
   getTrialOfferById: jest.fn(),
   insertTrialOffer: jest.fn(),
   respondToTrialOffer: jest.fn(),
+  cancelTrialOffer: jest.fn(),
 }));
 
 // Ensure we can update the player_registered event wallet in tests
@@ -67,6 +68,8 @@ const pendingOffer = {
   reject_reason: null,
   responded_at: null,
   created_at: Math.floor(Date.now() / 1000) - 3600,
+  expires_at: Math.floor(Date.now() / 1000) + 30 * 24 * 3600, // 30 days from now
+  cancelled_at: null,
 };
 
 beforeEach(() => {
@@ -346,6 +349,55 @@ describe('accept and reject share offer resolution', () => {
       expect(res.body.error).toMatch(/trial offer not found/i);
       expect(mockInsertOffer).not.toHaveBeenCalled();
       expect(mockRespondOffer).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// ─── Expiry and cancellation guards (#expiry) ─────────────────────────────────
+
+describe('expired and cancelled offers cannot be accepted or rejected', () => {
+  const ENDPOINTS: ReadonlyArray<readonly [string, string]> = [
+    ['accept', `/api/players/${PLAYER_ID}/trial-offers/${OFFER_ID}/accept`],
+    ['reject', `/api/players/${PLAYER_ID}/trial-offers/${OFFER_ID}/reject`],
+  ];
+
+  describe.each(ENDPOINTS)('%s', (_action, url) => {
+    it('returns 410 when the offer has expired', async () => {
+      const pastExpiry = Math.floor(Date.now() / 1000) - 1; // 1 second ago
+      mockGetOffer.mockReturnValue({
+        ...pendingOffer,
+        expires_at: pastExpiry,
+      });
+
+      const token = makePlayerToken(PLAYER_WALLET);
+      const res = await request(app).post(url).set('Authorization', `Bearer ${token}`).send({});
+
+      expect(res.status).toBe(410);
+      expect(res.body.error).toMatch(/expired/i);
+      expect(mockRespondOffer).not.toHaveBeenCalled();
+    });
+
+    it('returns 410 when the offer has been cancelled by the scout', async () => {
+      const cancelledAt = Math.floor(Date.now() / 1000) - 60;
+      mockGetOffer.mockReturnValue({
+        ...pendingOffer,
+        cancelled_at: cancelledAt,
+      });
+
+      const token = makePlayerToken(PLAYER_WALLET);
+      const res = await request(app).post(url).set('Authorization', `Bearer ${token}`).send({});
+
+      expect(res.status).toBe(410);
+      expect(res.body.error).toMatch(/withdrawn/i);
+      expect(mockRespondOffer).not.toHaveBeenCalled();
+    });
+
+    it('still accepts/rejects a live non-expired non-cancelled offer', async () => {
+      mockGetOffer.mockReturnValue(pendingOffer); // has future expires_at and null cancelled_at
+      const token = makePlayerToken(PLAYER_WALLET);
+      const res = await request(app).post(url).set('Authorization', `Bearer ${token}`).send({});
+      expect(res.status).toBe(200);
+      expect(mockRespondOffer).toHaveBeenCalledTimes(1);
     });
   });
 });
