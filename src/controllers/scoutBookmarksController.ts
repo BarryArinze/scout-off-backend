@@ -11,6 +11,7 @@ import {
   insertBookmark,
   deleteBookmark,
   getBookmarksByScout,
+  getBookmarkedPlayersWithDetails,
   insertBookmarkFolder,
   getBookmarkFoldersByScout,
   getBookmarkFolderById,
@@ -133,6 +134,10 @@ export async function removeBookmark(
  * List all bookmarked players for the authenticated scout.
  * Supports ?folderId= query parameter to filter by folder.
  * Returns full player profile summaries (same shape as the player list endpoint).
+ *
+ * Uses a single JOIN query (getBookmarkedPlayersWithDetails) instead of
+ * N separate getPlayerById() calls, so query count stays O(1) regardless
+ * of how many players the scout has bookmarked.
  */
 export async function listBookmarks(
   req: Request,
@@ -140,22 +145,16 @@ export async function listBookmarks(
   next: NextFunction,
 ): Promise<void> {
   const folderId = req.query.folderId ? parseInt(req.query.folderId as string, 10) : undefined;
-  const bookmarks: ScoutBookmarkRow[] = await getBookmarksByScout(req.params.wallet as string, folderId);
 
-  // Enrich with full player data
-  const enrichedWithNulls = await Promise.all(
-    bookmarks.map(async (b) => {
-      const player = await getPlayerById(b.player_id);
-      if (!player) return null;
-      return {
-        ...serializePlayer(player),
-        bookmarked_at: b.created_at,
-        folder_id: b.folder_id,
-        note: b.note,
-      };
-    }),
-  );
-  const enriched = enrichedWithNulls.filter((p): p is NonNullable<typeof p> => p !== null);
+  // Single JOIN query — replaces the previous per-bookmark getPlayerById() loop.
+  const rows = await getBookmarkedPlayersWithDetails(req.params.wallet as string, folderId);
+
+  const enriched = rows.map((row) => ({
+    ...serializePlayer(row),
+    bookmarked_at: row.bookmarked_at,
+    folder_id: row.bookmark_folder_id,
+    note: row.bookmark_note,
+  }));
 
   res.json({ success: true, data: enriched });
 }
