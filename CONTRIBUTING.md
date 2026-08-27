@@ -201,6 +201,7 @@ Comment on the GitHub issue to indicate you're working on it. Maintainers will a
 npm run dev                  # Start dev server with hot-reload
 npm run test                 # Run full test suite
 npm run lint                 # Check code style
+npm run typecheck            # Fast type-check (tsc --noEmit), no build output
 npm run check:sql-injection  # Scan src/db for unsafe SQL string interpolation
 npm audit                    # Check for security vulnerabilities
 ```

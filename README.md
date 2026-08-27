@@ -286,6 +286,8 @@ nvm use
 npm install
 ```
 
+> **Troubleshooting:** `.npmrc` sets `engines-strict=true`, so `npm install` fails immediately with an `engines` error on an unsupported Node/npm version instead of just warning — run `nvm use` (or install a Node version matching `engines.node` in `package.json`) and re-run `npm install`.
+
 ### 2. Build Smart Contracts
 
 ```bash
