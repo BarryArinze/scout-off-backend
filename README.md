@@ -22,6 +22,7 @@ Stellar is the backbone: sub-cent transaction fees mean a scout in Europe can pa
 - **Subscription Model**: Scouts can hold an active subscription for unlimited browsing within a tier
 - **SEP-10 Auth**: Players and scouts log in securely with a Stellar wallet (Freighter, Albedo, or Lobstr)
 - **Auth docs**: See docs/auth.md for SEP-10 challenge flow, JWT lifecycle, token refresh, and example requests.
+- **GraphQL docs**: See [docs/graphql.md](docs/graphql.md) for the read-only GraphQL endpoint, schema, limits, and authentication.
 - **Decentralized Storage**: Highlight reels and photos stored on IPFS; content hashes saved on-chain in the player's profile
 
 ## Architecture
