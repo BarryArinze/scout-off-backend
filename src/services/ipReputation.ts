@@ -55,7 +55,7 @@ let decayTimer: ReturnType<typeof setInterval> | null = null;
 
 /**
  * Start the periodic decay timer. Safe to call multiple times (idempotent).
- * In production this runs automatically on first import.
+ * Must be called explicitly from the server bootstrap (see src/index.ts).
  */
 export function startDecayTimer(): void {
   if (decayTimer !== null) return;
@@ -65,11 +65,7 @@ export function startDecayTimer(): void {
       if (rep.pinned) continue; // pinned IPs are immune to decay
       const hoursElapsed = (now - rep.lastSeen) / HOUR_MS;
       if (hoursElapsed >= 1) {
-        const decayFactor = Math.pow(1 - DECAY_RATE, Math.floor(hoursElapsed));
-        rep.score = Math.max(0, Math.round(rep.score * decayFactor));
-        if (rep.score === 0) {
-          reputationStore.delete(ip); // clean up zero-score entries
-        }
+        applyDecay(ip, hoursElapsed);
       }
     }
   }, DECAY_INTERVAL_MS);
@@ -192,6 +188,3 @@ export function setIpScore(ip: string, score: number, pinned = true): void {
   rep.pinnedAt = Date.now();
   rep.lastSeen = Date.now();
 }
-
-// Start the timer automatically on module load (safe in tests via stopDecayTimer)
-startDecayTimer();
