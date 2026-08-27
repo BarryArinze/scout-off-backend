@@ -313,7 +313,7 @@ const config = {
    * PostgresDriver's concurrency ceiling — requests beyond this queue for a
    * free connection rather than failing. Ignored when DB_DRIVER=sqlite.
    */
-  databasePoolSize: parseInt(process.env.DATABASE_POOL_SIZE ?? '10', 10),
+  databasePoolSize: parseNumericEnv('DATABASE_POOL_SIZE', process.env.DATABASE_POOL_SIZE, 10, { min: 1, max: 100, integer: true }),
   stellarHealthCheckEnabled: process.env.STELLAR_HEALTH_CHECK !== 'false',
   adminWallet: process.env.ADMIN_WALLET ?? '',
   adminWallets: (process.env.ADMIN_WALLETS ?? process.env.ADMIN_WALLET ?? '').split(',').map(w => w.trim()).filter(w => w.length > 0),

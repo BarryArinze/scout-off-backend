@@ -172,7 +172,8 @@ replicas: 3
 ### What every instance actually does
 
 - **Connects to the same PostgreSQL database** through its own connection
-  pool (`pg.Pool`, default size 10 — see `PostgresDriver`'s constructor in
+  pool (`pg.Pool`, default size 10, configurable via `DATABASE_POOL_SIZE`
+  (1-100) — see `PostgresDriver`'s constructor in
   `src/db/postgres-driver.ts`). Every query is genuinely `await`-ed against
   that pool; there is no busy-waiting or blocking of the Node event loop, so
   concurrent requests within and across replicas are served in parallel

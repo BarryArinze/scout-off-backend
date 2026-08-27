@@ -196,6 +196,59 @@ jobs:
           POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/scout_off_ci
           CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
 
+  # Catches "compiles but doesn't run" regressions (bad import path, missing
+  # runtime asset like db/ migrations or openapi files) that tsc alone can't
+  # see, since nothing else in this workflow boots the compiled dist/ output.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Boot dist/index.js and wait for /health
+        env:
+          NODE_ENV: test
+          PORT: 4000
+          DB_PATH: /tmp/smoke-test.db
+          JWT_SECRET: test-secret-min-32-chars-for-ci-only
+          CONTRACT_ID: CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4
+        run: |
+          node dist/index.js &
+          SERVER_PID=$!
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4000/health > /dev/null; then
+              echo "Server is up after ${i}s"
+              break
+            fi
+            if ! kill -0 $SERVER_PID 2>/dev/null; then
+              echo "Server process exited before becoming healthy"
+              exit 1
+            fi
+            sleep 1
+          done
+
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:4000/health)
+          if [ "$status" != "200" ]; then
+            echo "Expected 200 from /health, got $status"
+            kill "$SERVER_PID" 2>/dev/null || true
+            exit 1
+          fi
+
+          kill -TERM "$SERVER_PID"
+          wait "$SERVER_PID" || true
+
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
