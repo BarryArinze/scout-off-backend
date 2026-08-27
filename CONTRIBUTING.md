@@ -1,6 +1,6 @@
 # Contributing to ScoutOff Backend
 
-Welcome! This guide covers contribution workflows, code standards, and critical security practices including dependency management.
+Welcome! This guide covers contribution workflows, code standards, and critical security practices including dependency management. All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Table of Contents
 

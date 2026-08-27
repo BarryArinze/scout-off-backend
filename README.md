@@ -463,6 +463,8 @@ npm install
 
 ### Environment Setup
 
+> Hit an error during setup? See [Troubleshooting local setup](#troubleshooting-local-setup) for common fixes.
+
 Copy the example env file and fill in the required values:
 
 ```bash
@@ -602,6 +604,15 @@ curl http://localhost:4000/api/players/seed-player-003
 ```bash
 npm run lint
 ```
+
+### Troubleshooting local setup
+
+| Error text | Cause | Fix |
+| ---------- | ----- | --- |
+| `Error: Missing required environment variable: JWT_SECRET` (or `CONTRACT_ID`) | `src/config.ts` calls `required(...)` for these vars and throws on startup if they're unset. `predev`/`prestart` also run `scripts/validate-env.js --runtime`, which fails fast with the same error. | Copy `.env.example` to `.env` and fill in `JWT_SECRET` and `CONTRACT_ID` (see [Environment Setup](#environment-setup)). |
+| `Error: Cannot find module '../build/Release/better_sqlite3.node'` or a native binding / ABI mismatch error on `npm install` / `npm run dev` | `better-sqlite3` ships a native addon compiled against a specific Node ABI. Installing with one Node version then running with another (or switching Node versions without reinstalling) leaves a stale binary. | Run `nvm use` to switch to the pinned Node version, then `rm -rf node_modules && npm install` to rebuild the native module against that version. |
+| `The engine "node" is incompatible with this module` (npm) or unexpected runtime errors on an unsupported Node version | The project's `engines.node` range in `package.json` is `>=18.0.0 <23.0.0`, and `.nvmrc` pins the exact version used in CI's primary coverage job. | Install the pinned version with `nvm install && nvm use` (or the equivalent for fnm/asdf) before running `npm install`. |
+| `validate-env` fails during `npm install`/`npm run dev`/`npm start` (`predev`/`prestart` hooks) listing missing or unrecognised env vars | `scripts/validate-env.js --runtime` checks that every required var is set and that `NODE_ENV`/`DB_DRIVER`/`PINATA_GATEWAY` (when set) have valid values. | Read the specific error line — it names the offending variable — and fix it in `.env`. Run `node scripts/validate-env.js` (without `--runtime`) to also check that `.env.example` documents every var referenced in `src/`. |
 
 ## Health Endpoints
 
@@ -907,7 +918,7 @@ MIT
 
 ## Contributing
 
-Contributions are welcome! This section provides guidance for backend contributors and issue filing best practices.
+Contributions are welcome! This section provides guidance for backend contributors and issue filing best practices. All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ### Getting Started
 
