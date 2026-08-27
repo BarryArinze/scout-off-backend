@@ -296,16 +296,17 @@ describe('Redis Pub/Sub fanout (invalidate:players)', () => {
     const store = new InMemoryCacheStore();
     const handler = cache.createInvalidationHandler(store);
 
-    await store.set('players:list:all', ['a']);
-    await store.set('players:list:{"region":"eu"}', ['b']);
-    await store.set('players:42', { id: 42 });
+    // Write keys using the same namespace prefix the handler will clear.
+    await store.set(cache.namespacedKey('players:list:all'), ['a']);
+    await store.set(cache.namespacedKey('players:list:{"region":"eu"}'), ['b']);
+    await store.set(cache.namespacedKey('players:42'), { id: 42 });
 
     await handler('invalidate:players', cache.INVALIDATION_MESSAGE);
 
-    expect(await store.get('players:list:all')).toBeUndefined();
-    expect(await store.get('players:list:{"region":"eu"}')).toBeUndefined();
+    expect(await store.get(cache.namespacedKey('players:list:all'))).toBeUndefined();
+    expect(await store.get(cache.namespacedKey('players:list:{"region":"eu"}'))).toBeUndefined();
     // Single-player entries must NOT be wildcard-invalidated.
-    expect(await store.get('players:42')).toEqual({ id: 42 });
+    expect(await store.get(cache.namespacedKey('players:42'))).toEqual({ id: 42 });
     expect(metrics.getCacheInvalidationTotal()).toBe(1);
   });
 
@@ -315,10 +316,10 @@ describe('Redis Pub/Sub fanout (invalidate:players)', () => {
     const store = new InMemoryCacheStore();
     const handler = cache.createInvalidationHandler(store);
 
-    await store.set('players:list:all', ['a']);
+    await store.set(cache.namespacedKey('players:list:all'), ['a']);
     await handler('some-other-channel', 'irrelevant');
 
-    expect(await store.get('players:list:all')).toEqual(['a']);
+    expect(await store.get(cache.namespacedKey('players:list:all'))).toEqual(['a']);
     expect(metrics.getCacheInvalidationTotal()).toBe(0);
   });
 
@@ -330,16 +331,16 @@ describe('Redis Pub/Sub fanout (invalidate:players)', () => {
     const handlerA = cache.createInvalidationHandler(storeA);
     const handlerB = cache.createInvalidationHandler(storeB);
 
-    await storeA.set('players:list:a', ['x']);
-    await storeB.set('players:list:b', ['y']);
+    await storeA.set(cache.namespacedKey('players:list:a'), ['x']);
+    await storeB.set(cache.namespacedKey('players:list:b'), ['y']);
 
     await Promise.all([
       handlerA('invalidate:players', cache.INVALIDATION_MESSAGE),
       handlerB('invalidate:players', cache.INVALIDATION_MESSAGE),
     ]);
 
-    expect(await storeA.get('players:list:a')).toBeUndefined();
-    expect(await storeB.get('players:list:b')).toBeUndefined();
+    expect(await storeA.get(cache.namespacedKey('players:list:a'))).toBeUndefined();
+    expect(await storeB.get(cache.namespacedKey('players:list:b'))).toBeUndefined();
     expect(metrics.getCacheInvalidationTotal()).toBe(2);
   });
 
@@ -449,5 +450,81 @@ describe('cache.ts Redis backend error handling', () => {
     jest.dontMock('ioredis');
     jest.dontMock('../../src/config');
     jest.resetModules();
+  });
+});
+
+// ─── #672: Namespace isolation — two CACHE_NAMESPACE values never collide ────
+//
+// The cache module is re-loaded twice with different CACHE_NAMESPACE configs
+// and the same underlying RedisMock instance (same server). Keys written under
+// namespace A must never be readable under namespace B.
+
+describe('cache namespace isolation (#672)', () => {
+  function loadCacheWithNamespace(namespace: string, redisClient: unknown) {
+    jest.resetModules();
+    jest.doMock('../../src/services/redis', () => ({
+      getRedisClient: jest.fn(() => redisClient),
+      getRedisSubscriberClient: jest.fn(() => null),
+      closeRedisClients: jest.fn(),
+    }));
+    jest.doMock('../../src/config', () => ({
+      __esModule: true,
+      default: {
+        ...jest.requireActual('../../src/config').default,
+        cacheNamespace: namespace,
+        playerCacheTtlMs: 60000,
+      },
+    }));
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require('../../src/services/cache') as typeof import('../../src/services/cache');
+  }
+
+  afterEach(() => {
+    jest.dontMock('../../src/services/redis');
+    jest.dontMock('../../src/config');
+    jest.resetModules();
+  });
+
+  it('two deployments with different namespaces sharing the same Redis store never read each other\'s keys', async () => {
+    // Use a single shared RedisMock instance (same "server") to simulate
+    // two deployments connected to the same Redis cluster.
+    const sharedRedis = new RedisMock();
+    await sharedRedis.flushall();
+
+    const production = loadCacheWithNamespace('production', sharedRedis);
+    const staging = loadCacheWithNamespace('staging', sharedRedis);
+
+    // Each namespace writes its own value for the same logical key.
+    await production.cacheSet('players:list:{}', [{ id: 'prod-player' }]);
+    await staging.cacheSet('players:list:{}', [{ id: 'staging-player' }]);
+
+    // Each namespace reads back only its own value.
+    await expect(production.cacheGet('players:list:{}')).resolves.toEqual([{ id: 'prod-player' }]);
+    await expect(staging.cacheGet('players:list:{}')).resolves.toEqual([{ id: 'staging-player' }]);
+  });
+
+  it('namespacedKey() uses the configured namespace as prefix', () => {
+    const cache = loadCacheWithNamespace('myapp', null);
+    expect(cache.namespacedKey('players:list:foo')).toBe('myapp:players:list:foo');
+    expect(cache.namespacedKey('players:42')).toBe('myapp:players:42');
+  });
+
+  it('invalidatePlayerCache() in one namespace does not affect the other namespace\'s keys', async () => {
+    const sharedRedis = new RedisMock();
+    await sharedRedis.flushall();
+
+    const production = loadCacheWithNamespace('production', sharedRedis);
+    const staging = loadCacheWithNamespace('staging', sharedRedis);
+
+    await production.cacheSet('players:list:all', [1, 2, 3]);
+    await staging.cacheSet('players:list:all', [4, 5, 6]);
+
+    // Invalidate only production namespace.
+    await production.invalidatePlayerCache();
+
+    // Production list is gone.
+    await expect(production.cacheGet('players:list:all')).resolves.toBeUndefined();
+    // Staging list survives.
+    await expect(staging.cacheGet('players:list:all')).resolves.toEqual([4, 5, 6]);
   });
 });

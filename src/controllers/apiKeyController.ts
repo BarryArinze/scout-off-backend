@@ -16,6 +16,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { randomBytes, createHash } from 'crypto';
 import { z } from 'zod';
+import config from '../config';
 import {
   insertApiKey,
   listApiKeysByWallet,
@@ -178,6 +179,12 @@ const issueKeySchema = z.object({
    * perform operations covered by their granted scopes (#1019).
    */
   scopes: z.array(z.string()).optional(),
+  /**
+   * Key lifetime in days from issuance (#674). Omitted → use the server
+   * default (API_KEY_DEFAULT_TTL_DAYS, default 90 days). Pass 0 to
+   * explicitly request a non-expiring key.
+   */
+  expiresInDays: z.number().int().min(0).optional(),
 });
 
 // ── Key rotation (#676) ─────────────────────────────────────────────────────
@@ -230,6 +237,15 @@ export async function issueApiKey(
   const { key, keyHash, lookupHash } = generateApiKey();
   const now = Math.floor(Date.now() / 1000);
 
+  // Compute expiry: explicit 0 → no expiry; explicit N → N days; omitted →
+  // server default (API_KEY_DEFAULT_TTL_DAYS). Default 0 disables expiry.
+  let expiresAt: number | null = null;
+  const requestedDays = parsed.data.expiresInDays;
+  const effectiveDays = requestedDays !== undefined ? requestedDays : config.apiKeyDefaultTtlDays;
+  if (effectiveDays > 0) {
+    expiresAt = now + effectiveDays * 86400;
+  }
+
   const grantedScopes = scopesResult.scopes;
   const id = await insertApiKey({
     key_hash: keyHash,
@@ -241,9 +257,10 @@ export async function issueApiKey(
     // verification hash so this key never touches the transitional scan
     // path; deliberately absent from the response body below.
     lookup_hash: lookupHash,
+    expires_at: expiresAt,
   });
 
-  logger.info({ scout: req.params.wallet as string, action: 'api_key_issued', keyId: id, scopes: grantedScopes.length > 0 ? grantedScopes : null });
+  logger.info({ scout: req.params.wallet as string, action: 'api_key_issued', keyId: id, scopes: grantedScopes.length > 0 ? grantedScopes : null, expiresAt });
 
   res.status(201).json({
     success: true,
@@ -252,6 +269,7 @@ export async function issueApiKey(
       key,          // plaintext — returned once only
       label: parsed.data.label,
       created_at: now,
+      expires_at: expiresAt,
       // Empty array == legacy/unrestricted key (omitted scopes).
       scopes: grantedScopes,
     },
@@ -284,6 +302,8 @@ export async function listApiKeys(
       // Set only while a rotation grace period is in effect (#676); null
       // once the key is either permanently revoked or never rotated.
       scheduled_revocation_at: r.revoked_at === null ? (r.revoke_after ?? null) : null,
+      // Hard expiry timestamp (#674); null = no expiry.
+      expires_at: r.expires_at ?? null,
       // Empty array = legacy/unrestricted key; otherwise the granted scope list.
       scopes: r.scopes ? (JSON.parse(r.scopes) as string[]) : [],
     })),
@@ -358,6 +378,17 @@ export async function rotateApiKey(
 
   const { key, keyHash, lookupHash } = generateApiKey();
   const now = Math.floor(Date.now() / 1000);
+
+  // The replacement key inherits the old key's expiry policy. If the old key
+  // had a concrete expires_at, recompute from now with the same lifetime so
+  // the rotation doesn't silently shorten or extend it. If the old key had no
+  // expiry (null), the replacement also has no expiry.
+  let newExpiresAt: number | null = null;
+  if (oldRow.expires_at !== null) {
+    const originalLifetimeSecs = oldRow.expires_at - oldRow.created_at;
+    newExpiresAt = now + Math.max(originalLifetimeSecs, 0);
+  }
+
   const newId = await insertApiKey({
     key_hash: keyHash,
     scout_wallet: req.params.wallet as string,
@@ -365,6 +396,7 @@ export async function rotateApiKey(
     created_at: now,
     scopes: inheritedScopes ?? undefined,
     lookup_hash: lookupHash,
+    expires_at: newExpiresAt,
   });
 
   const revokesAt = now + parsed.data.gracePeriodSeconds;
@@ -376,6 +408,7 @@ export async function rotateApiKey(
     oldKeyId: id,
     newKeyId: newId,
     revokesAt,
+    newExpiresAt,
   });
 
   res.status(201).json({
@@ -386,6 +419,7 @@ export async function rotateApiKey(
         key,          // plaintext — returned once only
         label: oldRow.label,
         created_at: now,
+        expires_at: newExpiresAt,
         scopes: inheritedScopes ?? [],
       },
       oldKey: {

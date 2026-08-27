@@ -277,6 +277,53 @@ describe('POST /api/scouts/:wallet/api-keys', () => {
     expect(res.body.data.key).toMatch(/^[0-9a-f]{64}$/);
   });
 
+  it('applies a default expiry (API_KEY_DEFAULT_TTL_DAYS) when expiresInDays is omitted', async () => {
+    mockInsertApiKey.mockReturnValueOnce(20);
+
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ label: 'default-ttl' });
+
+    expect(res.status).toBe(201);
+    // Default is 90 days.
+    const expectedExpiry = before + 90 * 86400;
+    expect(res.body.data.expires_at).toBeGreaterThanOrEqual(expectedExpiry);
+    expect(res.body.data.expires_at).toBeLessThan(expectedExpiry + 5);
+    const insertArg = mockInsertApiKey.mock.calls[0][0];
+    expect(insertArg.expires_at).toEqual(res.body.data.expires_at);
+  });
+
+  it('accepts expiresInDays=0 to issue a non-expiring key', async () => {
+    mockInsertApiKey.mockReturnValueOnce(21);
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ label: 'no-expiry', expiresInDays: 0 });
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.expires_at).toBeNull();
+    const insertArg = mockInsertApiKey.mock.calls[0][0];
+    expect(insertArg.expires_at).toBeNull();
+  });
+
+  it('accepts a custom expiresInDays value', async () => {
+    mockInsertApiKey.mockReturnValueOnce(22);
+
+    const before = Math.floor(Date.now() / 1000);
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({ label: 'short-lived', expiresInDays: 30 });
+
+    expect(res.status).toBe(201);
+    const expectedExpiry = before + 30 * 86400;
+    expect(res.body.data.expires_at).toBeGreaterThanOrEqual(expectedExpiry);
+    expect(res.body.data.expires_at).toBeLessThan(expectedExpiry + 5);
+  });
+
   it('only persists hash (insertApiKey is called with key_hash not plaintext)', async () => {
     mockInsertApiKey.mockReturnValueOnce(1);
 
@@ -342,6 +389,44 @@ describe('POST /api/scouts/:wallet/api-keys', () => {
 
     expect(res.status).toBe(403);
   });
+  it('rotation inherits the old key\'s expiry lifetime for the new key', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    // Old key was created 10 days ago with a 90-day lifetime → 80 days remain
+    const oldCreatedAt = now - 10 * 86400;
+    const oldExpiresAt = oldCreatedAt + 90 * 86400;
+    mockOldKey({ created_at: oldCreatedAt, expires_at: oldExpiresAt });
+    mockInsertApiKey.mockReturnValueOnce(13);
+    mockScheduleRevoke.mockReturnValueOnce(true);
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({});
+
+    expect(res.status).toBe(201);
+    const newExpiry = res.body.data.newKey.expires_at as number;
+    // The new key gets the original 90-day lifetime from now.
+    expect(newExpiry).toBeGreaterThanOrEqual(now + 90 * 86400 - 2);
+    expect(newExpiry).toBeLessThanOrEqual(now + 90 * 86400 + 2);
+    const insertArg = mockInsertApiKey.mock.calls[0][0];
+    expect(insertArg.expires_at).toEqual(newExpiry);
+  });
+
+  it('rotation preserves null expiry when the old key had no expiry', async () => {
+    mockOldKey({ expires_at: null });
+    mockInsertApiKey.mockReturnValueOnce(14);
+    mockScheduleRevoke.mockReturnValueOnce(true);
+
+    const res = await request(app)
+      .post(`/api/scouts/${SCOUT_A}/api-keys/3/rotate`)
+      .set('Authorization', `Bearer ${scoutAToken}`)
+      .send({});
+
+    expect(res.status).toBe(201);
+    expect(res.body.data.newKey.expires_at).toBeNull();
+    const insertArg = mockInsertApiKey.mock.calls[0][0];
+    expect(insertArg.expires_at).toBeNull();
+  });
 });
 
 // ─── GET /api/scouts/:wallet/api-keys ────────────────────────────────────────
@@ -352,7 +437,7 @@ describe('GET /api/scouts/:wallet/api-keys', () => {
   it('lists keys without exposing plaintext or full hash', async () => {
     const { keyHash } = generateApiKey();
     mockListApiKeys.mockReturnValueOnce([
-      { id: 1, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'bot', created_at: 1000, last_used_at: null, revoked_at: null },
+      { id: 1, key_hash: keyHash, scout_wallet: SCOUT_A, label: 'bot', created_at: 1000, last_used_at: null, revoked_at: null, expires_at: 9999, scopes: null, revoke_after: null, rate_limit_per_minute: null, lookup_hash: null },
     ]);
 
     const res = await request(app)
@@ -367,6 +452,8 @@ describe('GET /api/scouts/:wallet/api-keys', () => {
     // Must provide a shortened display hint
     expect(item.key_prefix).toMatch(/…$/);
     expect(item.key_prefix.length).toBeLessThan(20);
+    // expires_at must be surfaced (#674)
+    expect(item.expires_at).toBe(9999);
   });
 
   it('returns 403 for cross-wallet access', async () => {
@@ -420,19 +507,21 @@ describe('DELETE /api/scouts/:wallet/api-keys/:id', () => {
 describe('POST /api/scouts/:wallet/api-keys/:id/rotate', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  function mockOldKey(overrides: Partial<{ label: string; scopes: string | null; revoked_at: number | null }> = {}) {
+  function mockOldKey(overrides: Partial<{ label: string; scopes: string | null; revoked_at: number | null; expires_at: number | null; created_at: number }> = {}) {
+    const createdAt = overrides.created_at ?? 0;
     mockGetApiKeyById.mockReturnValueOnce({
       id: 3,
       key_hash: 'somesalt:somehash',
       scout_wallet: SCOUT_A,
       label: 'CI pipeline',
-      created_at: 0,
+      created_at: createdAt,
       last_used_at: null,
       revoked_at: null,
       scopes: null,
       rate_limit_per_minute: null,
       lookup_hash: 'v1:deadbeef',
       revoke_after: null,
+      expires_at: null,
       ...overrides,
     });
   }
@@ -651,5 +740,32 @@ describe('X-API-Key header authentication', () => {
       .set('X-API-Key', key);
 
     expect(res.status).toBe(401);
+  });
+
+  it('rejects an expired key (expires_at in the past = excluded by the indexed lookup)', async () => {
+    // getActiveApiKeyByLookupHash also filters on `expires_at IS NULL OR expires_at > now`,
+    // so an expired key's row is never returned — same 401 as revoked/unknown.
+    mockGetByLookup.mockReturnValue(null);
+    mockGetPending.mockReturnValue([]);
+
+    const { key } = generateApiKey();
+    const res = await request(app)
+      .get(`/api/scouts/${SCOUT_A}/api-keys`)
+      .set('X-API-Key', key);
+
+    expect(res.status).toBe(401);
+  });
+
+  it('accepts a valid key before its expires_at', async () => {
+    const { key, keyHash, lookupHash } = generateApiKey();
+    const futureExpiry = Math.floor(Date.now() / 1000) + 9999;
+    seedIndexedKey({ id: 15, key_hash: keyHash, scout_wallet: SCOUT_A, label: '', created_at: 0, last_used_at: null, revoked_at: null, expires_at: futureExpiry, lookup_hash: lookupHash });
+    mockListApiKeys.mockReturnValue([]);
+
+    const res = await request(app)
+      .get(`/api/scouts/${SCOUT_A}/api-keys`)
+      .set('X-API-Key', key);
+
+    expect(res.status).toBe(200);
   });
 });

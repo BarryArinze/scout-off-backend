@@ -57,6 +57,12 @@ export class RedisCacheStore implements CacheStore {
     try {
       const serialized = JSON.stringify(value);
       if (ttlMs !== undefined) {
+        // ttlMs=0 means "expire immediately" — consistent with InMemoryCacheStore,
+        // which sets expiresAt = Date.now() + 0 so the entry is expired on the
+        // very next read (#673). Redis rejects PX 0 with an error, so we skip
+        // the write entirely; the entry is treated as instantly expired from
+        // the caller's perspective (get() will return undefined, has() false).
+        if (ttlMs === 0) return;
         await this.client.set(key, serialized, 'PX', ttlMs);
       } else {
         await this.client.set(key, serialized);
