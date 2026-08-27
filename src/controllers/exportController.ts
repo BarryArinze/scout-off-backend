@@ -4,15 +4,37 @@ import { adminDateRangeSchema } from './adminController';
 import type { ContractEventType } from '../types';
 
 /**
+ * Dangerous leading characters that spreadsheet applications (Excel, Google
+ * Sheets, LibreOffice Calc) interpret as formula triggers when they appear as
+ * the first character of a CSV field. Prefixing these fields with a tab
+ * character is the OWASP-recommended mitigation for CSV injection.
+ *
+ * @see https://owasp.org/www-community/attacks/CSV_Injection
+ */
+const CSV_FORMULA_TRIGGER = /^[=+\-@\t\r]/;
+
+/**
  * Escapes a single CSV field per RFC 4180: any value containing a comma,
  * double quote, or newline (\n or \r) is wrapped in double quotes, with
  * internal double quotes doubled.
+ *
+ * Additionally neutralizes CSV formula injection (OWASP) by prefixing any
+ * field whose first character is a spreadsheet formula trigger (=, +, -, @)
+ * with a tab character. The tab causes spreadsheet applications to treat the
+ * field as a string literal rather than evaluating it as a formula, while
+ * remaining invisible in most display contexts. The resulting field is then
+ * quoted per RFC 4180 so the tab is preserved correctly by all CSV parsers.
  */
 export function csvEscapeField(value: string): string {
-  if (/[",\n\r]/.test(value)) {
-    return `"${value.replace(/"/g, '""')}"`;
+  // Neutralize formula-injection triggers before quoting so the sanitized
+  // value is always safe regardless of whether it also contains RFC 4180
+  // special characters.
+  const safe = CSV_FORMULA_TRIGGER.test(value) ? `\t${value}` : value;
+
+  if (/[",\n\r\t]/.test(safe)) {
+    return `"${safe.replace(/"/g, '""')}"`;
   }
-  return value;
+  return safe;
 }
 
 /** Formats a single event row as one CSV line (including trailing newline). */

@@ -463,6 +463,69 @@ describe('GET /api/admin/events/export — CSV escaping', () => {
   });
 });
 
+describe('GET /api/admin/events/export — CSV formula injection prevention (OWASP)', () => {
+  it('neutralizes a field starting with = (formula trigger)', () => {
+    const { csvEscapeField } = require('../../src/controllers/exportController');
+    const result = csvEscapeField('=1+1');
+    // Must NOT start with = in the output
+    expect(result.replace(/^"/, '')).not.toMatch(/^=/);
+    // Must be quoted because the prepended tab is a special character
+    expect(result.startsWith('"')).toBe(true);
+  });
+
+  it('neutralizes a field starting with + (formula trigger)', () => {
+    const { csvEscapeField } = require('../../src/controllers/exportController');
+    const result = csvEscapeField('+cmd|"/C calc"!A0');
+    expect(result.replace(/^"/, '')).not.toMatch(/^\+/);
+    expect(result.startsWith('"')).toBe(true);
+  });
+
+  it('neutralizes a field starting with - (formula trigger)', () => {
+    const { csvEscapeField } = require('../../src/controllers/exportController');
+    const result = csvEscapeField('-2+3');
+    expect(result.replace(/^"/, '')).not.toMatch(/^-/);
+    expect(result.startsWith('"')).toBe(true);
+  });
+
+  it('neutralizes a field starting with @ (formula trigger)', () => {
+    const { csvEscapeField } = require('../../src/controllers/exportController');
+    const result = csvEscapeField('@SUM(A1:A100)');
+    expect(result.replace(/^"/, '')).not.toMatch(/^@/);
+    expect(result.startsWith('"')).toBe(true);
+  });
+
+  it('does not alter a normal field that does not start with a trigger character', () => {
+    const { csvEscapeField } = require('../../src/controllers/exportController');
+    expect(csvEscapeField('player_registered')).toBe('player_registered');
+    expect(csvEscapeField('hello world')).toBe('hello world');
+    expect(csvEscapeField('123')).toBe('123');
+  });
+
+  it('round-trips a formula-injection payload through formatEventCsvRow and back via the CSV parser', async () => {
+    const { formatEventCsvRow } = require('../../src/controllers/exportController');
+    // A payload where the JSON-encoded value starts with = (formula trigger)
+    const row = {
+      type: '=HYPERLINK("http://evil.example","click me")' as const,
+      ledger: 42,
+      createdAt: 1_700_000_000_000,
+      payload: { cmd: '=1+1' },
+    };
+    const line = formatEventCsvRow(row);
+    const parsed = parseCsv(line);
+
+    expect(parsed.length).toBe(1);
+    expect(parsed[0].length).toBe(4);
+
+    // event_type field — starts with = but neutralized; the parsed value
+    // should not begin with = (it is prefixed by a tab by the sanitizer)
+    expect(parsed[0][0]).not.toMatch(/^=/);
+
+    // payload field — JSON.stringify of {cmd:'=1+1'} does NOT start with =
+    // (it starts with {), so no formula trigger — value is preserved as-is
+    expect(JSON.parse(parsed[0][3])).toEqual(row.payload);
+  });
+});
+
 describe('GET /api/admin/events/export — client abort cleanup', () => {
   it('cleans up the SQLite cursor when the client disconnects mid-stream', async () => {
     const { PassThrough } = await import('stream');
