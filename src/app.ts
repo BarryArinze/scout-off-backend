@@ -177,7 +177,7 @@ app.use(compression({
   threshold: config.compressionThresholdBytes,
   filter: (req, res) => {
     // Skip compression for SSE endpoints
-    if (req.path === '/api/events/stream' || req.path.startsWith('/api/v1/events/stream') || req.path.startsWith('/api/v2/events/stream')) {
+    if (/^\/api\/(v[12]\/)?events\/stream/.test(req.path)) {
       return false;
     }
     return compression.filter(req, res);

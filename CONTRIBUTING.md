@@ -51,7 +51,7 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
 
 ### Database Migrations
 
-The project uses SQL migrations to manage database schema across environments. Migrations are stored as numbered `.sql` files in the `db/` directory and are tracked in the `migrations` table.
+The project uses SQL migrations to manage database schema across environments. Migrations are stored as numbered `.sql` files in the `db/` directory and are tracked in the `migrations` table. See [db/README.md](db/README.md) for the naming convention, SQLite/PostgreSQL pairing, and how to add a new migration.
 
 **Checking migration status:**
 
