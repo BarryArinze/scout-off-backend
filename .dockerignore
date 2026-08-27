@@ -4,6 +4,7 @@ node_modules/
 # Test files
 tests/
 __mocks__/
+coverage/
 
 # Build artifacts already copied by the builder stage
 dist/

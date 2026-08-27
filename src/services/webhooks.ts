@@ -69,52 +69,52 @@ export async function postWebhookWithRetry(
 ): Promise<void> {
   const span = tracer.startSpan('webhooks.postWithRetry', { attributes: { 'webhook.url': url } });
   try {
-  const retries = options.retries ?? 3;
-  const baseDelayMs = options.baseDelayMs ?? 500;
-  const maxDelayMs = options.maxDelayMs ?? 5000;
-  const timeoutMs = options.timeoutMs ?? config.webhook.timeoutMs;
-  let lastError: unknown;
+    const retries = options.retries ?? 3;
+    const baseDelayMs = options.baseDelayMs ?? 500;
+    const maxDelayMs = options.maxDelayMs ?? 5000;
+    const timeoutMs = options.timeoutMs ?? config.webhook.timeoutMs;
+    let lastError: unknown;
 
-  // Serialize once so the signature is computed over the exact bytes sent.
-  const rawBody = JSON.stringify(payload);
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (options.secret) {
-    headers['X-Webhook-Signature'] = signWebhookPayload(rawBody, options.secret);
-  }
+    // Serialize once so the signature is computed over the exact bytes sent.
+    const rawBody = JSON.stringify(payload);
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (options.secret) {
+      headers['X-Webhook-Signature'] = signWebhookPayload(rawBody, options.secret);
+    }
 
-  for (let attempt = 1; attempt <= retries; attempt += 1) {
-    span.setAttribute('webhook.attempt', attempt);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        body: rawBody,
-        headers,
-        signal: controller.signal,
-      });
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+      span.setAttribute('webhook.attempt', attempt);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          body: rawBody,
+          headers,
+          signal: controller.signal,
+        });
 
-      if (!response.ok) {
+        if (!response.ok) {
+          span.setAttribute('webhook.status', response.status);
+          throw new Error(`Webhook dispatch failed with status ${response.status}`);
+        }
         span.setAttribute('webhook.status', response.status);
-        throw new Error(`Webhook dispatch failed with status ${response.status}`);
+        return;
+      } catch (err) {
+        lastError = controller.signal.aborted
+          ? new Error(`Webhook dispatch timed out after ${timeoutMs}ms`)
+          : err;
+      } finally {
+        clearTimeout(timer);
       }
-      span.setAttribute('webhook.status', response.status);
-      return;
-    } catch (err) {
-      lastError = controller.signal.aborted
-        ? new Error(`Webhook dispatch timed out after ${timeoutMs}ms`)
-        : err;
-    } finally {
-      clearTimeout(timer);
+
+      if (attempt < retries) {
+        const delayMs = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+        await sleep(delayMs);
+      }
     }
 
-    if (attempt < retries) {
-      const delayMs = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
-      await sleep(delayMs);
-    }
-  }
-
-  throw lastError;
+    throw lastError;
   } catch (err) {
     span.recordException(err as Error);
     span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
