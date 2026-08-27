@@ -4,10 +4,14 @@
  * Tracks per-IP behaviour metrics (error rate, rate-limit hits, auth failures)
  * and calculates a reputation score (0 = clean, 100 = blocked).
  *
- * The score is stored in an in-memory map (Redis-backed in multi-instance
- * deployments where the cache module is configured with REDIS_URL). Scores
- * decay by 10% per hour to forgive transient spikes. Admin endpoints can
- * manually whitelist (score=0) or blacklist (score=100) an IP.
+ * The score is stored in a process-local in-memory map only. Scores decay by
+ * 10% per hour to forgive transient spikes. Admin endpoints can manually
+ * whitelist (score=0) or blacklist (score=100) an IP.
+ *
+ * Known limitation: this store is not shared across instances — in a
+ * multi-instance deployment, a given IP's score is fragmented per instance
+ * rather than tracked cross-instance. See issue #1100 for backing this with
+ * Redis.
  *
  * Score thresholds:
  *   0–49  : normal - no penalty

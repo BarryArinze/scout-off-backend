@@ -311,6 +311,20 @@ describe('batching behaviour', () => {
     );
   });
 
+  it('filters events by config.registerContractId, not the legacy config.contractId', async () => {
+    mockGetEvents.mockResolvedValue({ events: [] });
+
+    startReindex(1, 1, 'GADMIN');
+    await flushBackground();
+
+    const config = jest.requireActual('../../src/config').default;
+    expect(mockGetEvents).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filters: [{ type: 'contract', contractIds: [config.registerContractId] }],
+      }),
+    );
+  });
+
   it('filters out events outside the current batch window', async () => {
     // Batch covers [100, 199]. Events at ledger 50 (before) and 200 (after)
     // should be filtered out; only ledger 150 should be inserted.
