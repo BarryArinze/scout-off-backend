@@ -530,6 +530,176 @@ service (`src/services/walletBlocklist.ts`) exposes `blocklistWallet`,
 `unblocklistWallet`, `isWalletBlocklisted`, and an in-process
 `onWalletBlocked` event.
 
+
+## End-to-End Curl Walkthrough
+
+This section provides a copy-pasteable walkthrough of the complete SEP-10
+authentication flow using `curl` and the Stellar CLI. Run these commands
+against a local dev server (`npm run dev` → `http://localhost:4000`).
+
+### Prerequisites
+
+- A Stellar account keypair (generate with `stellar keys generate --network testnet test-user`)
+- The dev server running locally (`npm run dev`)
+- The Stellar CLI installed (`stellar --version`)
+
+### 1. Request a Challenge
+
+```bash
+ACCOUNT="GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+curl -s "http://localhost:4000/auth/challenge?account=$ACCOUNT" | jq .
+```
+
+Response:
+
+```json
+{
+  "transaction": "AAAAAgAAAAD...",
+  "network_passphrase": "Test SDF Network ; September 2015"
+}
+```
+
+Save the `transaction` XDR for the next step.
+
+### 2. Sign the Challenge (Stellar CLI)
+
+The challenge transaction must be signed with the account's secret key.
+This step uses the Stellar CLI — it cannot be done with `curl` alone.
+
+```bash
+# Save the challenge XDR to a file
+curl -s "http://localhost:4000/auth/challenge?account=$ACCOUNT" | jq -r '.transaction' > /tmp/challenge.xdr
+
+# Sign it with your secret key
+SECRET="SXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+stellar tx sign --xdr /tmp/challenge.xdr --sign-with $SECRET --network testnet > /tmp/signed.xdr
+
+SIGNED_XDR=$(cat /tmp/signed.xdr)
+echo "Signed XDR: ${SIGNED_XDR:0:40}..."
+```
+
+> **Note:** In a frontend application, this signing step is handled by the
+> Stellar wallet extension (Freighter, Albedo, etc.) via the
+> `@stellar/stellar-sdk` or `@creit.tech/stellar-wallets-kit` library.
+
+### 3. Exchange the Signed Challenge for a JWT
+
+```bash
+curl -s "http://localhost:4000/auth/token" \
+  -H "Content-Type: application/json" \
+  -d "{\"transaction\": \"$SIGNED_XDR\"}" | jq .
+```
+
+Response:
+
+```json
+{
+  "accessToken": "eyJhbGciOi...",
+  "refreshToken": "dGhpcyBpcyBh...",
+  "token": "eyJhbGciOi...",
+  "account": "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+  "expiresAt": "2026-08-28T12:00:00.000Z"
+}
+```
+
+Save both `accessToken` and `refreshToken` — you'll need them for the next steps.
+
+### 4. Use the Bearer Token
+
+Include the `accessToken` in the `Authorization` header for all authenticated requests:
+
+```bash
+TOKEN="eyJhbGciOi..."
+
+# Example: list players
+curl -s "http://localhost:4000/api/players" \
+  -H "Authorization: Bearer $TOKEN" | jq .
+
+# Example: check subscription status (scout role required)
+curl -s "http://localhost:4000/api/scouts/$ACCOUNT/subscription" \
+  -H "Authorization: Bearer $TOKEN" | jq .
+```
+
+### 5. Refresh the Token
+
+When the access token expires (default: 24 hours), use the refresh token to
+obtain a new pair:
+
+```bash
+REFRESH="dGhpcyBpcyBh..."
+
+curl -s "http://localhost:4000/auth/refresh" \
+  -H "Content-Type: application/json" \
+  -d "{\"refreshToken\": \"$REFRESH\"}" | jq .
+```
+
+Response includes a new `accessToken` and `refreshToken`. The old refresh token
+is immediately revoked on success (rotation).
+
+### 6. Log Out
+
+Revoke the current access token and optionally the refresh token:
+
+```bash
+# Revoke access token only
+curl -s "http://localhost:4000/auth/logout" \
+  -H "Authorization: Bearer $TOKEN" | jq .
+
+# Revoke both access and refresh tokens
+curl -s "http://localhost:4000/auth/logout" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"refreshToken\": \"$REFRESH\"}" | jq .
+```
+
+Response:
+
+```json
+{ "success": true }
+```
+
+### Complete Script
+
+Save this as `scripts/auth-flow-test.sh` and run it against a local dev server:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE="${1:-http://localhost:4000}"
+ACCOUNT="${2:-GXXXXXXXXXX}"   # replace with your test account
+SECRET="${3:-SXXXXXXXXXX}"    # replace with your secret key
+
+echo "=== 1. Request challenge ==="
+CHALLENGE=$(curl -s "$BASE/auth/challenge?account=$ACCOUNT" | jq -r '.transaction')
+echo "Challenge: ${CHALLENGE:0:50}..."
+
+echo "=== 2. Sign challenge ==="
+echo "$CHALLENGE" > /tmp/auth-test-challenge.xdr
+stellar tx sign --xdr /tmp/auth-test-challenge.xdr --sign-with "$SECRET" --network testnet > /tmp/auth-test-signed.xdr
+SIGNED=$(cat /tmp/auth-test-signed.xdr)
+
+echo "=== 3. Exchange for JWT ==="
+TOKENS=$(curl -s "$BASE/auth/token" -H "Content-Type: application/json" -d "{\"transaction\":\"$SIGNED\"}")
+ACCESS=$(echo "$TOKENS" | jq -r '.accessToken')
+REFRESH=$(echo "$TOKENS" | jq -r '.refreshToken')
+echo "Access token: ${ACCESS:0:30}..."
+
+echo "=== 4. Authenticated request ==="
+curl -s "$BASE/api/players" -H "Authorization: Bearer $ACCESS" | jq '. | length'
+
+echo "=== 5. Refresh ==="
+NEW_TOKENS=$(curl -s "$BASE/auth/refresh" -H "Content-Type: application/json" -d "{\"refreshToken\":\"$REFRESH\"}")
+echo "New access token: $(echo "$NEW_TOKENS" | jq -r '.accessToken' | cut -c1-30)..."
+
+echo "=== 6. Logout ==="
+curl -s "$BASE/auth/logout" -H "Authorization: Bearer $ACCESS"
+echo ""
+
+echo "✅ Auth flow complete"
+```
+
+
 ## Auth-related endpoints
 
 ### `GET /auth/challenge?account=G...`
