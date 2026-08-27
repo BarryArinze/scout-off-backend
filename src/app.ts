@@ -29,6 +29,7 @@ import { versionRouting } from './middleware/versionRouting';
 import docsRouter from './routes/docs';
 import eventsRoutes from './routes/events';
 import { logger } from './utils/logger';
+import { withTimeout } from './utils/withTimeout';
 import {
   playerRoutes as playerRoutesV2,
   scoutRoutes as scoutRoutesV2,
@@ -37,36 +38,6 @@ import {
   eventsRoutes as eventsRoutesV2,
   versioningDemoRoutes as versioningDemoRoutesV2,
 } from './routes/v2';
-
-/**
- * Race a thunk's result against a timeout, resolving 'error' (never
- * rejecting, never throwing) on a synchronous throw, an async rejection, or
- * a timeout. Takes a thunk rather than an already-created promise so a
- * synchronous throw from evaluating the call itself (e.g. getDriver()
- * throwing "Database not initialised") is also caught — an already-created
- * promise argument can't protect against a throw that happens before the
- * promise even exists.
- */
-function withTimeout(fn: () => Promise<unknown>, timeoutMs: number): Promise<'ok' | 'error'> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve('error'), timeoutMs);
-    try {
-      Promise.resolve(fn()).then(
-        () => {
-          clearTimeout(timer);
-          resolve('ok');
-        },
-        () => {
-          clearTimeout(timer);
-          resolve('error');
-        },
-      );
-    } catch {
-      clearTimeout(timer);
-      resolve('error');
-    }
-  });
-}
 
 /** Probe the database with a lightweight SELECT 1. Works identically under
  *  DB_DRIVER=sqlite and DB_DRIVER=postgres — both go through DbDriver, so
