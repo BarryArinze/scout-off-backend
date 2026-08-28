@@ -29,6 +29,8 @@ import { versionRouting } from './middleware/versionRouting';
 import docsRouter from './routes/docs';
 import eventsRoutes from './routes/events';
 import { logger } from './utils/logger';
+import { requireRole } from './middleware/auth';
+import { getHealthDependencies } from './controllers/healthDependenciesController';
 import {
   playerRoutes as playerRoutesV2,
   scoutRoutes as scoutRoutesV2,
@@ -171,7 +173,7 @@ app.set('etag', false);
 // Apply CORS with the callback-based options built above.
 // Also handle pre-flight OPTIONS requests explicitly so they short-circuit
 // before any auth or body-parser middleware runs.
-app.options('*', cors(corsOptions));
+app.options(/(.*)/, cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(compression({
   threshold: config.compressionThresholdBytes,
@@ -312,6 +314,14 @@ app.get('/health/readiness', createTimeout(5_000), async (_req, res) => {
     res.status(503).json({ status: 'degraded', services });
   }
 });
+
+// Operator-facing dependency health endpoint reporting version and latency per downstream (admin-gated)
+app.get(
+  ['/health/dependencies', `${API_PREFIX}/health/dependencies`, `${API_V1_PREFIX}/health/dependencies`, `${API_V2_PREFIX}/health/dependencies`],
+  createTimeout(10_000),
+  requireRole('admin'),
+  getHealthDependencies,
+);
 
 // Prometheus scrape endpoint. Intentionally unauthenticated and not rate-limited
 // (standard scrape pattern): it is registered before the auth routes and is not
