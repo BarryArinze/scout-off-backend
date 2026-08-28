@@ -10,6 +10,7 @@ import { checkHealth, retryPendingPins } from "./services/ipfs";
 import { indexEvents } from "./services/indexer";
 import { fetchLastIndexedLedger, persistLastIndexedLedger } from "./db";
 import { initBlocklist } from "./services/tokenBlocklist";
+import { startDecayTimer } from "./services/ipReputation";
 import {
   initCacheInvalidationSubscriber,
   closeCacheInvalidationSubscriber,
@@ -28,6 +29,9 @@ async function start() {
   // Initialise the token revocation blocklist (prune expired rows, schedule
   // background pruning, and kick off a non-blocking Redis warm-up sync).
   initBlocklist();
+
+  // Start the IP-reputation decay timer (not started as an import side effect).
+  startDecayTimer();
 
   // Listen for cross-instance player-list cache invalidations on the Redis
   // pub/sub channel `invalidate:players` (no-op when REDIS_URL is unset).

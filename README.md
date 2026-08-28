@@ -464,6 +464,8 @@ npm install
 
 ### Environment Setup
 
+> Hit an error during setup? See [Troubleshooting local setup](#troubleshooting-local-setup) for common fixes.
+
 Copy the example env file and fill in the required values:
 
 ```bash
@@ -603,6 +605,15 @@ curl http://localhost:4000/api/players/seed-player-003
 ```bash
 npm run lint
 ```
+
+### Troubleshooting local setup
+
+| Error text | Cause | Fix |
+| ---------- | ----- | --- |
+| `Error: Missing required environment variable: JWT_SECRET` (or `CONTRACT_ID`) | `src/config.ts` calls `required(...)` for these vars and throws on startup if they're unset. `predev`/`prestart` also run `scripts/validate-env.js --runtime`, which fails fast with the same error. | Copy `.env.example` to `.env` and fill in `JWT_SECRET` and `CONTRACT_ID` (see [Environment Setup](#environment-setup)). |
+| `Error: Cannot find module '../build/Release/better_sqlite3.node'` or a native binding / ABI mismatch error on `npm install` / `npm run dev` | `better-sqlite3` ships a native addon compiled against a specific Node ABI. Installing with one Node version then running with another (or switching Node versions without reinstalling) leaves a stale binary. | Run `nvm use` to switch to the pinned Node version, then `rm -rf node_modules && npm install` to rebuild the native module against that version. |
+| `The engine "node" is incompatible with this module` (npm) or unexpected runtime errors on an unsupported Node version | The project's `engines.node` range in `package.json` is `>=18.0.0 <23.0.0`, and `.nvmrc` pins the exact version used in CI's primary coverage job. | Install the pinned version with `nvm install && nvm use` (or the equivalent for fnm/asdf) before running `npm install`. |
+| `validate-env` fails during `npm install`/`npm run dev`/`npm start` (`predev`/`prestart` hooks) listing missing or unrecognised env vars | `scripts/validate-env.js --runtime` checks that every required var is set and that `NODE_ENV`/`DB_DRIVER`/`PINATA_GATEWAY` (when set) have valid values. | Read the specific error line — it names the offending variable — and fix it in `.env`. Run `node scripts/validate-env.js` (without `--runtime`) to also check that `.env.example` documents every var referenced in `src/`. |
 
 ## Health Endpoints
 
@@ -753,6 +764,20 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
    - Admin monitors platform fees and calls `withdraw_fees` to collect revenue
    - Emergency `pause_contract` available as a circuit breaker
 
+## Documentation
+
+The backend's guides live in [`docs/`](docs/README.md), indexed by topic:
+
+- [docs/README.md](docs/README.md) — index of every doc in `docs/`
+- [docs/auth.md](docs/auth.md) — SEP-10 authentication, JWT lifecycle, API keys, SSE revocation
+- [docs/events.md](docs/events.md) — SSE event stream: connecting, filtering, frame format, reconnection limits
+- [docs/webhooks.md](docs/webhooks.md) — outbound webhooks, signatures, dead-letter queue, replay
+- [docs/ip-reputation.md](docs/ip-reputation.md) — IP reputation scoring and admin whitelist/blacklist controls
+- [docs/runbook.md](docs/runbook.md) — operator runbook: indexer lag, reindex/replay, dead-letter drain, cache flush, circuit breaker, pause/unpause
+- [docs/performance.md](docs/performance.md) — latency budgets and load-testing
+
+Operator topics (secrets rotation, data privacy, Postgres migration, deployment) are listed in the index and in [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ## Configuration
 
 ### Key Environment Variables
@@ -802,6 +827,7 @@ In **production** (`NODE_ENV=production`) the same functions throw immediately i
 | `PIN_JSON_CACHE_TTL_MS`           | TTL for pinJson deduplication cache entries in milliseconds (default: `300000` = 5 min)                               |
 | `ADMIN_ACTION_TTL_MS`             | TTL for pending admin multi-sig actions in milliseconds (default: `3600000` = 1 hour)                                 |
 | `SUBSCRIPTION_GRACE_PERIOD_HOURS` | Grace period after subscription expiry during which access is still granted (default: `24`)                           |
+| `TRIAL_OFFER_TTL_MS`              | How long a trial offer remains open for accept/reject, in milliseconds (default: `2592000000` = 30 days). Set to `0` to disable expiry. |
 | `REQUEST_TIMEOUT_MS`              | Global request timeout in milliseconds before responding with 503 (default: `30000`)                                  |
 | `ADMIN_IP_ALLOWLIST`              | Comma-separated list of IPv4 addresses/CIDRs allowed on admin routes (unset = allow all)                              |
 | `SLOW_QUERY_THRESHOLD_MS`         | Log a structured warning for DB queries slower than this, in milliseconds (default: `50`)                             |
@@ -908,7 +934,7 @@ MIT
 
 ## Contributing
 
-Contributions are welcome! This section provides guidance for backend contributors and issue filing best practices.
+Contributions are welcome! This section provides guidance for backend contributors and issue filing best practices. All participants are expected to follow our [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ### Getting Started
 

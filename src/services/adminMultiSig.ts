@@ -17,6 +17,7 @@ import {
 import { insertValidator, revokeValidatorRow } from './indexer';
 import { logAuditEvent } from './audit';
 import { logger } from '../utils/logger';
+import { incrementFeeWithdrawalDbWriteFailuresTotal } from '../middleware/metrics';
 import { ErrorCode } from '../utils/errorCodes';
 import {
   pauseContractOnChain,
@@ -91,7 +92,7 @@ async function executeAdminAction(
 
         // Record the withdrawal in the database
         try {
-          insertFeeWithdrawal({
+          await insertFeeWithdrawal({
             idempotencyKey: null, // Multi-sig actions don't use idempotency keys
             treasuryAddress: recipient,
             amountStroops: result.amount,
@@ -103,6 +104,12 @@ async function executeAdminAction(
           logger.error(
             `[multisig] fee_withdrawal_db_insert_failed txHash=${result.transactionId} err=${dbErr instanceof Error ? dbErr.message : dbErr}`,
           );
+          // The on-chain withdrawal succeeded but has no DB row — this cannot be
+          // undone, so make the gap loud and record enough to backfill manually.
+          logger.critical(
+            `[multisig] fee_withdrawal_db_write_failed txHash=${result.transactionId} recipient=${recipient} amount=${result.amount} err=${dbErr instanceof Error ? dbErr.message : dbErr}`,
+          );
+          incrementFeeWithdrawalDbWriteFailuresTotal();
         }
 
         return { success: true, transactionId: result.transactionId };

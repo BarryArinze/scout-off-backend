@@ -29,6 +29,8 @@ import { versionRouting } from './middleware/versionRouting';
 import docsRouter from './routes/docs';
 import eventsRoutes from './routes/events';
 import { logger } from './utils/logger';
+import { requireRole } from './middleware/auth';
+import { getHealthDependencies } from './controllers/healthDependenciesController';
 import {
   playerRoutes as playerRoutesV2,
   scoutRoutes as scoutRoutesV2,
@@ -37,36 +39,6 @@ import {
   eventsRoutes as eventsRoutesV2,
   versioningDemoRoutes as versioningDemoRoutesV2,
 } from './routes/v2';
-
-/**
- * Race a thunk's result against a timeout, resolving 'error' (never
- * rejecting, never throwing) on a synchronous throw, an async rejection, or
- * a timeout. Takes a thunk rather than an already-created promise so a
- * synchronous throw from evaluating the call itself (e.g. getDriver()
- * throwing "Database not initialised") is also caught — an already-created
- * promise argument can't protect against a throw that happens before the
- * promise even exists.
- */
-function withTimeout(fn: () => Promise<unknown>, timeoutMs: number): Promise<'ok' | 'error'> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve('error'), timeoutMs);
-    try {
-      Promise.resolve(fn()).then(
-        () => {
-          clearTimeout(timer);
-          resolve('ok');
-        },
-        () => {
-          clearTimeout(timer);
-          resolve('error');
-        },
-      );
-    } catch {
-      clearTimeout(timer);
-      resolve('error');
-    }
-  });
-}
 
 /** Probe the database with a lightweight SELECT 1. Works identically under
  *  DB_DRIVER=sqlite and DB_DRIVER=postgres — both go through DbDriver, so
@@ -171,13 +143,13 @@ app.set('etag', false);
 // Apply CORS with the callback-based options built above.
 // Also handle pre-flight OPTIONS requests explicitly so they short-circuit
 // before any auth or body-parser middleware runs.
-app.options('*', cors(corsOptions));
+app.options(/(.*)/, cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(compression({
   threshold: config.compressionThresholdBytes,
   filter: (req, res) => {
     // Skip compression for SSE endpoints
-    if (req.path === '/api/events/stream' || req.path.startsWith('/api/v1/events/stream') || req.path.startsWith('/api/v2/events/stream')) {
+    if (/^\/api\/(v[12]\/)?events\/stream/.test(req.path)) {
       return false;
     }
     return compression.filter(req, res);
@@ -261,29 +233,33 @@ app.get('/health', async (_req, res) => {
 async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | 'disabled'>> {
   const services: Record<string, 'ok' | 'unavailable' | 'disabled'> = {};
 
-  services.db = (await probeDbWritable()) === 'ok' ? 'ok' : 'unavailable';
-
-  try {
-    await checkHealth();
-    services.ipfs = 'ok';
-  } catch {
-    services.ipfs = 'unavailable';
-  }
-
-  if (config.stellarHealthCheckEnabled) {
-    if (stellarBreaker.state === 'OPEN') {
-      services.stellar = 'unavailable';
-    } else {
+  const [dbResult, ipfsResult, stellarResult] = await Promise.all([
+    (async (): Promise<'ok' | 'unavailable'> => {
+      return (await probeDbWritable()) === 'ok' ? 'ok' : 'unavailable';
+    })(),
+    (async (): Promise<'ok' | 'unavailable'> => {
+      try {
+        await checkHealth();
+        return 'ok';
+      } catch {
+        return 'unavailable';
+      }
+    })(),
+    (async (): Promise<'ok' | 'unavailable' | 'disabled'> => {
+      if (!config.stellarHealthCheckEnabled) return 'disabled';
+      if (stellarBreaker.state === 'OPEN') return 'unavailable';
       try {
         const stellarOk = await stellarHealth();
-        services.stellar = stellarOk ? 'ok' : 'unavailable';
+        return stellarOk ? 'ok' : 'unavailable';
       } catch {
-        services.stellar = 'unavailable';
+        return 'unavailable';
       }
-    }
-  } else {
-    services.stellar = 'disabled';
-  }
+    })(),
+  ]);
+
+  services.db = dbResult;
+  services.ipfs = ipfsResult;
+  services.stellar = stellarResult;
 
   return services;
 }
@@ -312,6 +288,14 @@ app.get('/health/readiness', createTimeout(5_000), async (_req, res) => {
     res.status(503).json({ status: 'degraded', services });
   }
 });
+
+// Operator-facing dependency health endpoint reporting version and latency per downstream (admin-gated)
+app.get(
+  ['/health/dependencies', `${API_PREFIX}/health/dependencies`, `${API_V1_PREFIX}/health/dependencies`, `${API_V2_PREFIX}/health/dependencies`],
+  createTimeout(10_000),
+  requireRole('admin'),
+  getHealthDependencies,
+);
 
 // Prometheus scrape endpoint. Intentionally unauthenticated and not rate-limited
 // (standard scrape pattern): it is registered before the auth routes and is not

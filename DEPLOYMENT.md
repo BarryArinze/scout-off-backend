@@ -1,5 +1,27 @@
 # Deployment Notes — ScoutOff Backend
 
+## ⚠️ SQLite + Multi-Replica Deployments
+
+**If you deploy with more than one replica (pod/instance), you MUST switch to PostgreSQL.** The default database driver is SQLite — a single-writer, file-local database. Running multiple replicas with SQLite will cause:
+
+- **Write conflicts**: only one replica can hold the write lock at a time
+- **Data inconsistency**: each replica maintains its own independent database file, so writes on replica A are invisible to replica B
+- **Unpredictable SSE behaviour**: SSE streams are scoped to a single process, so clients connected to different replicas see different state
+
+The Helm chart defaults to autoscaling with `replicaCount ≥ 2` (see `charts/scout-off-backend/values.yaml`), which is incompatible with the default `DB_DRIVER=sqlite` setting.
+
+### Fix
+
+To run multi-replica deployments, set in your `.env` or Helm values:
+
+```env
+DB_DRIVER=postgres
+DATABASE_URL=postgresql://user:password@host:5432/scoutoff
+```
+
+This mismatch will be enforced by a startup check in a future release; for now it is a critical configuration trap that every operator must be aware of.
+
+
 ## Environment Setup
 
 Copy `.env.example` to `.env` and fill in all required values before starting the server.
@@ -38,6 +60,48 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `ADMIN_THRESHOLD` | — | Number of admin signatures required for high-value operations (default: `1`) |
 | `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS allowed origins (defaults per env: `*` in dev, `https://staging.scoutoff.io` in staging, `https://app.scoutoff.io,https://scoutoff.io` in prod) |
 | `ADMIN_IP_ALLOWLIST` | — | Comma-separated list of **IPv4** addresses/CIDR ranges allowed to reach admin endpoints (e.g. `192.168.1.0/24,10.0.0.1`). Unset/empty disables the check. IPv6 is not supported yet — any IPv6 client IP is rejected with 403 regardless of this setting (fail closed). |
+
+---
+
+## Platform Signing Key (`PLATFORM_SECRET_KEY`)
+
+The backend signs Soroban transactions (e.g. subscription cancellations, contract pause/unpause) with a single platform Stellar keypair, loaded from `PLATFORM_SECRET_KEY` via `src/utils/signer.ts`. Every contract call the backend makes fails without a funded, valid key configured.
+
+### Generating the key
+
+```bash
+stellar keys generate --network testnet platform
+stellar keys show platform   # prints the secret seed (starts with S) and public key (starts with G)
+```
+
+For mainnet, generate with a standard BIP-39-compatible tool instead of `--network testnet`.
+
+### Funding requirements
+
+- **Testnet**: fund the public key via Friendbot:
+  ```bash
+  curl "https://friendbot.stellar.org?addr=<PLATFORM_PUBLIC_KEY>"
+  ```
+- **Mainnet**: manually transfer sufficient native XLM to the public key to cover ongoing transaction fees. Monitor the balance — an underfunded key causes contract calls to fail with fee/sequence errors.
+
+### Shared across instances
+
+`PLATFORM_SECRET_KEY` **must be identical across every backend instance/replica**. The key is used to sign transactions from a single Stellar account, and Stellar transactions are ordered by a per-account sequence number — if instances used different keys, or the same key without coordination, concurrent submissions from multiple pods can race on that sequence number and reject each other's transactions. Store the key once in your secrets manager (or Kubernetes Secret, see below) and wire every instance to the same value; do not generate a per-instance key.
+
+### Kubernetes
+
+Set it via the `scout-off-secrets` Secret alongside the other required keys:
+
+```bash
+kubectl create secret generic scout-off-secrets \
+  ... \
+  --from-literal=PLATFORM_SECRET_KEY=<stellar-secret-key-starting-with-S> \
+  --namespace <your-namespace>
+```
+
+### Rotation
+
+See [Platform Signing Keypairs](docs/secrets-rotation.md#3-platform-signing-keypairs-platform_secret_key--platform_secret) in the Secrets Rotation Policy for the funded-keypair rotation procedure, including the required downtime.
 
 ---
 
@@ -568,15 +632,41 @@ For S3, configure an [Object Lifecycle rule](https://docs.aws.amazon.com/AmazonS
 |---|---|
 | `GET /health` | Liveness check; includes Stellar RPC status |
 | `GET /ready` | Readiness probe; checks IPFS connectivity |
+| `GET /health/dependencies` | Operator incident probe; returns endpoint, version, and real round-trip latency per downstream (admin-gated) |
 | `GET /version` | Deployed package version and git commit SHA |
 
 Configure your load balancer or orchestrator to poll `/health` every 30 seconds.  
 Alert on consecutive failures (≥ 2) to catch Stellar RPC or IPFS outages early.
 
+### Incident Diagnosis & Downstream Dependencies (`GET /health/dependencies`)
+
+During partial outages or performance degradation, operators can call `GET /health/dependencies` (requires admin Bearer token auth) to inspect individual downstream dependencies:
+- **Stellar RPC**: Resolved endpoint, protocol version/health status, and live round-trip latency.
+- **Horizon**: Resolved endpoint, Horizon/Core version, and live round-trip latency.
+- **IPFS Gateway**: Resolved gateway endpoint, web server handshake string, and live round-trip latency.
+- **Redis**: Resolved endpoint (sanitized), Redis server version, and live round-trip latency.
+- **Database**: Resolved connection target, engine version (PostgreSQL or SQLite), and live query latency.
+
+Response example:
+```json
+{
+  "status": "ok",
+  "dependencies": {
+    "stellar": { "endpoint": "https://soroban-testnet.stellar.org", "version": "healthy (protocol 20)", "status": "ok", "latencyMs": 142 },
+    "horizon": { "endpoint": "https://horizon-testnet.stellar.org", "version": "2.30.0", "status": "ok", "latencyMs": 85 },
+    "ipfs": { "endpoint": "https://gateway.pinata.cloud", "version": "nginx/1.22.1", "status": "ok", "latencyMs": 210 },
+    "redis": { "endpoint": "redis://***@127.0.0.1:6379", "version": "7.0.5", "status": "ok", "latencyMs": 3 },
+    "db": { "endpoint": "sqlite (./scout-off.db)", "version": "SQLite 3.39.5", "status": "ok", "latencyMs": 1 }
+  }
+}
+```
+
 Recommended metrics to track:
 - HTTP 5xx error rate
-- Event indexer lag (gap between latest on-chain event and last indexed event)
+- Event indexer lag (gap between latest on-chain event and last indexed event, exposed as `indexer_ledger_lag` on `GET /metrics`)
 - SQLite file size growth
+
+For what to do when these signals go wrong — indexer lag, stale tiers, missing webhooks, RPC/IPFS outages, DB slowness, plus reindex/replay, dead-letter drain, cache flush, circuit-breaker, and pause/unpause procedures — see the [Operator Runbook](docs/runbook.md).
 
 ### Docker Compose Healthcheck
 

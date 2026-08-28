@@ -57,6 +57,212 @@ Each individual attempt is bounded by `WEBHOOK_TIMEOUT_MS` (default: 10s) — a
 subscriber that accepts the connection but never responds is aborted and the
 attempt treated as a failure, rather than hanging indefinitely (#691).
 
+## Events
+
+Every dispatched delivery wraps the event-specific payload in the same
+envelope:
+
+```json
+{
+  "deliveryId": "550e8400-e29b-41d4-a716-446655440000",
+  "eventType": "<event type name>",
+  "payload": { "...": "..." }
+}
+```
+
+`deliveryId` is a UUID v4, stable across dead-letter replays of the same
+logical delivery — see [Receiver-side deduplication](#receiver-side-deduplication)
+for how to use it to dedupe. `eventType` is one of the values below, and
+`payload` is normalized by the indexer (`normalizePayload()` in
+`src/services/indexer.ts`) so every field is `snake_case` regardless of the
+casing the contract emitted.
+
+### `player_registered`
+
+Fires when a player registers a new on-chain profile (`POST /api/players`,
+or the admin bulk-import endpoints).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `player_id` | string | Newly generated player ID |
+| `wallet` | string | Player's Stellar wallet address |
+| `position` | string \| undefined | Playing position |
+| `region` | string \| undefined | Player's region |
+| `metadataUri` | string \| undefined | IPFS URI for off-chain profile metadata |
+
+```json
+{
+  "deliveryId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "eventType": "player_registered",
+  "payload": {
+    "player_id": "player-abc123",
+    "wallet": "GABCDE...",
+    "position": "Forward",
+    "region": "West Africa",
+    "metadataUri": "ipfs://bafy.../profile.json"
+  }
+}
+```
+
+### `milestone_submitted`
+
+Fires when a validator submits a milestone for a player on-chain; indexed
+from the Soroban contract event.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `milestone_id` | string | On-chain milestone ID |
+| `player_id` | string | Player the milestone belongs to |
+| `validator` | string | Validator's wallet address |
+| `milestone_type` | string | Milestone category |
+| `evidence_uri` | string | IPFS URI for supporting evidence |
+
+```json
+{
+  "deliveryId": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+  "eventType": "milestone_submitted",
+  "payload": {
+    "milestone_id": "milestone-001",
+    "player_id": "player-abc123",
+    "validator": "GVALID...",
+    "milestone_type": "match_performance",
+    "evidence_uri": "ipfs://bafy.../evidence.json"
+  }
+}
+```
+
+### `milestone_approved`
+
+Fires when a submitted milestone is approved on-chain; indexed from the
+Soroban contract event. Approval count drives the player's progress tier
+(`tierForApprovedMilestones()`).
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `player_id` | string | Player whose milestone was approved |
+| `milestone_id` | string | Approved milestone ID |
+| `validator` | string \| undefined | Approving validator's wallet |
+
+```json
+{
+  "deliveryId": "16fd2706-8baf-433b-82eb-8c7fada847da",
+  "eventType": "milestone_approved",
+  "payload": {
+    "player_id": "player-abc123",
+    "milestone_id": "milestone-001",
+    "validator": "GVALID..."
+  }
+}
+```
+
+### `scout_subscribed`
+
+Fires when a scout purchases or renews a subscription tier.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `scout` | string | Scout's wallet address |
+| `tier` | string | Subscription tier purchased |
+| `expires_at` | number | Unix timestamp when the subscription expires |
+| `tx_hash` | string | Stellar transaction hash |
+| `timestamp` | string | ISO 8601 timestamp of the event |
+
+```json
+{
+  "deliveryId": "9b2d1c4a-1111-4a22-9c3d-5f6a7b8c9d0e",
+  "eventType": "scout_subscribed",
+  "payload": {
+    "scout": "GSCOUT...",
+    "tier": "premium",
+    "expires_at": 1785000000,
+    "tx_hash": "abcdef0123...",
+    "timestamp": "2026-07-21T00:00:00.000Z"
+  }
+}
+```
+
+### `contact_unlocked`
+
+Fires when a scout pays the contact fee to unlock a player's contact
+details.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `scout` | string | Scout's wallet address |
+| `player_id` | string | Player whose contact was unlocked |
+| `tx_hash` | string | Stellar transaction hash |
+| `timestamp` | string | ISO 8601 timestamp of the event |
+
+```json
+{
+  "deliveryId": "2e1f3a4b-2222-4b33-8d4e-6a7b8c9d0e1f",
+  "eventType": "contact_unlocked",
+  "payload": {
+    "scout": "GSCOUT...",
+    "player_id": "player-abc123",
+    "tx_hash": "abcdef0123...",
+    "timestamp": "2026-07-21T00:00:00.000Z"
+  }
+}
+```
+
+### `trial_offer_logged`
+
+Fires when a scout submits a trial offer for a player.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `offer_id` | string | Generated trial offer ID |
+| `scout` | string | Scout's wallet address |
+| `player_id` | string | Player the offer is for |
+| `details_uri` | string | IPFS URI with offer details |
+| `tx_hash` | string | Stellar transaction hash |
+| `timestamp` | string | ISO 8601 timestamp of the event |
+
+```json
+{
+  "deliveryId": "4d5e6f70-3333-4c44-9e5f-7b8c9d0e1f2a",
+  "eventType": "trial_offer_logged",
+  "payload": {
+    "offer_id": "offer-1785000000-player-abc123",
+    "scout": "GSCOUT...",
+    "player_id": "player-abc123",
+    "details_uri": "ipfs://bafy.../offer.json",
+    "tx_hash": "abcdef0123...",
+    "timestamp": "2026-07-21T00:00:00.000Z"
+  }
+}
+```
+
+### `fees_withdrawn`
+
+Fires when an admin withdraws accumulated platform fees from the contract.
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `recipient` | string | Wallet address the fees were withdrawn to |
+| `amount` | string | Amount withdrawn |
+| `token` | string | Token/asset withdrawn (e.g. `XLM`) |
+
+```json
+{
+  "deliveryId": "5e6f7081-4444-4d55-af60-8c9d0e1f2a3b",
+  "eventType": "fees_withdrawn",
+  "payload": {
+    "recipient": "GADMIN...",
+    "amount": "12500000",
+    "token": "XLM"
+  }
+}
+```
+
+> **Note:** `player_registered`, `milestone_submitted`, and `milestone_approved`
+> are the event types currently wired to outbound HTTP webhook dispatch
+> (`dispatchEventWebhook()`); `scout_subscribed`, `contact_unlocked`,
+> `trial_offer_logged`, and `fees_withdrawn` are indexed the same way and
+> broadcast over the SSE event stream (`src/services/eventBroadcaster.ts`),
+> but are not yet wired to outbound webhook delivery.
+
 ## Verifying the signature
 
 `X-Webhook-Signature` is computed as:

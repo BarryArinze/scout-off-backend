@@ -9,12 +9,17 @@ All endpoints are served from the base URL configured via `PORT` (default: `4000
 - [API Versioning](#api-versioning)
 - [Authentication](#authentication)
 - [Endpoints](#endpoints) — generated OpenAPI spec, see [docs/API_DOCUMENTATION.md](docs/API_DOCUMENTATION.md)
+- [Saved Search Run Endpoint](#saved-search-run-endpoint-get-apiscoutswalletsaved-searchesidrun)
 - [Stubbed Routes](#stubbed-routes)
 - [Error Format](#error-format)
 
 ---
 
 ## API Versioning
+
+> For the full precedence rules between the URL prefix and the `API-Version`
+> header, the current state of v2, and the deprecation policy, see
+> [docs/api-versioning.md](docs/api-versioning.md).
 
 The platform supports two stable API versions. All routes are available under multiple prefixes:
 
@@ -104,7 +109,7 @@ mutating endpoints require the matching scope and return `403` with
 |-------|-------------|
 | `write:contacts` | `POST /scouts/:wallet/contacts/:playerId/unlock` |
 | `write:subscriptions` | `POST/PUT/DELETE /scouts/:wallet/subscribe` |
-| `write:trial_offers` | `POST /scouts/:wallet/trial-offers` (and its deprecated alias `/trial-offer`) |
+| `write:trial_offers` | `POST /scouts/:wallet/trial-offers` (and its deprecated alias `/trial-offer`); `DELETE /scouts/:wallet/trial-offers/:offerId` |
 | `write:webhooks` | `POST /scouts/:wallet/webhooks`, `DELETE .../:id`, `POST .../:id/test` |
 | `write:api_keys` | `POST /scouts/:wallet/api-keys`, `DELETE .../:id` |
 | `write:bookmarks` | bookmark & bookmark-folder mutations |
@@ -362,6 +367,79 @@ Read-only GraphQL endpoint sharing the REST authorization model:
   (`MAX_QUERY_COST = 135`) that counts every field node — aliases included —
   so a single request with ~20+ aliased expensive operations is rejected
   with a `QUERY_COST_EXCEEDED` error instead of bypassing the depth limit.
+
+## Saved Search Run Endpoint (`GET /api/scouts/:wallet/saved-searches/:id/run`)
+
+Executes a stored saved-search preset against the live player index, returning paginated player results in the same shape as `GET /api/players`. This closes the gap between storing a filter preset and actually using it — scouts no longer need to manually copy filter parameters from the list endpoint into a separate player-search request.
+
+**Authentication:** Bearer JWT (scout role required; wallet must match the authenticated account).  
+**Feature flag:** `SAVED_SEARCHES` must be enabled.
+
+### Request
+
+```
+GET /api/scouts/:wallet/saved-searches/:id/run
+```
+
+| Parameter | In | Type | Required | Description |
+|-----------|-----|------|----------|-------------|
+| `wallet` | path | string | ✓ | Scout's Stellar public key |
+| `id` | path | integer | ✓ | Row ID of the saved search to run |
+| `page` | query | integer | — | Page number (default: `1`) |
+| `pageSize` | query | integer | — | Results per page (default: `20`, max: `100`) |
+
+The stored filter parameters (`region`, `position`, `minTier`) are loaded from the saved search row and merged with any pagination parameters supplied in the query string. Pagination params in the query string always take precedence over any pagination fields that might be present in the stored filters (which are excluded at creation time by `savedSearchFilterSchema`).
+
+### Response `200`
+
+```json
+{
+  "success": true,
+  "data": {
+    "players": [
+      {
+        "player_id": "clxyz...",
+        "wallet": "GABC...",
+        "position": "Forward",
+        "region": "West Africa",
+        "metadataUri": "ipfs://Qm...",
+        "progress_level": 2,
+        "created_at": 1700000000,
+        "tierName": "Established",
+        "tierDescription": "Performance milestones verified"
+      }
+    ],
+    "total": 42,
+    "page": 1,
+    "pageSize": 20
+  }
+}
+```
+
+### Error responses
+
+| Status | Condition |
+|--------|-----------|
+| `400` | `id` is not a valid integer |
+| `403` | Wallet mismatch or not the scout role |
+| `404` | Saved search not found (or belongs to another scout) |
+
+### Example
+
+```bash
+# Create a saved search
+curl -X POST "http://localhost:4000/api/scouts/${WALLET}/saved-searches" \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"name":"West Africa Forwards Tier 2+","filters":{"region":"West Africa","position":"Forward","minTier":2}}'
+# → { "data": { "id": 7, ... } }
+
+# Run it (page 2, 10 results per page)
+curl "http://localhost:4000/api/scouts/${WALLET}/saved-searches/7/run?page=2&pageSize=10" \
+  -H "Authorization: Bearer <token>"
+```
+
+---
 
 ## Stubbed Routes
 

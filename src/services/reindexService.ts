@@ -144,7 +144,7 @@ async function _runReindex(
       try {
         const response = await server.getEvents({
           startLedger: currentBatchStart,
-          filters: [{ type: 'contract', contractIds: [config.contractId] }],
+          filters: [{ type: 'contract', contractIds: [config.registerContractId] }],
         });
         batchEvents = response.events.filter(
           (e: (typeof response.events)[number]) => e.ledger >= currentBatchStart && e.ledger <= batchEnd,
@@ -169,7 +169,7 @@ async function _runReindex(
             const payload = normalizePayload(
               (raw.value ? scValToNative(raw.value) as Record<string, unknown> : {}) ?? {},
             );
-            const eventId = normalizeEventId(config.contractId, raw.ledger, raw.txHash);
+            const eventId = normalizeEventId(config.registerContractId, raw.ledger, raw.txHash);
             const createdAt = raw.ledgerClosedAt
               ? new Date(raw.ledgerClosedAt).getTime()
               : Date.now();
