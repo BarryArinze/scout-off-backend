@@ -42,6 +42,15 @@ not a directory listing.
 | [runbook.md](runbook.md) | Operator | Incident → action runbook: indexer lag, wrong tiers, webhook failures, RPC/IPFS outages, DB slowness, reindex/replay, dead-letter drain, cache flush, circuit breaker, pause/unpause |
 | [performance.md](performance.md) | Contributor | Latency budgets for key endpoints and how to run the load-test suites |
 
+## History
+
+Dated implementation notes kept for historical record; not living documentation.
+
+| Doc | Audience | Description |
+| --- | -------- | ----------- |
+| [history/2026-07-25-bulk-validator-import.md](history/2026-07-25-bulk-validator-import.md) | Contributor | Implementation notes for the bulk validator import endpoint (multi-sig gating, concurrency limiting) |
+| [history/2026-07-27-pagination-versioning-payments-mutex.md](history/2026-07-27-pagination-versioning-payments-mutex.md) | Contributor | Implementation notes for player pagination, API versioning, payment history filters, and the withdrawal mutex |
+
 ## Not in this directory
 
 - [../DEPLOYMENT.md](../DEPLOYMENT.md) — deployment environment variables, Kubernetes/Helm, backups, blue-green topology
