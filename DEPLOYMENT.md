@@ -63,6 +63,48 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 
 ---
 
+## Platform Signing Key (`PLATFORM_SECRET_KEY`)
+
+The backend signs Soroban transactions (e.g. subscription cancellations, contract pause/unpause) with a single platform Stellar keypair, loaded from `PLATFORM_SECRET_KEY` via `src/utils/signer.ts`. Every contract call the backend makes fails without a funded, valid key configured.
+
+### Generating the key
+
+```bash
+stellar keys generate --network testnet platform
+stellar keys show platform   # prints the secret seed (starts with S) and public key (starts with G)
+```
+
+For mainnet, generate with a standard BIP-39-compatible tool instead of `--network testnet`.
+
+### Funding requirements
+
+- **Testnet**: fund the public key via Friendbot:
+  ```bash
+  curl "https://friendbot.stellar.org?addr=<PLATFORM_PUBLIC_KEY>"
+  ```
+- **Mainnet**: manually transfer sufficient native XLM to the public key to cover ongoing transaction fees. Monitor the balance — an underfunded key causes contract calls to fail with fee/sequence errors.
+
+### Shared across instances
+
+`PLATFORM_SECRET_KEY` **must be identical across every backend instance/replica**. The key is used to sign transactions from a single Stellar account, and Stellar transactions are ordered by a per-account sequence number — if instances used different keys, or the same key without coordination, concurrent submissions from multiple pods can race on that sequence number and reject each other's transactions. Store the key once in your secrets manager (or Kubernetes Secret, see below) and wire every instance to the same value; do not generate a per-instance key.
+
+### Kubernetes
+
+Set it via the `scout-off-secrets` Secret alongside the other required keys:
+
+```bash
+kubectl create secret generic scout-off-secrets \
+  ... \
+  --from-literal=PLATFORM_SECRET_KEY=<stellar-secret-key-starting-with-S> \
+  --namespace <your-namespace>
+```
+
+### Rotation
+
+See [Platform Signing Keypairs](docs/secrets-rotation.md#3-platform-signing-keypairs-platform_secret_key--platform_secret) in the Secrets Rotation Policy for the funded-keypair rotation procedure, including the required downtime.
+
+---
+
 ## Multi-Contract Architecture
 
 ScoutOff deploys five separate Soroban contracts, each with its own on-chain address:
