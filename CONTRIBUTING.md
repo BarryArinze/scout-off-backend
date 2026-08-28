@@ -190,6 +190,16 @@ rm scout-off.db   # or whatever DB_PATH points at in your .env
 npm run seed
 ```
 
+## Understanding the Data Model
+
+Before writing queries or modifying data flows, consult **[`docs/data-model.md`](docs/data-model.md)** to understand:
+- Which table is authoritative for a given concept
+- Whether data is populated by the indexer (on-chain mirror) or direct API writes
+- The relationships between chain-mirror tables and API-owned tables
+- Hybrid tables that receive writes from both sources
+
+This prevents writing queries against the wrong table or misunderstanding where data originates.
+
 ## Choosing an Issue
 
 All open issues carry a `difficulty` label — `easy`, `medium`, or `hard` — assigned by maintainers during triage. Use these labels to find work that matches your current experience level with the codebase.
