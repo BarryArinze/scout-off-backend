@@ -10,6 +10,11 @@ Scout-Off supports two database drivers:
 
 The migration is reversible within a maintenance window.
 
+> **Schema migrations vs. this guide:** this document covers moving an existing
+> deployment's *data* from SQLite to PostgreSQL. For how the `db/` directory's
+> SQL *schema* migrations are named, paired across dialects, and ordered, see
+> [db/README.md](../db/README.md).
+
 > **Helm chart default:** the `helm/scout-off-backend` chart ships with a
 > single-replica, SQLite-backed default topology (`replicaCount: 1`, HPA and
 > PDB disabled). Horizontal scaling (multiple replicas or the HPA) requires

@@ -632,10 +632,34 @@ For S3, configure an [Object Lifecycle rule](https://docs.aws.amazon.com/AmazonS
 |---|---|
 | `GET /health` | Liveness check; includes Stellar RPC status |
 | `GET /ready` | Readiness probe; checks IPFS connectivity |
+| `GET /health/dependencies` | Operator incident probe; returns endpoint, version, and real round-trip latency per downstream (admin-gated) |
 | `GET /version` | Deployed package version and git commit SHA |
 
 Configure your load balancer or orchestrator to poll `/health` every 30 seconds.  
 Alert on consecutive failures (≥ 2) to catch Stellar RPC or IPFS outages early.
+
+### Incident Diagnosis & Downstream Dependencies (`GET /health/dependencies`)
+
+During partial outages or performance degradation, operators can call `GET /health/dependencies` (requires admin Bearer token auth) to inspect individual downstream dependencies:
+- **Stellar RPC**: Resolved endpoint, protocol version/health status, and live round-trip latency.
+- **Horizon**: Resolved endpoint, Horizon/Core version, and live round-trip latency.
+- **IPFS Gateway**: Resolved gateway endpoint, web server handshake string, and live round-trip latency.
+- **Redis**: Resolved endpoint (sanitized), Redis server version, and live round-trip latency.
+- **Database**: Resolved connection target, engine version (PostgreSQL or SQLite), and live query latency.
+
+Response example:
+```json
+{
+  "status": "ok",
+  "dependencies": {
+    "stellar": { "endpoint": "https://soroban-testnet.stellar.org", "version": "healthy (protocol 20)", "status": "ok", "latencyMs": 142 },
+    "horizon": { "endpoint": "https://horizon-testnet.stellar.org", "version": "2.30.0", "status": "ok", "latencyMs": 85 },
+    "ipfs": { "endpoint": "https://gateway.pinata.cloud", "version": "nginx/1.22.1", "status": "ok", "latencyMs": 210 },
+    "redis": { "endpoint": "redis://***@127.0.0.1:6379", "version": "7.0.5", "status": "ok", "latencyMs": 3 },
+    "db": { "endpoint": "sqlite (./scout-off.db)", "version": "SQLite 3.39.5", "status": "ok", "latencyMs": 1 }
+  }
+}
+```
 
 Recommended metrics to track:
 - HTTP 5xx error rate

@@ -335,6 +335,20 @@ export function getWebhookCounters(): WebhookCounters {
   return { ...webhookCountersStore };
 }
 
+// ─── Fee withdrawal DB-write failure counter ──────────────────────────────────
+
+const feeWithdrawalDbWriteFailuresStore = { total: 0 };
+
+/** Increment scout_off_fee_withdrawal_db_write_failures_total counter. */
+export function incrementFeeWithdrawalDbWriteFailuresTotal(): void {
+  feeWithdrawalDbWriteFailuresStore.total += 1;
+}
+
+/** Returns the current fee-withdrawal DB-write-failure counter. */
+export function getFeeWithdrawalDbWriteFailuresTotal(): number {
+  return feeWithdrawalDbWriteFailuresStore.total;
+}
+
 // ─── Prometheus exposition ──────────────────────────────────────────────────────
 
 /** Content-Type for the Prometheus text exposition format (v0.0.4). */
@@ -462,6 +476,11 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
     lines.push('# TYPE indexer_ledger_lag gauge');
     lines.push(`indexer_ledger_lag ${extras.indexerLedgerLag}`);
   }
+
+  // Fee withdrawal DB-write failure counter.
+  lines.push('# HELP scout_off_fee_withdrawal_db_write_failures_total Total number of on-chain fee withdrawals whose DB record failed to write');
+  lines.push('# TYPE scout_off_fee_withdrawal_db_write_failures_total counter');
+  lines.push(`scout_off_fee_withdrawal_db_write_failures_total ${feeWithdrawalDbWriteFailuresStore.total}`);
 
   // IP reputation counters.
   lines.push('# HELP ip_reputation_blocked_total Total number of requests blocked by IP reputation scoring');

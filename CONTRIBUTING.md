@@ -51,7 +51,7 @@ Welcome! This guide covers contribution workflows, code standards, and critical 
 
 ### Database Migrations
 
-The project uses SQL migrations to manage database schema across environments. Migrations are stored as numbered `.sql` files in the `db/` directory and are tracked in the `migrations` table.
+The project uses SQL migrations to manage database schema across environments. Migrations are stored as numbered `.sql` files in the `db/` directory and are tracked in the `migrations` table. See [db/README.md](db/README.md) for the naming convention, SQLite/PostgreSQL pairing, and how to add a new migration.
 
 **Checking migration status:**
 
@@ -189,6 +189,16 @@ the seed:
 rm scout-off.db   # or whatever DB_PATH points at in your .env
 npm run seed
 ```
+
+## Understanding the Data Model
+
+Before writing queries or modifying data flows, consult **[`docs/data-model.md`](docs/data-model.md)** to understand:
+- Which table is authoritative for a given concept
+- Whether data is populated by the indexer (on-chain mirror) or direct API writes
+- The relationships between chain-mirror tables and API-owned tables
+- Hybrid tables that receive writes from both sources
+
+This prevents writing queries against the wrong table or misunderstanding where data originates.
 
 ## Choosing an Issue
 
