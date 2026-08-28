@@ -17,6 +17,10 @@ All endpoints are served from the base URL configured via `PORT` (default: `4000
 
 ## API Versioning
 
+> For the full precedence rules between the URL prefix and the `API-Version`
+> header, the current state of v2, and the deprecation policy, see
+> [docs/api-versioning.md](docs/api-versioning.md).
+
 The platform supports two stable API versions. All routes are available under multiple prefixes:
 
 | Prefix     | Description                                  |
