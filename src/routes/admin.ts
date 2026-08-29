@@ -644,4 +644,30 @@ router.route('/ip-reputation/:ip')
   .get(requireRole('admin'), getIpReputationController)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
+/**
+ * GET /api/admin/webhooks/:id/deliveries
+ *
+ * Returns paginated delivery-attempt records (success + failure) for a webhook
+ * subscription. `:id` should be the URL-encoded subscription identifier
+ * (typically the endpoint URL).
+ *
+ * @query limit  - Page size 1–100 (default 20)
+ * @query offset - Row offset (default 0)
+ * @response 200 { success: true, data: WebhookDeliveryRow[], total, limit, offset }
+ * @auth Bearer (admin role required)
+ */
+router.get('/webhooks/:id/deliveries', requireRole('admin'), getWebhookDeliveriesEndpoint);
+
+/**
+ * GET /api/admin/webhooks/:id/summary
+ *
+ * Returns a rolled-up success-rate summary (total, successes, failures,
+ * success_rate, last_success_at) for a subscription over a configurable window.
+ *
+ * @query windowMs - Window in milliseconds (default 86400000 = 24 h)
+ * @response 200 { success: true, data: WebhookDeliverySummary }
+ * @auth Bearer (admin role required)
+ */
+router.get('/webhooks/:id/summary', requireRole('admin'), getWebhookDeliverySummaryEndpoint);
+
 export default router;

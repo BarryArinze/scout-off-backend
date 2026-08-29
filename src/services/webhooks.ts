@@ -9,6 +9,8 @@ import { logger } from '../utils/logger';
 import { recordWebhookDelivery } from '../middleware/metrics';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
+import { insertWebhookDelivery } from '../db';
+import { logger } from '../utils/logger';
 
 /**
  * Generate a unique, stable delivery identifier for a webhook event.
@@ -41,6 +43,11 @@ type WebhookRetryOptions = {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Generate a simple unique delivery ID (timestamp + random hex). */
+function newDeliveryId(): string {
+  return `wh_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /**
