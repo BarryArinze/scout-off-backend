@@ -34,13 +34,13 @@ import { sanitizeInput } from '../utils/sanitizer';
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
-const deactivateBodySchema = z.object({
+export const deactivateBodySchema = z.object({
   reason: z
     .string({ required_error: 'reason is required' })
     .min(1, 'reason is required')
     .max(500, 'reason must be 500 characters or fewer')
     .transform((s) => s.trim()),
-});
+}).strict();
 
 // ─── POST /api/admin/players/:playerId/deactivate ─────────────────────────────
 

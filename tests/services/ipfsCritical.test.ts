@@ -25,6 +25,9 @@ jest.mock('../../src/db', () => ({
   incrementPendingPinAttempts: jest.fn(),
   setPendingPinResolvedCid: jest.fn(),
   getResolvedCidByHash: jest.fn().mockReturnValue(null),
+  getStalePendingPins: jest.fn().mockReturnValue([]),
+  updatePendingPinReconciliation: jest.fn().mockReturnValue(true),
+  countStuckPendingPins: jest.fn().mockReturnValue(0),
 }));
 
 import { insertPendingPin, deletePendingPinByHash, getPendingPins, deletePendingPin, incrementPendingPinAttempts } from '../../src/db';

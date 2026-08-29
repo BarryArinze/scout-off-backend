@@ -20,7 +20,15 @@ const tracer = trace.getTracer('scout-off-backend');
 
 const rawServer = new rpc.Server(config.sorobanRpcUrl, {
   allowHttp: config.sorobanRpcUrl.startsWith('http://'),
+  timeout: config.stellarRpcTimeoutMs,
 });
+
+// Ensure the underlying HTTP client also respects the RPC timeout when the
+// SDK exposes it (version-dependent; optional chaining keeps this safe).
+if ((rawServer as { httpClient?: { defaults?: { timeout?: number } } }).httpClient?.defaults) {
+  (rawServer as { httpClient: { defaults: { timeout: number } } }).httpClient.defaults.timeout =
+    config.stellarRpcTimeoutMs;
+}
 
 const server = new Proxy(rawServer, {
   get(target, prop, receiver) {

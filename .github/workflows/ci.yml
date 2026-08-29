@@ -133,12 +133,10 @@ jobs:
 
   # Runs the same suite as `test` above but against a real PostgreSQL service
   # container with DB_DRIVER=postgres, so the Postgres driver path (#1014)
-  # can never silently regress. Excludes only the test files that exercise
-  # the events/indexer_state, admin-multisig (pending_admin_actions), and
-  # webhook-delivery subsystems — those are explicitly out of scope for
-  # #1014 (owned by separate issues) and still use SQLite's raw getDb()
-  # handle by design, so they're expected to fail under DB_DRIVER=postgres
-  # rather than being converted here.
+  # can never silently regress. Excludes suites that still use sync getDb() /
+  # SQLite-specific APIs (see docs/postgres-migration.md FAQ). Keep this list
+  # aligned with package.json `test:postgres`. adminPagination is included
+  # (fully mocked). playerListFreshness and trialOffers remain excluded.
   postgres:
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -182,10 +180,11 @@ jobs:
           --testPathIgnorePatterns="tests/e2e/scoutUnlock.e2e.test.ts"
           --testPathIgnorePatterns="tests/routes/adminAuditTrail.test.ts"
           --testPathIgnorePatterns="tests/routes/adminExport.test.ts"
-          --testPathIgnorePatterns="tests/routes/adminPagination.test.ts"
           --testPathIgnorePatterns="tests/routes/adminQuerySchema.test.ts"
           --testPathIgnorePatterns="tests/routes/exportStreaming.test.ts"
           --testPathIgnorePatterns="tests/routes/reindex.test.ts"
+          --testPathIgnorePatterns="tests/routes/playerListFreshness.test.ts"
+          --testPathIgnorePatterns="tests/routes/trialOffers.test.ts"
           --testPathIgnorePatterns="tests/services/indexer.test.ts"
           --testPathIgnorePatterns="tests/services/indexerDispatch.test.ts"
           --testPathIgnorePatterns="tests/services/tierPromotion.test.ts"

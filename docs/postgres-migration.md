@@ -29,6 +29,81 @@ The migration is reversible within a maintenance window.
 - Network connectivity between backend instances and PostgreSQL server
 - Admin access to create databases and users
 
+## Database Configuration
+
+Before starting the backend, configure these environment variables:
+
+| Variable | Accepted Values | Default | Purpose |
+|---|---|---|---|
+| `DB_DRIVER` | `sqlite` or `postgres` | `sqlite` | Which database system to use; typos cause startup failure (no silent fallback) |
+| `DATABASE_URL` | PostgreSQL connection string | (none) | **Required when `DB_DRIVER=postgres`**. Format: `postgresql://user:password@host:5432/dbname` |
+| `DATABASE_SSL` | `true`, `no-verify`, `false` | (disabled) | TLS/SSL mode for PostgreSQL connections. See [SSL / TLS Configuration](#ssl--tls-configuration) |
+| `DATABASE_POOL_SIZE` | Integer 1–100 | `10` | Maximum concurrent connections in the pool. Only used with `DB_DRIVER=postgres` |
+
+### `DB_DRIVER` behavior
+
+The backend **requires an explicit, valid `DB_DRIVER` value**:
+
+- `DB_DRIVER=sqlite` — Use SQLite (local file-based, single-writer)
+- `DB_DRIVER=postgres` — Use PostgreSQL (requires `DATABASE_URL`)
+- Any other value (typo, misspelling) → **server fails at startup** with an error message
+
+```
+ERROR: DB_DRIVER="postgrez" is invalid. Must be one of: sqlite, postgres. 
+       Check for typos — an unrecognised value does NOT fall back to SQLite; 
+       the server will not start.
+```
+
+This is intentional: an undetected typo could silently cause a production deployment to use SQLite instead of the intended PostgreSQL, leading to lost data in a multi-replica scenario.
+
+### `DATABASE_URL` format
+
+When `DB_DRIVER=postgres`, provide a valid PostgreSQL URI:
+
+```
+postgresql://user:password@host:5432/dbname
+```
+
+Breaking this down:
+- `user` — Database user (e.g., `scout_user`)
+- `password` — User password (keep secure; use secrets management)
+- `host` — PostgreSQL server hostname or IP
+- `5432` — PostgreSQL port (default; adjust if your server runs on a different port)
+- `dbname` — Database name (e.g., `scout_off`)
+
+**Examples:**
+
+Local development (Docker Compose):
+```
+DATABASE_URL=postgresql://scout_user:password@postgres:5432/scout_off
+```
+
+AWS RDS:
+```
+DATABASE_URL=postgresql://scout_user:password@scout-off-db.abc123.us-east-1.rds.amazonaws.com:5432/scout_off
+```
+
+Heroku Postgres:
+```
+# Heroku sets DATABASE_URL automatically; it looks like:
+# postgresql://user:password@ec2-1-2-3-4.compute-1.amazonaws.com:5432/database
+```
+
+Supabase:
+```
+DATABASE_URL=postgresql://postgres:password@db.project-ref.supabase.co:5432/postgres
+```
+
+### `DATABASE_POOL_SIZE` guidance
+
+| Deployment | Recommended | Notes |
+|---|---|---|
+| Development (single instance) | 5–10 | Conservative; local testing doesn't stress the pool |
+| Staging (1–3 replicas) | 10–20 | Moderate load; balance pool size against PgBouncer if used |
+| Production (3+ replicas with HPA) | 20–50 | Higher concurrency; monitor pool exhaustion via application metrics |
+
+Each replica maintains its own pool, so a 3-replica deployment with `DATABASE_POOL_SIZE=20` opens up to 60 total connections to PostgreSQL. Ensure the PostgreSQL `max_connections` setting is at least `(replicas × pool_size) + 10` to account for admin and utility connections.
+
 ## Pre-Migration Checklist
 
 - [ ] Back up current SQLite database file
@@ -458,18 +533,35 @@ A: Use tools like:
 
 A: No. `.github/workflows/ci.yml`'s `postgres` job runs the application test
 suite against a real `postgres:16-alpine` service container on every push
-and pull request (excluding only the test files that exercise the
-events/indexer, admin-multisig, and webhook-delivery subsystems, which are
-owned by separate issues and still use SQLite directly by design). You can
-run the same thing locally with `npm run test:postgres` against a Postgres
-instance reachable at `DATABASE_URL` (`docker-compose up -d postgres` starts
-one). Separately, `tests/db/postgresIntegration.test.ts` runs against a live
-instance too (set `POSTGRES_TEST_URL` or `DATABASE_URL`) and specifically
-proves: 60+ concurrent queries complete in pool-bounded parallel time (not
-serialized), a slow in-flight query never blocks the Node event loop, `NULL`
-inserts into `audit_log.hash`/`event_source` are rejected, and 120
-simultaneous audit-log writes produce zero silent loss with an unbroken hash
-chain.
+and pull request. You can run the same thing locally with
+`npm run test:postgres` against a Postgres instance reachable at
+`DATABASE_URL` (`docker-compose up -d postgres` starts one). Separately,
+`tests/db/postgresIntegration.test.ts` runs against a live instance too
+(set `POSTGRES_TEST_URL` or `DATABASE_URL`) and specifically proves: 60+
+concurrent queries complete in pool-bounded parallel time (not serialized),
+a slow in-flight query never blocks the Node event loop, `NULL` inserts
+into `audit_log.hash`/`event_source` are rejected, and 120 simultaneous
+audit-log writes produce zero silent loss with an unbroken hash chain.
+
+A small set of suites is still excluded from the Postgres CI job /
+`test:postgres` because they exercise SQLite-specific or sync-`getDb()`
+paths. `tests/routes/adminPagination.test.ts` was re-enabled (fully
+mocked — passes under `DB_DRIVER=postgres`). Remaining exclusions and the
+follow-ups needed for each (file a tracking issue per exclusion if one
+does not already exist; related work under #1014 / #1018):
+
+| Suite | Why excluded / follow-up |
+| --- | --- |
+| `tests/services/indexer.test.ts`, `indexerDispatch.test.ts`, `tierPromotion.test.ts`, `tests/routes/reindex.test.ts`, `tests/db/backfill.test.ts` | Raw `getDb()` / SQLite SQL in indexer/reindex/tier/backfill paths |
+| `tests/services/webhooks.test.ts`, `tests/controllers/webhookAdminController.test.ts` | Sync `getDb()` in webhook delivery / admin |
+| `tests/routes/adminExport.test.ts`, `exportStreaming.test.ts`, `adminQuerySchema.test.ts` | `better-sqlite3` `.iterate()` / export streaming assumptions |
+| `tests/e2e/milestonePromotion.e2e.test.ts`, `scoutUnlock.e2e.test.ts` | E2E suites still SQLite-oriented |
+| `tests/db/sqlInjectionRegression.test.ts` | Driver-specific SQL regression harness |
+| `tests/routes/playerListFreshness.test.ts`, `trialOffers.test.ts` | Suites that call sync `getDb()` directly |
+| `tests/routes/adminAuditTrail.test.ts` | Audit-trail path still tied to SQLite assumptions |
+
+Keep CI and `package.json` `test:postgres` ignore lists in sync when
+re-enabling a suite.
 
 ## Support
 

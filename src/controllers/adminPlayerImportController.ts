@@ -29,7 +29,7 @@ export const importPlayersBodySchema = z.object({
       config.playerImport.maxBatchSize,
       `players array exceeds maximum size of ${config.playerImport.maxBatchSize}`,
     ),
-});
+}).strict();
 
 export type ImportPlayerResultStatus = 'success' | 'error';
 

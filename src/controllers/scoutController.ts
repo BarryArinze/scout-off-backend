@@ -93,7 +93,7 @@ export const trialOfferSchema = z.object({
     .string()
     .min(1)
     .refine(isValidIpfsOrHttpsUri, 'detailsUri must be a valid IPFS (ipfs://) or HTTPS URI'),
-});
+}).strict();
 
 /**
  * Body schema for POST /scouts/:wallet/contacts/:playerId/unlock.
@@ -103,10 +103,10 @@ export const trialOfferSchema = z.object({
  */
 export const unlockContactSchema = z.object({}).strict();
 
-const subscribeSchema = z.object({
+export const subscribeSchema = z.object({
   tier: z.enum(['basic', 'premium']),
   duration: z.number().int().min(1).max(365),
-});
+}).strict();
 
 // ─── Access helpers ────────────────────────────────────────────────────────────
 

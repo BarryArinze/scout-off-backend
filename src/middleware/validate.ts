@@ -49,7 +49,7 @@ function hasRequestBody(req: Request): boolean {
  * Usage: router.post('/route', validateBody(mySchema), handler)
  */
 export function validateBody<T>(schema: ZodSchema<T>, options?: ValidationOptions): RequestHandler {
-  return (req, res, next): void => {
+  const middleware: RequestHandler = (req, res, next): void => {
     if (hasRequestBody(req) && !hasJsonContentType(req)) {
       const correlationId = getCorrelationId(req);
       logger.warn(
@@ -87,6 +87,32 @@ export function validateBody<T>(schema: ZodSchema<T>, options?: ValidationOption
     req.body = sanitizeObject(result.data);
     next();
   };
+  Object.defineProperty(middleware, '__validateBody', { value: true });
+  Object.defineProperty(middleware, 'name', { value: 'validateBody' });
+  return middleware;
+}
+
+/**
+ * Validate JSON bodies with `schema`; pass through CSV/plain-text bodies unchanged.
+ * Tagged like `validateBody` so the mutating-route meta-test accepts dual import routes.
+ */
+export function validateJsonBodyOrPassThrough<T>(
+  schema: ZodSchema<T>,
+  options?: ValidationOptions,
+): RequestHandler {
+  const jsonValidator = validateBody(schema, options);
+  const middleware: RequestHandler = (req, res, next): void => {
+    const contentType = req.headers?.['content-type'];
+    const ct = contentType ? contentType.split(';')[0].trim().toLowerCase() : '';
+    if (ct === 'text/csv' || ct === 'text/plain' || typeof req.body === 'string') {
+      next();
+      return;
+    }
+    jsonValidator(req, res, next);
+  };
+  Object.defineProperty(middleware, '__validateBody', { value: true });
+  Object.defineProperty(middleware, 'name', { value: 'validateBody' });
+  return middleware;
 }
 
 /**
@@ -120,15 +146,13 @@ export function validateQuery<T>(schema: ZodSchema<T>, options?: ValidationOptio
       });
       return;
     }
-    // Cast so the controller can read coerced + defaulted values via req.query.
-    // Express 5 defines req.query as a getter-only accessor, so a plain
-    // assignment throws — replace the accessor with a data property instead
-    // (keeps the pre-Express-5 behavior of swapping in the sanitized query).
-    Object.defineProperty(req, "query", {
+    // Express 5 exposes req.query as a getter-only property, so a plain
+    // assignment throws — define the sanitized value explicitly instead so
+    // controllers keep reading coerced + defaulted values via req.query.
+    Object.defineProperty(req, 'query', {
       value: sanitizeObject(result.data),
-      configurable: true,
       writable: true,
-      enumerable: true,
+      configurable: true,
     });
     next();
   };

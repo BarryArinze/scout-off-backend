@@ -223,8 +223,17 @@ export function decrementSseConnections(): void {
   sseConnectionsActive = Math.max(0, sseConnectionsActive - 1);
 }
 
-export function getSseConnectionsActive(): number {
-  return sseConnectionsActive;
+// ─── Stuck pending pins gauge ─────────────────────────────────────────────────
+
+/** In-memory gauge for currently stuck pending IPFS pins. */
+let stuckPendingPinsCount = 0;
+
+export function setStuckPendingPinsCount(count: number): void {
+  stuckPendingPinsCount = Math.max(0, count);
+}
+
+export function getStuckPendingPinsCount(): number {
+  return stuckPendingPinsCount;
 }
 
 // ─── Webhook dead-letter counters / gauges (#1131) ────────────────────────────
@@ -305,12 +314,7 @@ export function resetMetrics(): void {
   cacheCountsStore.misses = 0;
   cacheCountsStore.evictions = 0;
   cacheInvalidationStore.total = 0;
-  webhookCountersStore.deadLettersTotal = 0;
-  webhookCountersStore.retrySuccessTotal = 0;
-  for (const key of Object.keys(webhookDeadLetterGaugeStore)) {
-    delete webhookDeadLetterGaugeStore[key];
-  }
-  webhookDeadLetterInsertTimestamps.length = 0;
+  stuckPendingPinsCount = 0;
   resetIpReputationCounters();
 }
 
@@ -409,6 +413,8 @@ export interface SerializeMetricsExtras {
   indexerLedgerLag?: number;
   /** Optional sse_connections_active gauge value, injected by the caller. */
   sseConnectionsActive?: number;
+  /** Optional stuck_pending_pins_count gauge value, injected by the caller. */
+  stuckPendingPinsCount?: number;
 }
 
 /**
@@ -522,10 +528,11 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
     lines.push(`indexer_ledger_lag ${extras.indexerLedgerLag}`);
   }
 
-  // Fee withdrawal DB-write failure counter.
-  lines.push('# HELP scout_off_fee_withdrawal_db_write_failures_total Total number of on-chain fee withdrawals whose DB record failed to write');
-  lines.push('# TYPE scout_off_fee_withdrawal_db_write_failures_total counter');
-  lines.push(`scout_off_fee_withdrawal_db_write_failures_total ${feeWithdrawalDbWriteFailuresStore.total}`);
+  // Stuck pending IPFS pins gauge.
+  const stuckPins = extras.stuckPendingPinsCount !== undefined ? extras.stuckPendingPinsCount : getStuckPendingPinsCount();
+  lines.push('# HELP stuck_pending_pins_count Current number of stuck pending IPFS pins');
+  lines.push('# TYPE stuck_pending_pins_count gauge');
+  lines.push(`stuck_pending_pins_count ${stuckPins}`);
 
   // Dead-letter queue depth gauge (#1131) — broken down per subscription.
   lines.push('# HELP scout_off_webhook_dead_letters_total Current webhook dead-letter queue depth by subscription');
@@ -559,9 +566,17 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   * Builds the GET /metrics Express handler. The indexer-lag getter is injected so
   * this module never imports the indexer.
   */
-export function createMetricsHandler(getIndexerLedgerLag: () => number = () => 0, getSseConnectionsActive: () => number = () => 0) {
+export function createMetricsHandler(
+  getIndexerLedgerLag: () => number = () => 0,
+  getSseConnectionsActive: () => number = () => 0,
+  getStuckPinsCount: () => number = () => getStuckPendingPinsCount(),
+) {
   return (_req: Request, res: Response): void => {
     res.set('Content-Type', PROMETHEUS_CONTENT_TYPE);
-    res.send(serializeMetrics({ indexerLedgerLag: getIndexerLedgerLag(), sseConnectionsActive: getSseConnectionsActive() }));
+    res.send(serializeMetrics({
+      indexerLedgerLag: getIndexerLedgerLag(),
+      sseConnectionsActive: getSseConnectionsActive(),
+      stuckPendingPinsCount: getStuckPinsCount(),
+    }));
   };
 }

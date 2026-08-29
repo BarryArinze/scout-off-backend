@@ -433,6 +433,10 @@ const config = {
    * failed rather than treated as confirmed (Issue #761).
    */
   txConfirmationTimeoutMs: parseNumericEnv('TX_CONFIRMATION_TIMEOUT_MS', process.env.TX_CONFIRMATION_TIMEOUT_MS, 60000, { min: 1000, integer: true }),
+  /** Per-request HTTP timeout for Pinata/IPFS axios calls (ms). */
+  ipfsHttpTimeoutMs: parseNumericEnv('IPFS_HTTP_TIMEOUT_MS', process.env.IPFS_HTTP_TIMEOUT_MS, 15000, { min: 1, integer: true }),
+  /** Per-request HTTP timeout for Soroban RPC / Stellar SDK calls (ms). */
+  stellarRpcTimeoutMs: parseNumericEnv('STELLAR_RPC_TIMEOUT_MS', process.env.STELLAR_RPC_TIMEOUT_MS, 15000, { min: 1, integer: true }),
   requestLog: {
     skipPaths: (process.env.LOG_SKIP_PATHS ?? '/health,/health/liveness,/health/readiness,/ready,/metrics')
       .split(',').map(p => p.trim()).filter(Boolean),
@@ -488,6 +492,15 @@ const config = {
 
   /** TTL for pinJson deduplication cache entries in milliseconds (default: 5 min). */
   pinJsonCacheTtlMs: parseNumericEnv('PIN_JSON_CACHE_TTL_MS', process.env.PIN_JSON_CACHE_TTL_MS, 300000, { min: 0, integer: true }),
+
+  /** Age threshold for pending pins before reconciliation in milliseconds (default: 5 min). */
+  ipfsReconcileAgeMs: parseNumericEnv('IPFS_RECONCILE_AGE_MS', process.env.IPFS_RECONCILE_AGE_MS, 300000, { min: 0, integer: true }),
+
+  /** Scheduled interval for IPFS pending pin reconciliation in milliseconds (default: 60s). */
+  ipfsReconcileIntervalMs: parseNumericEnv('IPFS_RECONCILE_INTERVAL_MS', process.env.IPFS_RECONCILE_INTERVAL_MS, 60000, { min: 1000, integer: true }),
+
+  /** Max attempts before expiring a stuck pending pin during reconciliation (default: 5). */
+  ipfsReconcileMaxAttempts: parseNumericEnv('IPFS_RECONCILE_MAX_ATTEMPTS', process.env.IPFS_RECONCILE_MAX_ATTEMPTS, 5, { min: 1, integer: true }),
 
   /** Maximum evidence file size in bytes (default: 50 MB). */
   evidenceMaxBytes: parseNumericEnv('EVIDENCE_MAX_BYTES', process.env.EVIDENCE_MAX_BYTES, 50 * 1024 * 1024, { min: 1, integer: true }),
