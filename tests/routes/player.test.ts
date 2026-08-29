@@ -69,6 +69,27 @@ const validPayload = {
   metadataUri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
 };
 
+const PLAYER_ROW = {
+  player_id: PLAYER_WALLET,
+  wallet: PLAYER_WALLET,
+  position: 'striker',
+  region: 'europe',
+  metadata_uri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG',
+  progress_level: 1,
+  created_at: 1700000000,
+  is_active: 1,
+};
+
+// PUT /api/players/:playerId requires the current ETag as the If-Match
+// header (#1151). Fetch it the same way a real client would: GET first.
+async function currentEtag(): Promise<string> {
+  const { getPlayerById } = require('../../src/db');
+  (getPlayerById as jest.Mock).mockReturnValue(PLAYER_ROW);
+  const res = await request(app).get(`/api/players/${PLAYER_WALLET}`);
+  expect(res.status).toBe(200);
+  return res.headers.etag as string;
+}
+
 // ─── POST /api/players/register ───────────────────────────────────────────────
 
 describe('POST /api/players/register — role enforcement', () => {
@@ -144,9 +165,11 @@ describe('PUT /api/players/:playerId — role enforcement', () => {
 
   it('returns 200 with transactionId when metadataUri is provided', async () => {
     const token = makeToken(PLAYER_WALLET, 'player');
+    const etag = await currentEtag();
     const res = await request(app)
       .put(`/api/players/${PLAYER_WALLET}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('If-Match', etag)
       .send({ metadataUri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG' });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -156,9 +179,11 @@ describe('PUT /api/players/:playerId — role enforcement', () => {
 
   it('pins metadata to IPFS and calls updateProfile when metadata object is provided', async () => {
     const token = makeToken(PLAYER_WALLET, 'player');
+    const etag = await currentEtag();
     const res = await request(app)
       .put(`/api/players/${PLAYER_WALLET}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('If-Match', etag)
       .send({ metadata: { position: 'midfielder', region: 'EU' } });
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -194,9 +219,11 @@ describe('PUT /api/players/:playerId — owner-only enforcement', () => {
 
   it('returns 200 when owner updates their own profile', async () => {
     const token = makeToken(OWNER_WALLET, 'player');
+    const etag = await currentEtag();
     const res = await request(app)
       .put(`/api/players/${OWNER_WALLET}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('If-Match', etag)
       .send(VALID_UPDATE);
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);

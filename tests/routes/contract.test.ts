@@ -40,6 +40,7 @@ jest.mock('../../src/db', () => ({
   persistLastIndexedLedger: jest.fn(),
   insertPlayerProfileHistory: jest.fn(),
   getPlayerProfileHistory: jest.fn().mockReturnValue([]),
+  countTrialOffersByPlayer: jest.fn().mockReturnValue(0),
   insertOrUpdatePlayer: jest.fn(),
   getPendingMilestones: jest.fn().mockReturnValue({ data: [], total: 0 }),
   getContactUnlocksByScout: jest.fn().mockReturnValue([]),
@@ -292,9 +293,15 @@ describe('POST /api/players/register — envelope shape', () => {
 
 describe('PUT /api/players/:playerId — envelope shape', () => {
   it('success: { success: true, data: object }', async () => {
+    // PUT requires the current ETag echoed as If-Match (#1151) — fetch it
+    // via GET first, the way a real client would.
+    const getRes = await request(app).get(`/api/players/${PLAYER_WALLET}`);
+    expect(getRes.status).toBe(200);
+
     const res = await request(app)
       .put(`/api/players/${PLAYER_WALLET}`)
       .set('Authorization', `Bearer ${playerToken}`)
+      .set('If-Match', getRes.headers.etag)
       .send({ metadataUri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG' });
     expect(res.status).toBe(200);
     assertSuccessEnvelope(res.body);

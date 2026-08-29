@@ -1981,7 +1981,7 @@
         ],
         "summary": "Fetch a single player profile, including a live `offerCount`.",
         "operationId": "getPlayer",
-        "description": "Fetch a single player profile, including a live `offerCount`. Deactivated\nprofiles return 404 to non-owners/non-admins. Supports conditional\nrequests via ETag (304 when `If-None-Match` matches).",
+        "description": "Fetch a single player profile, including a live `offerCount`. Deactivated\nprofiles return 404 to non-owners/non-admins. Supports conditional\nrequests via ETag (304 when `If-None-Match` matches). The same ETag is the\nversion token for optimistic concurrency — echo it as `If-Match` on PUT.",
         "parameters": [
           {
             "name": "playerId",
@@ -2020,7 +2020,7 @@
         ],
         "summary": "Update a player's profile metadata.",
         "operationId": "updatePlayer",
-        "description": "Update a player's profile metadata. Owner-only. Accepts either a raw\n`metadata` object (pinned to IPFS by the backend) or a pre-pinned\n`metadataUri`.",
+        "description": "Update a player's profile metadata. Owner-only. Accepts either a raw\n`metadata` object (pinned to IPFS by the backend) or a pre-pinned\n`metadataUri`. Optimistic concurrency (#1151): the ETag returned by GET\nmust be echoed in the `If-Match` header. A missing header is rejected with\n428, a stale one with 412 (no write happens); `If-Match: *` is the\ndocumented override.",
         "parameters": [
           {
             "name": "playerId",
@@ -2030,6 +2030,15 @@
               "type": "string"
             },
             "description": "Player's unique identifier (cuid2)"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ETag from GET /api/players/:playerId (required; \"*\" to override)"
           }
         ],
         "requestBody": {
@@ -2081,6 +2090,12 @@
           },
           "404": {
             "description": "{ success: false, error: string } - Player not found"
+          },
+          "412": {
+            "description": "{ success: false, error: string } - If-Match does not match the current profile version"
+          },
+          "428": {
+            "description": "{ success: false, error: string } - If-Match header required"
           }
         },
         "security": [
