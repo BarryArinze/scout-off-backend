@@ -9,7 +9,7 @@ import {
 } from '../controllers/validatorController';
 import { requireRole } from '../middleware/auth';
 import { validateBody, validateQuery } from '../middleware/validate';
-import { rateLimit } from '../middleware/rateLimit';
+import { rateLimit, playerRateLimit } from '../middleware/rateLimit';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
 
 const router = Router();
@@ -21,21 +21,38 @@ const milestoneRateLimit = rateLimit({
 });
 
 /**
+ * Per-player rate limiter on POST /api/validators/milestone (#1137).
+ * Keyed by `req.body.playerId` (extracted after body validation).
+ * Configured via MILESTONE_PLAYER_RATE_WINDOW_MS / MILESTONE_PLAYER_RATE_MAX.
+ * Independent of the IP and wallet limiters — namespaced as 'milestone-submit:player'.
+ */
+const milestonePlayerRateLimit = playerRateLimit();
+
+/**
  * POST /api/validators/milestone
  *
  * Submit evidence for a player milestone. `evidenceUri` may be an
  * `https://` URL (downloaded and re-pinned to IPFS) or an `ipfs://` CID
  * (recorded directly). Invalidates the player's milestone cache on success.
  *
+ * Rate-limited per IP, per validator wallet, and per target player_id (#1137).
+ *
  * @body { playerId: string, milestoneType: 'identity'|'performance'|'trial_offer', evidenceUri: string }
  * @response 201 { success: true, data: { evidenceCid: string } }
  * @response 400 { success: false, error: string } - Invalid body
  * @response 413 { success: false, error: string } - Remote evidence file too large
  * @response 422 { success: false, error: string } - Remote evidence has an unsupported content type
+ * @response 429 { success: false, error: string } - Per-player rate limit exceeded; Retry-After header set
  * @auth Bearer (validator role required)
  */
 router.route('/milestone')
-  .post(milestoneRateLimit, requireRole('validator'), validateBody(milestoneSchema), submitMilestoneEvidence)
+  .post(
+    milestoneRateLimit,
+    requireRole('validator'),
+    validateBody(milestoneSchema),
+    milestonePlayerRateLimit,
+    submitMilestoneEvidence,
+  )
   .all(methodNotAllowed(['POST']));
 
 /**
