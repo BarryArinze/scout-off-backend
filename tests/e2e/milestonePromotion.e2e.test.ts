@@ -13,7 +13,7 @@ jest.unmock('better-sqlite3');
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 import app from '../../src/app';
-import { getDb, getEvents, insertPlayerProfileHistory, updatePlayerProgress } from '../../src/db';
+import { getDb, queryEvents, insertPlayerProfileHistory, updatePlayerProgress } from '../../src/db';
 import { tierForApprovedMilestones } from '../../src/services/tierPromotion';
 
 const SECRET = process.env.JWT_SECRET ?? 'test-secret';
@@ -90,7 +90,7 @@ describe('E2E Milestone Promotion Flow', () => {
       .send({
         playerId,
         milestoneType: 'performance',
-        evidenceUri: 'ipfs://QmTestEvidence',
+        evidenceUri: VALID_CID,
       });
 
     expect(milestoneRes.status).toBe(201);
@@ -119,7 +119,7 @@ describe('E2E Milestone Promotion Flow', () => {
         createdAt,
       );
 
-    const approvedCount = getEvents('milestone_approved').filter(
+    const approvedCount = queryEvents('milestone_approved').filter(
       (event) => event.payload.player_id === playerId,
     ).length;
     updatePlayerProgress(playerId, tierForApprovedMilestones(approvedCount));

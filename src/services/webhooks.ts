@@ -6,6 +6,22 @@ import {
   WebhookSubscription,
 } from '../db';
 import { logger } from '../utils/logger';
+import { recordWebhookDelivery } from '../middleware/metrics';
+import { trace, SpanStatusCode } from '@opentelemetry/api';
+import config from '../config';
+
+/**
+ * Generate a unique, stable delivery identifier for a webhook event.
+ * The ID is a UUID v4, generated once per logical delivery (first dispatch)
+ * and carried through to every dead-letter replay so subscribers can
+ * deduplicate.  The ID is included in the signed payload body, so swapping
+ * it invalidates the HMAC.
+ */
+export function generateDeliveryId(): string {
+  return crypto.randomUUID();
+}
+
+const tracer = trace.getTracer('scout-off-backend');
 
 type WebhookRetryOptions = {
   retries?: number;
@@ -13,6 +29,14 @@ type WebhookRetryOptions = {
   maxDelayMs?: number;
   /** When provided, the raw JSON body is signed with HMAC-SHA256 using this secret. */
   secret?: string;
+  /**
+   * Per-attempt timeout in ms. An attempt that hasn't completed within this
+   * window is aborted and treated as a failed attempt (proceeding to
+   * retry/backoff or dead-lettering per the existing logic) instead of
+   * hanging indefinitely on an unresponsive subscriber. Defaults to
+   * config.webhook.timeoutMs.
+   */
+  timeoutMs?: number;
 };
 
 function sleep(ms: number): Promise<void> {
@@ -43,41 +67,61 @@ export async function postWebhookWithRetry(
   payload: unknown,
   options: WebhookRetryOptions = {}
 ): Promise<void> {
-  const retries = options.retries ?? 3;
-  const baseDelayMs = options.baseDelayMs ?? 500;
-  const maxDelayMs = options.maxDelayMs ?? 5000;
-  let lastError: unknown;
+  const span = tracer.startSpan('webhooks.postWithRetry', { attributes: { 'webhook.url': url } });
+  try {
+    const retries = options.retries ?? 3;
+    const baseDelayMs = options.baseDelayMs ?? 500;
+    const maxDelayMs = options.maxDelayMs ?? 5000;
+    const timeoutMs = options.timeoutMs ?? config.webhook.timeoutMs;
+    let lastError: unknown;
 
-  // Serialize once so the signature is computed over the exact bytes sent.
-  const rawBody = JSON.stringify(payload);
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (options.secret) {
-    headers['X-Webhook-Signature'] = signWebhookPayload(rawBody, options.secret);
-  }
+    // Serialize once so the signature is computed over the exact bytes sent.
+    const rawBody = JSON.stringify(payload);
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (options.secret) {
+      headers['X-Webhook-Signature'] = signWebhookPayload(rawBody, options.secret);
+    }
 
-  for (let attempt = 1; attempt <= retries; attempt += 1) {
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        body: rawBody,
-        headers,
-      });
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
+      span.setAttribute('webhook.attempt', attempt);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          body: rawBody,
+          headers,
+          signal: controller.signal,
+        });
 
-      if (!response.ok) {
-        throw new Error(`Webhook dispatch failed with status ${response.status}`);
+        if (!response.ok) {
+          span.setAttribute('webhook.status', response.status);
+          throw new Error(`Webhook dispatch failed with status ${response.status}`);
+        }
+        span.setAttribute('webhook.status', response.status);
+        return;
+      } catch (err) {
+        lastError = controller.signal.aborted
+          ? new Error(`Webhook dispatch timed out after ${timeoutMs}ms`)
+          : err;
+      } finally {
+        clearTimeout(timer);
       }
-      return;
-    } catch (err) {
-      lastError = err;
+
+      if (attempt < retries) {
+        const delayMs = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
+        await sleep(delayMs);
+      }
     }
 
-    if (attempt < retries) {
-      const delayMs = Math.min(baseDelayMs * 2 ** (attempt - 1), maxDelayMs);
-      await sleep(delayMs);
-    }
+    throw lastError;
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
   }
-
-  throw lastError;
 }
 
 const RETRY_OPTIONS = { retries: 3, baseDelayMs: 500, maxDelayMs: 5000 };
@@ -93,11 +137,15 @@ export async function dispatchEventWebhook(eventType: string, payload: unknown):
   const subscriptions = listWebhookSubscriptions();
   if (subscriptions.length === 0) return;
 
-  const body = { eventType, payload };
+  // Generate a stable delivery ID once for this logical event.
+  // All subscribers receive the same ID for the same event, but dead-letter
+  // replays reuse the ID from the original delivery (stored in the payload).
+  const deliveryId = generateDeliveryId();
+  const body = { deliveryId, eventType, payload };
 
   await Promise.all(
     subscriptions.map((subscription: WebhookSubscription) =>
-      deliverToSubscription(subscription, eventType, body)
+      deliverToSubscription(subscription, eventType, body, deliveryId)
     )
   );
 }
@@ -105,25 +153,29 @@ export async function dispatchEventWebhook(eventType: string, payload: unknown):
 async function deliverToSubscription(
   subscription: WebhookSubscription,
   eventType: string,
-  body: unknown
+  body: unknown,
+  deliveryId: string,
 ): Promise<void> {
   try {
     await postWebhookWithRetry(subscription.url, body, {
       ...RETRY_OPTIONS,
       secret: subscription.secret,
     });
+    recordWebhookDelivery('success');
   } catch (err) {
     const failureReason = err instanceof Error ? err.message : String(err);
     logger.warn(
-      `[webhooks] delivery exhausted retries — subscriptionId=${subscription.id} url=${subscription.url} eventType=${eventType} reason=${failureReason}`
+      `[webhooks] delivery exhausted retries — subscriptionId=${subscription.id} url=${subscription.url} eventType=${eventType} reason=${failureReason} delivery_id=${deliveryId}`
     );
     insertWebhookDeadLetter({
       subscriptionId: subscription.id,
       url: subscription.url,
       eventType,
       payload: JSON.stringify(body),
+      deliveryId,
       failureReason,
       attempts: RETRY_OPTIONS.retries,
     });
+    recordWebhookDelivery('dead_letter');
   }
 }

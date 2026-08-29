@@ -10,7 +10,7 @@ import {
 const SECRET = process.env.JWT_SECRET ?? 'test-secret';
 
 jest.mock('../../src/services/audit', () => ({
-  logAuditEvent: jest.fn(),
+  logAuditEvent: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../../src/services/stellar', () => ({
@@ -19,7 +19,7 @@ jest.mock('../../src/services/stellar', () => ({
 }));
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
 }));
 
 jest.mock('../../src/services/indexer', () => ({

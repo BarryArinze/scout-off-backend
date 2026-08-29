@@ -1,6 +1,6 @@
 import {
   Contract,
-  SorobanRpc,
+  rpc,
   TransactionBuilder,
   BASE_FEE,
   xdr,
@@ -81,11 +81,11 @@ export async function invokeContract(
   } catch (err) {
     throw new ContractNetworkError(`Simulation request failed: ${(err as Error).message}`);
   }
-  if (SorobanRpc.Api.isSimulationError(simResult)) {
+  if (rpc.Api.isSimulationError(simResult)) {
     throw new ContractExecutionError(`Simulation failed: ${simResult.error}`);
   }
 
-  const preparedTx = SorobanRpc.assembleTransaction(tx, simResult).build();
+  const preparedTx = rpc.assembleTransaction(tx, simResult).build();
   preparedTx.sign(keypair);
 
   // Submit
@@ -103,7 +103,7 @@ export async function invokeContract(
   const deadline = Date.now() + timeoutMs;
   let getResult = await server.getTransaction(sendResult.hash);
 
-  while (getResult.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND) {
+  while (getResult.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
     if (Date.now() >= deadline) {
       throw new ContractTimeoutError(`Transaction ${sendResult.hash} not confirmed within ${timeoutMs}ms`);
     }
@@ -111,11 +111,11 @@ export async function invokeContract(
     getResult = await server.getTransaction(sendResult.hash);
   }
 
-  if (getResult.status === SorobanRpc.Api.GetTransactionStatus.FAILED) {
+  if (getResult.status === rpc.Api.GetTransactionStatus.FAILED) {
     throw new ContractExecutionError(`Transaction ${sendResult.hash} failed on-chain`);
   }
 
-  const success = getResult as SorobanRpc.Api.GetSuccessfulTransactionResponse;
+  const success = getResult as rpc.Api.GetSuccessfulTransactionResponse;
   return {
     hash: sendResult.hash,
     returnValue: success.returnValue ?? xdr.ScVal.scvVoid(),

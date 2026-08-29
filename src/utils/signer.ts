@@ -10,6 +10,7 @@ const _keypair: Keypair = (() => {
   }
 })();
 
+/** Returns the platform's Stellar keypair, derived once from config.platformSecretKey at module load. */
 export function getPlatformKeypair(): Keypair {
   return _keypair;
 }

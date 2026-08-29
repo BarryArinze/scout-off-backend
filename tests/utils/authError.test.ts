@@ -22,6 +22,26 @@ describe('sendUnauthorized', () => {
     });
   });
 
+  it('sets the error field to the provided message', () => {
+    const res = makeRes();
+    sendUnauthorized(res, 'Custom unauthorized message');
+    const payload = (res.json as jest.Mock).mock.calls[0][0] as AuthErrorPayload;
+    expect(payload.error).toBe('Custom unauthorized message');
+  });
+
+  it('calls res.json exactly once', () => {
+    const res = makeRes();
+    sendUnauthorized(res, 'test');
+    expect(res.json).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call next', () => {
+    const res = makeRes();
+    const next = jest.fn();
+    sendUnauthorized(res, 'test');
+    expect(next).not.toHaveBeenCalled();
+  });
+
   it('includes reason when provided', () => {
     const res = makeRes();
     sendUnauthorized(res, 'Missing auth token', { detail: 'no header' });
@@ -53,6 +73,27 @@ describe('sendForbidden', () => {
       error: 'Insufficient permissions',
       code: 'FORBIDDEN',
     });
+  });
+
+  it('passes through a message containing HTML special characters', () => {
+    const res = makeRes();
+    const htmlMsg = '<script>alert(\'xss\')</script> & "quoted"';
+    sendForbidden(res, htmlMsg);
+    const payload = (res.json as jest.Mock).mock.calls[0][0] as AuthErrorPayload;
+    expect(payload.error).toBe(htmlMsg);
+  });
+
+  it('calls res.json exactly once', () => {
+    const res = makeRes();
+    sendForbidden(res, 'test');
+    expect(res.json).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call next', () => {
+    const res = makeRes();
+    const next = jest.fn();
+    sendForbidden(res, 'test');
+    expect(next).not.toHaveBeenCalled();
   });
 
   it('includes reason when provided', () => {

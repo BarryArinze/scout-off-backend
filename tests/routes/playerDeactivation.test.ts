@@ -9,7 +9,7 @@ const PLAYER_WALLET = 'GAEW6VQNHJ45XOB5IBZVI2HLJGXPEM5JEKB5XR3CVAUGDNVATCW36GU4'
 const PLAYER_ID = 'player-deactivation-test';
 
 jest.mock('../../src/db', () => ({
-  getEvents: jest.fn().mockReturnValue([]),
+  queryEvents: jest.fn().mockReturnValue([]),
   getPlayerById: jest.fn(),
   queryPlayers: jest.fn(),
   countPlayers: jest.fn(),
@@ -19,6 +19,7 @@ jest.mock('../../src/db', () => ({
   insertSubscription: jest.fn().mockReturnValue(1),
   deactivatePlayer: jest.fn(),
   reactivatePlayer: jest.fn(),
+  countTrialOffersByPlayer: jest.fn().mockReturnValue(0),
 }));
 
 jest.mock('../../src/services/indexer', () => ({

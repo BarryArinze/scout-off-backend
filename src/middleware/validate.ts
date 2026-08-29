@@ -2,6 +2,7 @@ import { Request, RequestHandler } from 'express';
 import { ZodSchema } from 'zod';
 import { logger } from '../utils/logger';
 import { ErrorCode } from '../utils/errorCodes';
+import { sanitizeObject } from '../utils/sanitizer';
 
 interface ValidationOptions {
   context?: string;
@@ -65,6 +66,10 @@ export function validateBody<T>(schema: ZodSchema<T>, options?: ValidationOption
     const result = schema.safeParse(req.body);
     if (!result.success) {
       const correlationId = getCorrelationId(req);
+      const details = result.error.errors.map((err) => ({
+        field: err.path.join('.'),
+        message: err.message,
+      }));
       logger.warn(
         `[validation] ${options?.context ?? 'body'} rejected — error=${
           result.error.errors[0]?.message ?? 'Invalid request body'
@@ -72,13 +77,14 @@ export function validateBody<T>(schema: ZodSchema<T>, options?: ValidationOption
       );
       res.status(400).json({
         success: false,
-        error: result.error.errors[0]?.message ?? 'Invalid request body',
+        error: 'Validation Error',
+        details,
         code: ErrorCode.VALIDATION_ERROR,
         correlationId,
       });
       return;
     }
-    req.body = result.data;
+    req.body = sanitizeObject(result.data);
     next();
   };
 }
@@ -86,7 +92,7 @@ export function validateBody<T>(schema: ZodSchema<T>, options?: ValidationOption
 /**
  * Middleware factory that validates `req.query` against a Zod schema.
  *
- * On validation failure: returns HTTP 400 with `{ success: false, error: '<message>' }`.
+ * On validation failure: returns HTTP 400 with `{ success: false, error: 'Validation Error', details: [{ field, message }] }`.
  * On success: stores the parsed/coerced result in `req.query` and calls `next()`.
  *
  * Usage: router.get('/route', validateQuery(mySchema), handler)
@@ -96,6 +102,10 @@ export function validateQuery<T>(schema: ZodSchema<T>, options?: ValidationOptio
     const result = schema.safeParse(req.query);
     if (!result.success) {
       const correlationId = getCorrelationId(req);
+      const details = result.error.errors.map((err) => ({
+        field: err.path.join('.'),
+        message: err.message,
+      }));
       logger.warn(
         `[validation] ${options?.context ?? 'query'} rejected — error=${
           result.error.errors[0]?.message ?? 'Invalid query parameters'
@@ -103,15 +113,23 @@ export function validateQuery<T>(schema: ZodSchema<T>, options?: ValidationOptio
       );
       res.status(400).json({
         success: false,
-        error: result.error.errors[0]?.message ?? 'Invalid query parameters',
+        error: 'Validation Error',
+        details,
         code: ErrorCode.VALIDATION_ERROR,
         correlationId,
       });
       return;
     }
-    // Cast so the controller can read coerced + defaulted values via req.query
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (req as any).query = result.data;
+    // Cast so the controller can read coerced + defaulted values via req.query.
+    // Express 5 defines req.query as a getter-only accessor, so a plain
+    // assignment throws — replace the accessor with a data property instead
+    // (keeps the pre-Express-5 behavior of swapping in the sanitized query).
+    Object.defineProperty(req, "query", {
+      value: sanitizeObject(result.data),
+      configurable: true,
+      writable: true,
+      enumerable: true,
+    });
     next();
   };
 }
@@ -140,7 +158,9 @@ export function validateParams<T>(schema: ZodSchema<T>, options?: ValidationOpti
       });
       return;
     }
-    req.params = { ...req.params, ...(result.data as unknown as Record<string, string>) };
+    // Express 5: req.params is read-only, merge validated params into a local variable
+    // Controllers should use the validated data from result.data directly
+    (req as any).validatedParams = sanitizeObject(result.data);
     next();
   };
 }

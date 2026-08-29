@@ -13,6 +13,34 @@
 // Service dependency: Pinata (https://pinata.cloud)
 //   Required env vars: PINATA_API_KEY, PINATA_SECRET
 //   Optional env var:  PINATA_GATEWAY (default: https://gateway.pinata.cloud)
+//
+// ── Distributed deduplication flow (multi-instance deployments) ──────────────
+//
+// pinJson() uses a two-layer dedup strategy:
+//
+//   Layer 1 — Process-local (single instance, same process):
+//     • pinJsonCache: in-memory Map keyed by content hash, TTL-bounded.
+//     • inflightPins: in-memory Map of in-flight Promises so concurrent calls
+//       within the same process share one Pinata round-trip.
+//
+//   Layer 2 — Cross-instance (multiple pods behind a load balancer):
+//     • pending_pins DB row as a distributed mutex:
+//         INSERT OR IGNORE … WHERE hash = <content-hash>
+//       Only the instance that succeeds the INSERT (changes > 0) proceeds to
+//       upload. All other instances detect the row already exists and enter a
+//       poll loop.
+//     • resolved_cid column on the same pending_pins row:
+//         The WINNING instance writes the CID into resolved_cid immediately
+//         after a successful Pinata upload (before deleting the row).
+//         LOSING instances, on observing the lock row disappear, call
+//         getResolvedCidByHash() to read the CID from the DB.  If it is
+//         present they return it directly — no duplicate upload occurs.
+//         Only if the CID is absent (e.g. the winning instance crashed before
+//         writing it) does the losing instance fall through to its own upload.
+//
+// This eliminates the original bug where a losing instance, finding its local
+// caches empty after the lock cleared, unconditionally re-uploaded the same
+// content — defeating the purpose of the lock in multi-instance deployments.
 
 import { createHash } from 'crypto';
 import axios from 'axios';
@@ -20,7 +48,8 @@ import FormData from 'form-data';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { logger } from '../utils/logger';
-import { insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts } from '../db';
+import { insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts, setPendingPinResolvedCid, getResolvedCidByHash } from '../db';
+import { observeIpfsLatency } from '../middleware/metrics';
 
 const tracer = trace.getTracer('scout-off-backend');
 
@@ -94,6 +123,15 @@ export function clearPinJsonCache(): void {
 }
 
 /**
+ * Returns the number of entries currently held in the pinJson deduplication cache.
+ * Useful for metrics and health dashboards — a high count relative to unique
+ * metadata submissions indicates healthy deduplication is occurring.
+ */
+export function getPinJsonCacheSize(): number {
+  return pinJsonCache.size;
+}
+
+/**
  * Pin a JSON object to IPFS via Pinata. Returns the CID.
  *
  * Deduplication: the metadata is canonically serialized (sorted keys,
@@ -105,137 +143,151 @@ export function clearPinJsonCache(): void {
  * so concurrent identical requests resolve to exactly one Pinata API call.
  */
 export async function pinJson(body: object): Promise<string> {
-  return tracer.startActiveSpan('ipfs.pinJson', async (span) => {
-    try {
+  const start = Date.now();
+  const span = tracer.startSpan('ipfs.pinJson');
+  try {
+    return await (async () => {
       const hash = hashMetadata(body);
-      span.setAttribute('ipfs.hash', hash);
 
       const ttlMs = config.pinJsonCacheTtlMs;
       const cached = pinJsonCache.get(hash);
       if (cached && Date.now() - cached.timestamp < ttlMs) {
         logger.debug(`[ipfs] pinJson cache hit — returning cached CID (hash=${hash.slice(0, 8)}…)`);
-        span.setAttribute('ipfs.cache_hit', true);
-        span.setAttribute('ipfs.cid', cached.cid);
         return cached.cid;
       }
 
       if (inflightPins.has(hash)) {
         logger.debug(`[ipfs] pinJson inflight hit — waiting for in-flight request (hash=${hash.slice(0, 8)}…)`);
-        span.setAttribute('ipfs.inflight_hit', true);
-        const cid = await inflightPins.get(hash)!;
-        span.setAttribute('ipfs.cid', cid);
-        return cid;
+        return await inflightPins.get(hash)!;
       }
 
       if (!isPinataConfigured()) {
         if (process.env.NODE_ENV === 'production') assertPinataConfigured();
         logger.warn('[ipfs] Pinata not configured — returning dev stub CID for pinJson');
-        const cid = devStubCid(JSON.stringify(body));
-        span.setAttribute('ipfs.stub', true);
-        span.setAttribute('ipfs.cid', cid);
-        return cid;
+        return devStubCid(JSON.stringify(body));
       }
 
-      const now = new Date().toISOString();
-      const acquiredLock = insertPendingPin({
-        payload: JSON.stringify(body),
-        hash,
-        created_at: now,
-        last_tried: now,
-      });
-
-      if (acquiredLock === false) {
-        logger.debug(`[ipfs] pinJson lock contended — polling for completion (hash=${hash.slice(0, 8)}…)`);
-        const start = Date.now();
-        const MAX_POLL_MS = 30000;
-        while (Date.now() - start < MAX_POLL_MS) {
-          await new Promise((resolve) => setTimeout(resolve, 50));
-          const pollCached = pinJsonCache.get(hash);
-          if (pollCached && Date.now() - pollCached.timestamp < ttlMs) {
-            span.setAttribute('ipfs.cid', pollCached.cid);
-            return pollCached.cid;
-          }
-          if (inflightPins.has(hash)) {
-            const cid = await inflightPins.get(hash)!;
-            span.setAttribute('ipfs.cid', cid);
-            return cid;
-          }
-          if (!isPendingPinByHash(hash)) {
-            const finalCached = pinJsonCache.get(hash);
-            if (finalCached && Date.now() - finalCached.timestamp < ttlMs) {
-              span.setAttribute('ipfs.cid', finalCached.cid);
-              return finalCached.cid;
-            }
-            break;
-          }
-        }
-      }
-
-      const pinPromise = (async () => {
+      // Register the in-flight promise synchronously, *before* the first
+      // await (the DB lock-acquisition call below) — not after it. Every DB
+      // call here now goes through the async DbDriver (required to support
+      // DB_DRIVER=postgres), so even the SQLite path is a real await that
+      // yields to the event loop. Two same-process calls issued back-to-back
+      // (e.g. via Promise.all) both run synchronously up to their first
+      // await, so if registration happened after `await insertPendingPin`,
+      // both would race past the `inflightPins.has(hash)` check above before
+      // either had a chance to register — defeating same-process dedup and
+      // causing two independent Pinata uploads. Registering here, before any
+      // await, closes that window: whichever call runs first claims the
+      // entry synchronously, and the second sees it immediately.
+      const resultPromise = (async (): Promise<string> => {
         try {
-          const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
-          const cid = res.data.IpfsHash as string;
+          const now = new Date().toISOString();
+          const acquiredLock = await insertPendingPin({
+            payload: JSON.stringify(body),
+            hash,
+            created_at: now,
+            last_tried: now,
+          });
 
-          pinJsonCache.set(hash, { cid, timestamp: Date.now() });
-          return cid;
-        } catch (err) {
-          logger.critical('[ipfs] Pinata unavailable — queueing payload for retry', (err as Error).message);
-          const failTime = new Date().toISOString();
-          insertPendingPin({ payload: JSON.stringify(body), created_at: failTime, last_tried: failTime });
-          throw err;
+          if (acquiredLock === false) {
+            logger.debug(`[ipfs] pinJson lock contended — polling for completion (hash=${hash.slice(0, 8)}…)`);
+            const MAX_POLL_MS = 30000;
+            while (Date.now() - start < MAX_POLL_MS) {
+              await new Promise((resolve) => setTimeout(resolve, 50));
+              const pollCached = pinJsonCache.get(hash);
+              if (pollCached && Date.now() - pollCached.timestamp < ttlMs) {
+                return pollCached.cid;
+              }
+              // Check the cross-instance resolved_cid column unconditionally on
+              // every tick — not only once the pending_pins row is confirmed
+              // gone. The winning instance persists resolved_cid (a separate DB
+              // write) *before* deleting the row (another separate DB write), so
+              // in a real multi-instance deployment there's a window — bounded
+              // by the round-trip time between those two writes — where the row
+              // still exists but the CID is already readable. Gating this read
+              // behind "row is gone" misses that window entirely, since by the
+              // time the row is gone the resolved_cid is gone with it.
+              const resolvedCid = await getResolvedCidByHash(hash);
+              if (resolvedCid) {
+                logger.debug(`[ipfs] pinJson cross-instance dedup — using resolved CID from DB (hash=${hash.slice(0, 8)}…)`);
+                pinJsonCache.set(hash, { cid: resolvedCid, timestamp: Date.now() });
+                return resolvedCid;
+              }
+              if (!(await isPendingPinByHash(hash))) {
+                // Lock row is gone and no resolved_cid was ever observed — the
+                // winning instance most likely crashed before finishing.
+                // Check process-local cache once more, then fall through to
+                // upload as a safety-net.
+                const finalCached = pinJsonCache.get(hash);
+                if (finalCached && Date.now() - finalCached.timestamp < ttlMs) {
+                  return finalCached.cid;
+                }
+                break;
+              }
+            }
+          }
+
+          try {
+            const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
+            const uploadedCid = res.data.IpfsHash as string;
+            // Persist the CID into the pending_pins row BEFORE deleting it so any
+            // other instance waiting in its poll loop can read it via
+            // getResolvedCidByHash() and avoid a duplicate upload.
+            await setPendingPinResolvedCid(hash, uploadedCid);
+            pinJsonCache.set(hash, { cid: uploadedCid, timestamp: Date.now() });
+            span.setAttribute('ipfs.cid', uploadedCid);
+            return uploadedCid;
+          } catch (err) {
+            logger.critical('[ipfs] Pinata unavailable — queueing payload for retry', (err as Error).message);
+            const failTime = new Date().toISOString();
+            await insertPendingPin({ payload: JSON.stringify(body), created_at: failTime, last_tried: failTime });
+            throw err;
+          } finally {
+            await deletePendingPinByHash(hash);
+          }
         } finally {
-          deletePendingPinByHash(hash);
           inflightPins.delete(hash);
         }
       })();
-
-      inflightPins.set(hash, pinPromise);
-      const cid = await pinPromise;
-      span.setAttribute('ipfs.cid', cid);
-      return cid;
-    } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
-      span.setAttribute('error.type', (err as Error).name);
-      throw err;
-    } finally {
-      span.end();
-    }
-  });
+      inflightPins.set(hash, resultPromise);
+      return await resultPromise;
+    })();
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+    observeIpfsLatency('pinJson', Date.now() - start);
+  }
 }
 
-/** Pin a file buffer to IPFS via Pinata. Returns the CID. */
 export async function pinFile(buffer: Buffer, filename: string, mimeType: string): Promise<string> {
-  return tracer.startActiveSpan('ipfs.pinFile', async (span) => {
-    span.setAttribute('ipfs.filename', filename);
-    span.setAttribute('ipfs.mime_type', mimeType);
-    try {
-      if (!isPinataConfigured()) {
-        if (process.env.NODE_ENV === 'production') assertPinataConfigured();
-        logger.warn('[ipfs] Pinata not configured — returning dev stub CID for pinFile');
-        const cid = devStubCid(filename);
-        span.setAttribute('ipfs.stub', true);
-        span.setAttribute('ipfs.cid', cid);
-        return cid;
-      }
-      const form = new FormData();
-      form.append('file', buffer, { filename, contentType: mimeType });
-      const res = await axios.post(PINATA_PIN_FILE_URL, form, {
-        headers: { ...pinataHeaders(), ...form.getHeaders() },
-        maxBodyLength: Infinity,
-      });
-      const cid = res.data.IpfsHash as string;
-      span.setAttribute('ipfs.cid', cid);
-      return cid;
-    } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
-      span.setAttribute('error.type', (err as Error).name);
-      throw err;
-    } finally {
-      span.end();
+  const start = Date.now();
+  const span = tracer.startSpan('ipfs.pinFile', { attributes: { 'ipfs.filename': filename, 'ipfs.mime_type': mimeType } });
+  try {
+    if (!isPinataConfigured()) {
+      if (process.env.NODE_ENV === 'production') assertPinataConfigured();
+      logger.warn('[ipfs] Pinata not configured — returning dev stub CID for pinFile');
+      return devStubCid(filename);
     }
-  });
+    const form = new FormData();
+    form.append('file', buffer, { filename, contentType: mimeType });
+    const res = await axios.post(PINATA_PIN_FILE_URL, form, {
+      headers: { ...pinataHeaders(), ...form.getHeaders() },
+      maxBodyLength: Infinity,
+    });
+    const cid = res.data.IpfsHash as string;
+    span.setAttribute('ipfs.cid', cid);
+    return cid;
+  } catch (err) {
+    span.recordException(err as Error);
+    span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
+    throw err;
+  } finally {
+    span.end();
+    observeIpfsLatency('pinFile', Date.now() - start);
+  }
 }
 
 /** Build a public gateway URL for a CID. */
@@ -259,44 +311,85 @@ export async function getCid(uriOrCid: string): Promise<string> {
  * Rejects with a clear error in production without credentials.
  */
 export async function checkHealth(): Promise<void> {
-  return tracer.startActiveSpan('ipfs.checkHealth', async (span) => {
-    try {
-      if (!isPinataConfigured()) {
-        if (process.env.NODE_ENV === 'production') assertPinataConfigured();
-        logger.warn('[ipfs] Pinata not configured — skipping IPFS health check in dev');
-        span.setAttribute('ipfs.configured', false);
-        return;
-      }
-      span.setAttribute('ipfs.configured', true);
-      await axios.get(PINATA_TEST_URL, { headers: pinataHeaders() });
-    } catch (err) {
-      span.recordException(err as Error);
-      span.setStatus({ code: SpanStatusCode.ERROR, message: (err as Error).message });
-      span.setAttribute('error.type', (err as Error).name);
-      throw err;
-    } finally {
-      span.end();
+  const start = Date.now();
+  try {
+    if (!isPinataConfigured()) {
+      if (process.env.NODE_ENV === 'production') assertPinataConfigured();
+      logger.warn('[ipfs] Pinata not configured — skipping IPFS health check in dev');
+      return;
     }
-  });
+    await axios.get(PINATA_TEST_URL, { headers: pinataHeaders() });
+  } finally {
+    observeIpfsLatency('checkHealth', Date.now() - start);
+  }
 }
 
+const MAX_RETRIES = 5;
+const DEBOUNCE_MS = 60 * 1000; // 1 minute
+
 /**
- * Retry queued pending_pins entries. Called periodically when IPFS recovers.
+ * Retry queued pending_pins entries. Called periodically by the background worker.
  * Successfully pinned entries are removed from the queue.
+ * Failed retries are backed off exponentially.
+ * Rows exceeding MAX_RETRIES are skipped and considered permanently failed.
  */
 export async function retryPendingPins(): Promise<void> {
   if (!isPinataConfigured()) return;
-  const pending = getPendingPins();
+  const pending = await getPendingPins();
+  const now = Date.now();
+
   for (const row of pending) {
+    if (row.attempts >= MAX_RETRIES) {
+      continue; // Permanently failed
+    }
+
+    if (row.last_tried) {
+      const lastTried = new Date(row.last_tried).getTime();
+      const backoffMs = Math.pow(2, row.attempts) * DEBOUNCE_MS;
+      if (now - lastTried < backoffMs) {
+        continue; // Still in backoff window
+      }
+    }
+
     try {
       const body = JSON.parse(row.payload) as object;
       const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
       logger.info(`[ipfs] retried pending pin id=${row.id} cid=${res.data.IpfsHash as string}`);
-      deletePendingPin(row.id);
+      await deletePendingPin(row.id);
     } catch {
-      incrementPendingPinAttempts(row.id);
+      await incrementPendingPinAttempts(row.id);
+      logger.warn(`[ipfs] retry failed for pending pin id=${row.id}, attempt=${row.attempts + 1}`);
     }
   }
 }
 
-export default { pinJson, pinFile, gatewayUrl, getCid, checkHealth, retryPendingPins, clearPinJsonCache };
+// ── Unpin ────────────────────────────────────────────────────────────────────
+
+const PINATA_UNPIN_URL = 'https://api.pinata.cloud/pinning/unpin';
+
+/**
+ * Unpin a CID from Pinata.
+ *
+ * Best-effort: in dev/test without Pinata credentials this is a no-op. In
+ * production a failure is logged but does not throw — caller should catch.
+ */
+export async function unpinCid(cid: string): Promise<void> {
+  if (!isPinataConfigured()) {
+    logger.debug(`[ipfs] unpin skipped (no Pinata creds): ${cid}`);
+    return;
+  }
+  try {
+    await axios.delete(`${PINATA_UNPIN_URL}/${cid}`, { headers: pinataHeaders() });
+    logger.info(`[ipfs] unpinned ${cid}`);
+  } catch (err) {
+    // 404 means already unpinned — not an error.
+    if (axios.isAxiosError(err) && err.response?.status === 404) {
+      logger.debug(`[ipfs] unpin: CID already gone: ${cid}`);
+      return;
+    }
+    logger.warn(`[ipfs] unpin failed: ${cid}`, err instanceof Error ? err.message : String(err));
+    throw err;
+  }
+}
+
+export default { pinJson, pinFile, gatewayUrl, getCid, checkHealth, retryPendingPins, clearPinJsonCache, getPinJsonCacheSize, unpinCid };
