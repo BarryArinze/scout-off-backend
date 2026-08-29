@@ -96,14 +96,16 @@ graph TB
 
 ### Progress Tier Model
 
-Tiers are gated by real-world verification and enforced on-chain:
+Tiers are driven by the number of `milestone_approved` contract events recorded
+for the player (see [`docs/tier-promotion.md`](docs/tier-promotion.md) for the
+full taxonomy and promotion criteria):
 
-| Level | Name                  | Requirement                                                  |
-|-------|-----------------------|--------------------------------------------------------------|
-| 0     | Unverified            | Player creates profile and uploads data                      |
-| 1     | Verified Identity     | KYC passed or academy confirms active club membership        |
-| 2     | Performance Milestones| Match footage or physical stats verified by approved third party |
-| 3     | Elite Tier            | Scout feedback or trial offer logged on-chain                |
+| Level | Name        | Description                                                     |
+|-------|-------------|-----------------------------------------------------------------|
+| 0     | Unverified  | Player has registered but no milestones have been approved yet  |
+| 1     | Emerging    | At least one approved milestone — initial ability confirmed     |
+| 2     | Established | Multiple approved milestones — consistent performance on record |
+| 3     | Elite       | Six or more approved milestones — top-tier verified performance |
 
 Example: A validator submits "Scored 5 goals in Local Cup" → Soroban contract writes the milestone → player's progress bar updates → scouts see a tamper-proof history of when and how the player progressed.
 

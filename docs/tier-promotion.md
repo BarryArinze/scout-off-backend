@@ -4,6 +4,22 @@ Players carry a tier, stored as the integer `progress_level` (0–3) on the
 `players` table. A player's tier reflects how many of their submitted milestones
 the contract has approved.
 
+## Tier Taxonomy
+
+The four tiers, their canonical names, and one-line descriptions are:
+
+| Level | Name        | Description                                                       |
+| ----- | ----------- | ----------------------------------------------------------------- |
+| 0     | Unverified  | Player has registered but no milestones have been approved yet    |
+| 1     | Emerging    | At least one approved milestone — initial ability confirmed       |
+| 2     | Established | Multiple approved milestones — consistent performance on record   |
+| 3     | Elite       | Six or more approved milestones — top-tier verified performance   |
+
+> **Note:** The code-level unification of tier logic into a single shared module
+> is tracked separately (see the canonical state-machine refactor issue). This
+> table is the single source of truth for human-readable names and descriptions
+> until that work lands.
+
 ## Criteria
 
 Tier is derived **purely from the number of `milestone_approved` events recorded
