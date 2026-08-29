@@ -9,7 +9,7 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 
 | Variable | Required | Notes |
 |---|---|---|
-| `CONTRACT_ID` | ✅ | Deployed Soroban contract address |
+| `CONTRACT_ID` | ✅ | Deployed Soroban contract address; fallback for per-contract IDs (see [Contract ID Configuration](#contract-id-configuration)) |
 | `JWT_SECRET` | ✅ | Min 32 chars; rotate on compromise |
 | `HORIZON_URL` | ✅ | e.g. `https://horizon-testnet.stellar.org` |
 | `SOROBAN_RPC_URL` | ✅ | e.g. `https://soroban-testnet.stellar.org` |
@@ -20,13 +20,19 @@ Copy `.env.example` to `.env` and fill in all required values before starting th
 | `LOG_LEVEL` | — | `debug` / `info` / `warn` / `error` |
 | `LOG_SKIP_PATHS` | — | Comma-separated paths requestLogger silences (default: health + metrics probes) |
 | `LOG_SAMPLE_RATE` | — | Float 0–1 sample rate for non-skipped paths (default: `1` = log all) |
-| `STELLAR_HEALTH_CHECK_ENABLED` | — | Set `false` in staging to skip Stellar RPC check |
+| `STELLAR_HEALTH_CHECK` | — | Set `false` in staging to skip Stellar RPC check |
 | `TRUSTED_PROXY_COUNT` | — | Number of trusted reverse proxies (default: `1`). Set to the exact number of proxy hops between the internet and this server. **Fail-safe**: if the observed `X-Forwarded-For` chain has fewer entries than this value implies, `extractClientIp()` falls back to the raw socket address rather than trusting the attacker-controlled leftmost value. A chain shorter than expected (direct connection bypassing a proxy, or a client crafting a short header) will therefore appear to come from the connecting IP, not a spoofed address. |
 | `ADMIN_WALLET` | — | Single admin wallet address (for backward compatibility) |
 | `ADMIN_WALLETS` | — | Comma-separated list of admin wallet addresses (e.g., `GABC...,GDEF...`) |
 | `ADMIN_THRESHOLD` | — | Number of admin signatures required for high-value operations (default: `1`) |
+| `ADMIN_ACTION_TTL_MS` | — | TTL for pending admin multi-sig actions in milliseconds (default: `3600000` = 1 hour) |
 | `CORS_ALLOWED_ORIGINS` | — | Comma-separated CORS allowed origins (defaults per env: `*` in dev, `https://staging.scoutoff.io` in staging, `https://app.scoutoff.io,https://scoutoff.io` in prod) |
 | `ADMIN_IP_ALLOWLIST` | — | Comma-separated list of **IPv4** addresses/CIDR ranges allowed to reach admin endpoints (e.g. `192.168.1.0/24,10.0.0.1`). Unset/empty disables the check. IPv6 is not supported yet — any IPv6 client IP is rejected with 403 regardless of this setting (fail closed). |
+| `RATE_LIMIT_ENABLED` | — | Enable rate limiting (default: `true`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
+| `RATE_LIMIT_WINDOW_MS` | — | Rate limit window in milliseconds (default: `60000`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
+| `RATE_LIMIT_MAX` | — | Max requests per window per IP (default: `60`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
+| `AUTH_RATE_LIMIT_WINDOW_MS` | — | Auth rate limit window (default: `60000`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
+| `AUTH_RATE_LIMIT_MAX` | — | Max auth requests per window (default: `5`). See [docs/rate-limiting.md](docs/rate-limiting.md). |
 
 ## Build & Start
 
@@ -41,6 +47,118 @@ For development with hot-reload:
 ```bash
 npm run dev
 ```
+
+## Contract ID Configuration
+
+The backend supports both **single-contract** and **multi-contract** deployment models via a fallback chain in environment variables.
+
+### The Fallback Chain
+
+When a component needs a contract ID, it looks up the hierarchy in this order:
+
+1. **Specific contract ID** (e.g., `REGISTER_CONTRACT_ID`, `PROGRESS_CONTRACT_ID`, etc.)
+2. **Fallback: `CONTRACT_ID`** (universal contract address)
+3. **Empty string** (defaults to empty if nothing is set)
+
+This design enables two deployment patterns:
+
+#### Single-Contract Deployments (Default)
+
+In a single-contract deployment, all functionality lives in one deployed Soroban contract:
+
+```env
+# .env
+CONTRACT_ID=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+# No per-contract IDs needed; all operations use CONTRACT_ID above
+```
+
+**Example use case:** Development, testing, or smaller deployments where one contract handles player registration, progress tracking, subscriptions, and connections.
+
+#### Multi-Contract Deployments
+
+In a multi-contract deployment, separate concerns are split across different contracts:
+
+```env
+# .env
+CONTRACT_ID=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+
+# Optional per-contract overrides (each defaults to CONTRACT_ID above if not set)
+REGISTER_CONTRACT_ID=CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+PROGRESS_CONTRACT_ID=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+SUBSCRIPTION_CONTRACT_ID=CDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+CONNECTION_CONTRACT_ID=CEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+```
+
+**Example use case:** Production deployments where each domain has its own audited contract for better isolation, security, and independent upgrades.
+
+### When to Set Each Per-Contract ID
+
+| Variable | Purpose | When to Set |
+|---|---|---|
+| `REGISTER_CONTRACT_ID` | Player registration contract | Multi-contract setup with separate registration logic |
+| `PROGRESS_CONTRACT_ID` | Milestone/progress tracking contract | Multi-contract setup with separate progress tracking |
+| `SUBSCRIPTION_CONTRACT_ID` | Subscription management contract | Multi-contract setup with separate subscription logic |
+| `CONNECTION_CONTRACT_ID` | Connection/relationship contract | Multi-contract setup with separate connection logic |
+
+If any per-contract ID is **not** set, the system falls back to `CONTRACT_ID`. If `CONTRACT_ID` itself is unset, operations using that contract will fail (the system requires at least one defined contract ID).
+
+### Known Limitation: Indexer Single-Contract Assumption
+
+The event indexer (`src/services/indexer.ts`) currently assumes a **single contract** and only monitors `config.contractId` for events. In multi-contract deployments, events emitted by separate contracts (e.g., `PROGRESS_CONTRACT_ID`, `SUBSCRIPTION_CONTRACT_ID`) are **not indexed**.
+
+**Workaround:** For multi-contract deployments, deploy separate indexer instances for each contract, each pointing to a different `CONTRACT_ID`.
+
+**Tracking:** See [GitHub Issue #XXX](https://github.com/scoutoff/scout-off-backend/issues/XXX) for planned multi-contract indexer support.
+
+### Configuration Examples
+
+**Single-contract (simplest):**
+```env
+CONTRACT_ID=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+NODE_ENV=production
+NETWORK=mainnet
+# ... other required env vars
+```
+
+**Multi-contract with per-contract IDs:**
+```env
+CONTRACT_ID=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+REGISTER_CONTRACT_ID=CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+PROGRESS_CONTRACT_ID=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+SUBSCRIPTION_CONTRACT_ID=CDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+NODE_ENV=production
+NETWORK=mainnet
+# ... other required env vars
+```
+
+**Hybrid (partial multi-contract):**
+```env
+CONTRACT_ID=CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+PROGRESS_CONTRACT_ID=CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC
+# REGISTER_CONTRACT_ID, SUBSCRIPTION_CONTRACT_ID, CONNECTION_CONTRACT_ID not set
+# → registration uses CONTRACT_ID (CAAA...)
+# → progress uses PROGRESS_CONTRACT_ID (CCCC...)
+# → subscriptions use CONTRACT_ID (CAAA...)
+# → connections use CONTRACT_ID (CAAA...)
+```
+
+## Multi-Sig Admin Operations
+
+High-value admin operations require M-of-N multi-signature approval. See [docs/admin-multisig.md](docs/admin-multisig.md) for full details on the multi-sig lifecycle, state machine, endpoints, and configuration.
+
+Quick reference:
+
+1. **Configure admin wallets**: Set `ADMIN_WALLETS` to a comma-separated list of Stellar addresses (e.g., `ADMIN_WALLETS=GABC123...,GDEF456...`)
+2. **Set threshold**: Configure `ADMIN_THRESHOLD` to the minimum number of admin signatures required (e.g., `ADMIN_THRESHOLD=2`)
+3. **Backward compatibility**: If `ADMIN_WALLETS` is not set, the system falls back to `ADMIN_WALLET` with threshold 1
+4. **TTL for proposals**: Configure `ADMIN_ACTION_TTL_MS` to control how long pending approvals remain valid (default: 1 hour)
+5. **Operations affected**:
+   - `POST /api/admin/fees` (withdraw fees)
+   - `POST /api/admin/contract/pause`
+   - `POST /api/admin/contract/unpause`
+   - Other high-value admin endpoints
+6. **Single-signer immediate execution**: When `ADMIN_THRESHOLD=1`, operations execute immediately without multi-sig approval
 
 ## Database Migrations
 
@@ -175,6 +293,26 @@ find /var/backups/scout-off -name '*.db' -mtime +7 -delete
 
 For S3, configure an [Object Lifecycle rule](https://docs.aws.amazon.com/AmazonS3/latest/userguide/object-lifecycle-mgmt.html) to expire objects after your desired retention window.
 
+## Rate Limiting
+
+For detailed documentation on rate limiting configuration, behavior, and namespacing, see [docs/rate-limiting.md](docs/rate-limiting.md).
+
+**Quick summary:**
+- Per-IP rate limiting via in-memory store (configurable window and max requests)
+- Per-wallet rate limiting for authenticated endpoints
+- Separate auth endpoint limits for brute-force protection
+- Fail-open on store error (prioritizes availability)
+
+## Reindexing
+
+For detailed documentation on reindexing workflows, status polling, and operational considerations, see [docs/reindexing.md](docs/reindexing.md).
+
+**Quick summary:**
+- Reindex by posting to `POST /api/admin/indexer/reindex` with `{ fromLedger: N }`
+- Poll status via separate endpoint (exact URL TBD in docs/reindexing.md)
+- Single reindex at a time (singleton guard enforced)
+- Cursor is rewound on completion (see docs for implications)
+
 ## CI/CD Expectations
 
 - CI runs on every push via `.github/workflows/ci.yml`
@@ -197,19 +335,6 @@ Recommended metrics to track:
 - HTTP 5xx error rate
 - Event indexer lag (gap between latest on-chain event and last indexed event)
 - SQLite file size growth
-
-## Multi-Sig Admin Operations
-
-High-value admin operations (withdraw fees, pause/unpause contract) require M-of-N multi-signature approval:
-
-1. **Configure admin wallets**: Set `ADMIN_WALLETS` to a comma-separated list of Stellar addresses (e.g., `ADMIN_WALLETS=GABC123...,GDEF456...`)
-2. **Set threshold**: Configure `ADMIN_THRESHOLD` to the minimum number of admin signatures required (e.g., `ADMIN_THRESHOLD=2`)
-3. **Backward compatibility**: If `ADMIN_WALLETS` is not set, the system falls back to `ADMIN_WALLET` with threshold 1
-4. **Operations affected**:
-   - `POST /api/admin/fees` (withdraw fees)
-   - `POST /api/admin/contract/pause`
-   - `POST /api/admin/contract/unpause`
-5. **Single-signer attempts**: When threshold > 1, single-admin attempts return 403 with "High-value operation requires multiple admin signatures"
 
 ## Smoke Tests After Deployment
 
