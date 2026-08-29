@@ -36,7 +36,7 @@ const BATCH_DELAY_MS = 50;
 
 // ── Status ────────────────────────────────────────────────────────────────────
 
-export type ReindexStatus = 'idle' | 'running' | 'complete' | 'error';
+export type ReindexStatus = 'idle' | 'running' | 'complete' | 'error' | 'cancelled';
 
 export interface ReindexState {
   status: ReindexStatus;
@@ -48,6 +48,9 @@ export interface ReindexState {
   startedAt: string | null;
   completedAt: string | null;
   errorMessage: string | null;
+  /** Set when the job was cancelled — records who cancelled and the last processed ledger. */
+  cancelledBy: string | null;
+  lastProcessedLedger: number | null;
 }
 
 const initialState = (): ReindexState => ({
@@ -60,6 +63,8 @@ const initialState = (): ReindexState => ({
   startedAt: null,
   completedAt: null,
   errorMessage: null,
+  cancelledBy: null,
+  lastProcessedLedger: null,
 });
 
 let _state: ReindexState = initialState();
@@ -72,6 +77,36 @@ export function getReindexStatus(): Readonly<ReindexState> {
 /** Reset state — used in tests only. */
 export function _resetReindexState(): void {
   _state = initialState();
+  _cancelFlag = false;
+}
+
+// ── Cancellation ──────────────────────────────────────────────────────────────
+
+/**
+ * Module-level cancel flag. The batch loop checks this between batches.
+ * NOTE: This is a process-local flag. For horizontally-scaled deployments a
+ * shared-storage flag (e.g. Redis key) would be needed — see issue description.
+ */
+let _cancelFlag = false;
+
+/**
+ * Request cancellation of the currently running reindex job.
+ *
+ * The job loop checks this flag after each batch; cancellation takes effect
+ * within one batch iteration (≤ BATCH_SIZE ledgers).
+ *
+ * @returns true if a running job was found and flagged for cancellation;
+ *          false if no job is currently running.
+ */
+export function cancelReindex(adminWallet: string): boolean {
+  if (_state.status !== 'running') {
+    return false;
+  }
+  _cancelFlag = true;
+  // Record who requested cancellation in state so the audit log captures it.
+  _state = { ..._state, cancelledBy: adminWallet };
+  logger.info(`[reindex] cancellation requested by admin=${adminWallet}`);
+  return true;
 }
 
 // ── Core background job ───────────────────────────────────────────────────────
@@ -96,6 +131,8 @@ export function startReindex(
     throw new ReindexAlreadyRunningError('A reindex job is already in progress.');
   }
 
+  _cancelFlag = false; // reset any stale cancel flag from a previous job
+
   _state = {
     status: 'running',
     fromLedger,
@@ -106,6 +143,8 @@ export function startReindex(
     startedAt: new Date().toISOString(),
     completedAt: null,
     errorMessage: null,
+    cancelledBy: null,
+    lastProcessedLedger: null,
   };
 
   logAuditEvent({
@@ -209,6 +248,36 @@ async function _runReindex(
       // Throttle: wait between batches to avoid overwhelming the RPC.
       if (currentBatchStart <= toLedger) {
         await _delay(BATCH_DELAY_MS);
+      }
+
+      // ── Cooperative cancellation check-point ──────────────────────────────
+      // Check the cancel flag AFTER the delay so the cancellation point is
+      // well-defined: one full batch is always completed before stopping.
+      if (_cancelFlag) {
+        const cancelledAt = new Date().toISOString();
+        const lastLedger = batchEnd;
+        logger.info(
+          `[reindex] cancelled at ledger=${lastLedger} eventsInserted=${eventsInserted} admin=${adminWallet}`,
+        );
+        _state = {
+          ..._state,
+          status: 'cancelled',
+          completedAt: cancelledAt,
+          lastProcessedLedger: lastLedger,
+          errorMessage: null,
+        };
+        logAuditEvent({
+          action: 'reindex_cancelled',
+          adminWallet: _state.cancelledBy ?? adminWallet,
+          queryParams: {
+            fromLedger,
+            toLedger,
+            lastProcessedLedger: lastLedger,
+            eventsInserted,
+          },
+          timestamp: cancelledAt,
+        }).catch(() => {});
+        return;
       }
     }
 

@@ -11,6 +11,7 @@ import { z } from 'zod';
 import {
   startReindex,
   getReindexStatus,
+  cancelReindex,
   MAX_REINDEX_RANGE,
   ReindexAlreadyRunningError,
 } from '../services/reindexService';
@@ -149,4 +150,53 @@ export function reindexStatusHandler(
       error_message: s.errorMessage,
     },
   });
+}
+
+// ── POST /api/admin/reindex/cancel ────────────────────────────────────────────
+
+/**
+ * Cooperatively cancel the currently running background reindex job.
+ *
+ * Sets a module-level cancel flag that the batch loop checks after each
+ * batch. The job transitions to 'cancelled' within one batch iteration and
+ * persists the last-processed ledger for auditing.
+ *
+ * NOTE: This is a process-local flag. For multi-instance deployments a shared
+ * flag (e.g. Redis) would be required — this is labelled as a first step.
+ *
+ * @response 200 { success: true, data: { status: 'cancel_requested', message } }
+ * @response 409 { success: false, error: string } - no job is running
+ * @auth Bearer (admin role required)
+ */
+export function cancelReindexHandler(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): void {
+  try {
+    const adminWallet = req.account ?? 'unknown';
+    const wasCancelled = cancelReindex(adminWallet);
+
+    if (!wasCancelled) {
+      res.status(409).json({
+        success: false,
+        error: 'No reindex job is currently running.',
+        code: ErrorCode.CONFLICT,
+      });
+      return;
+    }
+
+    logger.info(`[reindex] cancel acknowledged by admin=${adminWallet}`);
+
+    res.json({
+      success: true,
+      data: {
+        status: 'cancel_requested',
+        message:
+          'Cancellation requested. The job will stop after the current batch completes.',
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
 }

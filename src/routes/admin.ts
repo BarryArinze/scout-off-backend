@@ -7,7 +7,7 @@ import { getFeatureFlags, updateFeatureFlag, toggleFeatureFlag } from '../contro
 import { exportEvents } from '../controllers/exportController';
 import { listDeadLetters, replayDeadLetter, purgeOldDeadLetters, requeueDeadLetter, purgeDeadLetter } from '../controllers/webhookAdminController';
 import { setIpReputationController, getIpReputationController } from '../controllers/ipReputationController';
-import { triggerReindex, reindexStatusHandler } from '../controllers/reindexController';
+import { triggerReindex, reindexStatusHandler, cancelReindexHandler } from '../controllers/reindexController';
 import { requireRole } from '../middleware/auth';
 import { idempotency } from '../middleware/idempotency';
 import { ipAllowlistMiddleware } from '../middleware/ipAllowlist';
@@ -525,7 +525,7 @@ router.route('/reindex')
  * @response 200 {
  *   success: true,
  *   data: {
- *     status: 'idle' | 'running' | 'complete' | 'error',
+ *     status: 'idle' | 'running' | 'complete' | 'error' | 'cancelled',
  *     from_ledger, to_ledger,
  *     ledgers_processed, ledgers_total,
  *     events_inserted,
@@ -537,6 +537,26 @@ router.route('/reindex')
 router.route('/reindex/status')
   .get(requireRole('admin'), reindexStatusHandler)
   .all(methodNotAllowed(['GET', 'HEAD']));
+
+/**
+ * POST /api/admin/reindex/cancel
+ *
+ * Cooperatively cancel a running background reindex job. Sets a cancel flag
+ * that the batch loop checks after each batch; the job transitions to
+ * 'cancelled' within one batch iteration and persists the last-processed ledger.
+ *
+ * Returns 409 when no job is currently running.
+ *
+ * NOTE: process-local flag only — multi-instance support requires a shared
+ * flag (e.g. Redis) and is tracked as a follow-up.
+ *
+ * @response 200 { success: true, data: { status: 'cancel_requested', message } }
+ * @response 409 { success: false, error: string } - no job running
+ * @auth Bearer (admin role required)
+ */
+router.route('/reindex/cancel')
+  .post(requireRole('admin'), cancelReindexHandler)
+  .all(methodNotAllowed(['POST']));
 
 /**
  * GET /api/admin/webhooks/dead-letters
