@@ -12,6 +12,7 @@ import {
   insertAuditLog, getAuditLogs, getAuditLogsCount, getAllAuditLogRows,
   getTrialOfferById, insertTrialOffer, respondToTrialOffer,
   insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts,
+  getStalePendingPins, updatePendingPinReconciliation, countStuckPendingPins,
   upsertScoutNote, getScoutNote, getScoutNotes,
   insertApiKey, listApiKeysByWallet, revokeApiKeyById, getApiKeyByHash, getAllActiveApiKeys,
   getActiveApiKeyByLookupHash, getActiveApiKeysAwaitingLookupHash, setApiKeyLookupHash,
@@ -361,6 +362,20 @@ describe('all DB functions - SQL injection resistance (comprehensive)', () => {
 
   it('incrementPendingPinAttempts with injection payload', async () => {
     await incrementPendingPinAttempts(9999);
+  });
+
+  it('getStalePendingPins with injection payload', async () => {
+    const rows = await getStalePendingPins(inj);
+    expect(Array.isArray(rows)).toBe(true);
+  });
+
+  it('updatePendingPinReconciliation with injection payload', async () => {
+    await updatePendingPinReconciliation({ id: 9999, status: inj, expiredReason: inj, resolvedCid: inj, lastReconciledAt: inj });
+  });
+
+  it('countStuckPendingPins with injection payload', async () => {
+    const count = await countStuckPendingPins(inj);
+    expect(typeof count).toBe('number');
   });
 
   it('upsertScoutNote with injection payloads', async () => {
