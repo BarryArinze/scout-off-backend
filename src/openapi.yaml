@@ -1733,13 +1733,14 @@ paths:
       tags:
         - players
       summary: >-
-        List a player's milestones, merging on-chain milestone events with pending/approved
-        submission events.
+        List a player's milestones, merging on-chain milestone events with
+        pending/approved/rejected submission events.
       operationId: getPlayerMilestones
       description: |-
         List a player's milestones, merging on-chain milestone events with
-        pending/approved submission events. Supports `status` (pending|approved|all),
-        `sortBy`, `order`/`sort`, and `limit` (max 50) query params.
+        pending/approved/rejected submission events. Supports `status`
+        (pending|approved|rejected; omit for all), `sortBy`, `order`/`sort`,
+        and `limit` (max 50) query params.
       parameters:
         - name: playerId
           in: path
@@ -1747,6 +1748,54 @@ paths:
           schema:
             type: string
           description: Player's unique identifier (cuid2)
+        - name: status
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - pending
+              - approved
+              - rejected
+          description: >-
+            Filter by milestone status. Omit to include approved, pending, and
+            on-chain milestones. `rejected` returns milestone_rejected events only.
+        - name: sortBy
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - submittedAt
+              - approvedAt
+            default: submittedAt
+        - name: order
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+            default: asc
+          description: Sort direction (`sort` is accepted as an alias)
+        - name: sort
+          in: query
+          required: false
+          schema:
+            type: string
+            enum:
+              - asc
+              - desc
+          description: Alias for `order`; takes precedence when both are set
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+            default: 20
       responses:
         '200':
           description: '{ success: true, data: Milestone[] }'

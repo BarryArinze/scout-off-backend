@@ -110,7 +110,7 @@ export const milestoneSchema = z.object({
   playerId: z.string().min(1),
   milestoneType: z.enum(['identity', 'performance', 'trial_offer']),
   evidenceUri: z.string().min(1).refine(isValidMetadataUri, URI_VALIDATION_ERROR),
-});
+}).strict();
 
 export const pendingQuerySchema = z.object({
   region: z.string().optional(),
@@ -216,7 +216,7 @@ export async function getPendingMilestones(req: Request, res: Response, next: Ne
 
 export const bulkApproveSchema = z.object({
   milestoneIds: z.array(z.string()).min(1),
-});
+}).strict();
 
 export async function approveBulkMilestones(req: Request, res: Response, next: NextFunction): Promise<void> {
 try {

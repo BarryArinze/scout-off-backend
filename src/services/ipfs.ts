@@ -119,6 +119,9 @@ function hashMetadata(body: object): string {
   return createHash('sha256').update(canonicalStringify(body)).digest('hex');
 }
 
+/** Shared axios timeout option for all Pinata/IPFS HTTP calls (#1143). */
+const axiosTimeout = { timeout: config.ipfsHttpTimeoutMs };
+
 interface PinCacheEntry { cid: string; timestamp: number; }
 
 /**
@@ -240,7 +243,7 @@ export async function pinJson(body: object): Promise<string> {
           }
 
           try {
-            const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
+            const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders(), ...axiosTimeout });
             const uploadedCid = res.data.IpfsHash as string;
             // Persist the CID into the pending_pins row BEFORE deleting it so any
             // other instance waiting in its poll loop can read it via
@@ -288,6 +291,7 @@ export async function pinFile(buffer: Buffer, filename: string, mimeType: string
     const res = await axios.post(PINATA_PIN_FILE_URL, form, {
       headers: { ...pinataHeaders(), ...form.getHeaders() },
       maxBodyLength: Infinity,
+      ...axiosTimeout,
     });
     const cid = res.data.IpfsHash as string;
     span.setAttribute('ipfs.cid', cid);
@@ -330,7 +334,7 @@ export async function checkHealth(): Promise<void> {
       logger.warn('[ipfs] Pinata not configured — skipping IPFS health check in dev');
       return;
     }
-    await axios.get(PINATA_TEST_URL, { headers: pinataHeaders() });
+    await axios.get(PINATA_TEST_URL, { headers: pinataHeaders(), ...axiosTimeout });
   } finally {
     observeIpfsLatency('checkHealth', Date.now() - start);
   }
@@ -365,7 +369,7 @@ export async function retryPendingPins(): Promise<void> {
 
     try {
       const body = JSON.parse(row.payload) as object;
-      const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
+      const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders(), ...axiosTimeout });
       logger.info(`[ipfs] retried pending pin id=${row.id} cid=${res.data.IpfsHash as string}`);
       await deletePendingPin(row.id);
     } catch {
@@ -391,7 +395,7 @@ export async function unpinCid(cid: string): Promise<void> {
     return;
   }
   try {
-    await axios.delete(`${PINATA_UNPIN_URL}/${cid}`, { headers: pinataHeaders() });
+    await axios.delete(`${PINATA_UNPIN_URL}/${cid}`, { headers: pinataHeaders(), ...axiosTimeout });
     logger.info(`[ipfs] unpinned ${cid}`);
   } catch (err) {
     // 404 means already unpinned — not an error.

@@ -19,7 +19,7 @@ import { ErrorCode } from '../utils/errorCodes';
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-const reindexBodySchema = z
+export const reindexBodySchema = z
   .object({
     fromLedger: z
       .number({ required_error: 'fromLedger is required' })
@@ -30,6 +30,7 @@ const reindexBodySchema = z
       .int('toLedger must be an integer')
       .min(1, 'toLedger must be ≥ 1'),
   })
+  .strict()
   .refine((d) => d.fromLedger < d.toLedger, {
     message: 'fromLedger must be less than toLedger',
     path: ['fromLedger'],

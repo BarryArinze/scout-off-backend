@@ -16,7 +16,7 @@ import { logger } from '../utils/logger';
 
 export const upsertNoteSchema = z.object({
   note: z.string().min(1, 'Note text is required').max(10_000, 'Note must be 10 000 characters or fewer'),
-});
+}).strict();
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 
@@ -135,7 +135,7 @@ export const noteContentSchema = z.object({
     .string()
     .min(1, 'content is required')
     .max(MAX_NOTE_CONTENT_LENGTH, `content must be ${MAX_NOTE_CONTENT_LENGTH} characters or fewer`),
-});
+}).strict();
 
 /**
  * POST /api/scouts/:wallet/players/:playerId/notes
