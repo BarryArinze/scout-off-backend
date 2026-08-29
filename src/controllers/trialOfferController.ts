@@ -10,7 +10,7 @@ import config from '../config';
 
 export const rejectOfferSchema = z.object({
   reason: z.string().max(500).optional(),
-});
+}).strict();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

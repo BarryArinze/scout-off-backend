@@ -6,7 +6,7 @@ import config from "./config";
 import { logger } from "./utils/logger";
 import { initDb, closeDb } from "./db";
 import { stellarHealth } from "./services/stellar";
-import { checkHealth, retryPendingPins } from "./services/ipfs";
+import { checkHealth, retryPendingPins, reconcilePendingPins } from "./services/ipfs";
 import { indexEvents } from "./services/indexer";
 import { fetchLastIndexedLedger, persistLastIndexedLedger } from "./db";
 import { initBlocklist } from "./services/tokenBlocklist";
@@ -109,6 +109,18 @@ async function startServer() {
 
   const retryInterval = setInterval(retryPins, 30_000);
 
+  // Scheduled reconciliation of pending pins against Pinata & IPFS gateways
+  const reconcilePins = async () => {
+    try {
+      await reconcilePendingPins();
+    } catch (err) {
+      logger.error("IPFS reconcile worker error:", (err as Error).message);
+    }
+  };
+
+  reconcilePins();
+  const reconcileInterval = setInterval(reconcilePins, config.ipfsReconcileIntervalMs);
+
   const SHUTDOWN_TIMEOUT_MS = 10_000;
   let isShuttingDown = false;
 
@@ -127,6 +139,7 @@ async function startServer() {
 
     clearInterval(pollInterval);
     clearInterval(retryInterval);
+    clearInterval(reconcileInterval);
 
     server.close(async (err) => {
       if (err) {

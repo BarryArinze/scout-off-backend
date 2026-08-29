@@ -53,7 +53,7 @@ export const registerWebhookSchema = z.object({
     .array(z.enum(KNOWN_EVENT_TYPES as [ContractEventType, ...ContractEventType[]]))
     .min(1, 'eventTypes must contain at least one event type')
     .optional(),
-});
+}).strict();
 
 export type RegisterWebhookRequest = z.infer<typeof registerWebhookSchema>;
 

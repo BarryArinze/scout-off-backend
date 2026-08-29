@@ -142,9 +142,8 @@ app.set('etag', false);
 
 // Apply CORS with the callback-based options built above.
 // Also handle pre-flight OPTIONS requests explicitly so they short-circuit
-// before any auth or body-parser middleware runs.
-// (`/*splat` is the Express 5 spelling of the Express 4 `*` wildcard route —
-// plain `'*'` is rejected by path-to-regexp v8.)
+// before any auth or body-parser middleware runs. Express 5 (path-to-regexp
+// v8) rejects a bare '*' route — '/*splat' is the v8 catch-all form.
 app.options('/*splat', cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(compression({

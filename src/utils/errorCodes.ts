@@ -49,6 +49,19 @@ export const ErrorCode = {
   WALLET_MISMATCH:       'WALLET_MISMATCH',
   FEATURE_DISABLED:      'FEATURE_DISABLED',
 
+  // ── Conditional requests / optimistic concurrency ─────────────────────────
+  /**
+   * HTTP 412 — an If-Match header was supplied but does not match the
+   * current version of the resource (e.g. PUT /api/players/:playerId after
+   * the profile was updated elsewhere).
+   */
+  PRECONDITION_FAILED:   'PRECONDITION_FAILED',
+  /**
+   * HTTP 428 — the request requires a conditional header (If-Match) that
+   * was not supplied, e.g. PUT /api/players/:playerId without one.
+   */
+  PRECONDITION_REQUIRED: 'PRECONDITION_REQUIRED',
+
   // ── Multi-sig administration ───────────────────────────────────────────────
   EXPIRED_ACTION:        'EXPIRED_ACTION',
   ACTION_EXECUTED:       'ACTION_EXECUTED',

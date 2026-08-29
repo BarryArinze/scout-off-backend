@@ -171,7 +171,7 @@ async function resolvePreMigrationApiKey(rawKey: string, lookupHash: string): Pr
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
-const issueKeySchema = z.object({
+export const issueKeySchema = z.object({
   label: z.string().max(100).default(''),
   /**
    * Optional explicit scope list. Omitted → legacy key with unrestricted
@@ -185,7 +185,7 @@ const issueKeySchema = z.object({
    * explicitly request a non-expiring key.
    */
   expiresInDays: z.number().int().min(0).optional(),
-});
+}).strict();
 
 // ── Key rotation (#676) ─────────────────────────────────────────────────────
 
@@ -194,7 +194,7 @@ const DEFAULT_ROTATION_GRACE_PERIOD_SECONDS = 24 * 60 * 60;
 /** Upper bound on a caller-supplied grace period, to keep "grace" from becoming indefinite. */
 const MAX_ROTATION_GRACE_PERIOD_SECONDS = 7 * 24 * 60 * 60;
 
-const rotateKeySchema = z.object({
+export const rotateKeySchema = z.object({
   /**
    * How long the old key keeps authenticating after rotation, in seconds.
    * Omitted → DEFAULT_ROTATION_GRACE_PERIOD_SECONDS. 0 revokes the old key
@@ -206,7 +206,7 @@ const rotateKeySchema = z.object({
     .min(0)
     .max(MAX_ROTATION_GRACE_PERIOD_SECONDS)
     .default(DEFAULT_ROTATION_GRACE_PERIOD_SECONDS),
-});
+}).strict().default({});
 
 // ─── Handlers ─────────────────────────────────────────────────────────────────
 

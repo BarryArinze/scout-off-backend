@@ -361,6 +361,9 @@ describe('runMigrations — integration suite (#508)', () => {
         expect(cols).toContain('attempts');
         expect(cols).toContain('created_at');
         expect(cols).toContain('last_tried');
+        expect(cols).toContain('status');
+        expect(cols).toContain('expired_reason');
+        expect(cols).toContain('last_reconciled_at');
       });
     });
 

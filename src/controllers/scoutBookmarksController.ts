@@ -6,6 +6,7 @@
  * response is consistent with the player list endpoint.
  */
 import { Request, Response, NextFunction } from 'express';
+import { z } from 'zod';
 import {
   getPlayerById,
   insertBookmark,
@@ -24,6 +25,18 @@ import {
 } from '../db';
 import { getTierMeta } from '../utils/tier';
 import { logger } from '../utils/logger';
+
+// ─── Validation ───────────────────────────────────────────────────────────────
+
+export const addBookmarkSchema = z.object({
+  playerId: z.string().min(1),
+  folderId: z.number().int().optional().nullable(),
+  note: z.string().max(2000).optional().nullable(),
+}).strict();
+
+export const createBookmarkFolderSchema = z.object({
+  name: z.string().min(1).max(100),
+}).strict();
 
 // ─── Serialization (mirrors filterPlayers in playerController.ts) ─────────────
 

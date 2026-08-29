@@ -1981,7 +1981,7 @@
         ],
         "summary": "Fetch a single player profile, including a live `offerCount`.",
         "operationId": "getPlayer",
-        "description": "Fetch a single player profile, including a live `offerCount`. Deactivated\nprofiles return 404 to non-owners/non-admins. Supports conditional\nrequests via ETag (304 when `If-None-Match` matches).",
+        "description": "Fetch a single player profile, including a live `offerCount`. Deactivated\nprofiles return 404 to non-owners/non-admins. Supports conditional\nrequests via ETag (304 when `If-None-Match` matches). The same ETag is the\nversion token for optimistic concurrency — echo it as `If-Match` on PUT.",
         "parameters": [
           {
             "name": "playerId",
@@ -2020,7 +2020,7 @@
         ],
         "summary": "Update a player's profile metadata.",
         "operationId": "updatePlayer",
-        "description": "Update a player's profile metadata. Owner-only. Accepts either a raw\n`metadata` object (pinned to IPFS by the backend) or a pre-pinned\n`metadataUri`.",
+        "description": "Update a player's profile metadata. Owner-only. Accepts either a raw\n`metadata` object (pinned to IPFS by the backend) or a pre-pinned\n`metadataUri`. Optimistic concurrency (#1151): the ETag returned by GET\nmust be echoed in the `If-Match` header. A missing header is rejected with\n428, a stale one with 412 (no write happens); `If-Match: *` is the\ndocumented override.",
         "parameters": [
           {
             "name": "playerId",
@@ -2030,6 +2030,15 @@
               "type": "string"
             },
             "description": "Player's unique identifier (cuid2)"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ETag from GET /api/players/:playerId (required; \"*\" to override)"
           }
         ],
         "requestBody": {
@@ -2081,6 +2090,12 @@
           },
           "404": {
             "description": "{ success: false, error: string } - Player not found"
+          },
+          "412": {
+            "description": "{ success: false, error: string } - If-Match does not match the current profile version"
+          },
+          "428": {
+            "description": "{ success: false, error: string } - If-Match header required"
           }
         },
         "security": [
@@ -2363,9 +2378,9 @@
         "tags": [
           "players"
         ],
-        "summary": "List a player's milestones, merging on-chain milestone events with pending/approved submission events.",
+        "summary": "List a player's milestones, merging on-chain milestone events with pending/approved/rejected submission events.",
         "operationId": "getPlayerMilestones",
-        "description": "List a player's milestones, merging on-chain milestone events with\npending/approved submission events. Supports `status` (pending|approved|all),\n`sortBy`, `order`/`sort`, and `limit` (max 50) query params.",
+        "description": "List a player's milestones, merging on-chain milestone events with\npending/approved/rejected submission events. Supports `status`\n(pending|approved|rejected; omit for all), `sortBy`, `order`/`sort`,\nand `limit` (max 50) query params.",
         "parameters": [
           {
             "name": "playerId",
@@ -2375,6 +2390,71 @@
               "type": "string"
             },
             "description": "Player's unique identifier (cuid2)"
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "pending",
+                "approved",
+                "rejected"
+              ]
+            },
+            "description": "Filter by milestone status. Omit to include approved, pending, and on-chain milestones. `rejected` returns milestone_rejected events only."
+          },
+          {
+            "name": "sortBy",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "submittedAt",
+                "approvedAt"
+              ],
+              "default": "submittedAt"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ],
+              "default": "asc"
+            },
+            "description": "Sort direction (`sort` is accepted as an alias)"
+          },
+          {
+            "name": "sort",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            },
+            "description": "Alias for `order`; takes precedence when both are set"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            }
           }
         ],
         "responses": {

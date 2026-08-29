@@ -223,8 +223,17 @@ export function decrementSseConnections(): void {
   sseConnectionsActive = Math.max(0, sseConnectionsActive - 1);
 }
 
-export function getSseConnectionsActive(): number {
-  return sseConnectionsActive;
+// ─── Stuck pending pins gauge ─────────────────────────────────────────────────
+
+/** In-memory gauge for currently stuck pending IPFS pins. */
+let stuckPendingPinsCount = 0;
+
+export function setStuckPendingPinsCount(count: number): void {
+  stuckPendingPinsCount = Math.max(0, count);
+}
+
+export function getStuckPendingPinsCount(): number {
+  return stuckPendingPinsCount;
 }
 
 /** Resets every metric store. Intended for test isolation. */
@@ -239,6 +248,7 @@ export function resetMetrics(): void {
   cacheCountsStore.misses = 0;
   cacheCountsStore.evictions = 0;
   cacheInvalidationStore.total = 0;
+  stuckPendingPinsCount = 0;
   resetIpReputationCounters();
 }
 
@@ -364,6 +374,8 @@ export interface SerializeMetricsExtras {
   indexerLedgerLag?: number;
   /** Optional sse_connections_active gauge value, injected by the caller. */
   sseConnectionsActive?: number;
+  /** Optional stuck_pending_pins_count gauge value, injected by the caller. */
+  stuckPendingPinsCount?: number;
 }
 
 /**
@@ -477,10 +489,11 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
     lines.push(`indexer_ledger_lag ${extras.indexerLedgerLag}`);
   }
 
-  // Fee withdrawal DB-write failure counter.
-  lines.push('# HELP scout_off_fee_withdrawal_db_write_failures_total Total number of on-chain fee withdrawals whose DB record failed to write');
-  lines.push('# TYPE scout_off_fee_withdrawal_db_write_failures_total counter');
-  lines.push(`scout_off_fee_withdrawal_db_write_failures_total ${feeWithdrawalDbWriteFailuresStore.total}`);
+  // Stuck pending IPFS pins gauge.
+  const stuckPins = extras.stuckPendingPinsCount !== undefined ? extras.stuckPendingPinsCount : getStuckPendingPinsCount();
+  lines.push('# HELP stuck_pending_pins_count Current number of stuck pending IPFS pins');
+  lines.push('# TYPE stuck_pending_pins_count gauge');
+  lines.push(`stuck_pending_pins_count ${stuckPins}`);
 
   // IP reputation counters.
   lines.push('# HELP ip_reputation_blocked_total Total number of requests blocked by IP reputation scoring');
@@ -497,9 +510,17 @@ export function serializeMetrics(extras: SerializeMetricsExtras = {}): string {
   * Builds the GET /metrics Express handler. The indexer-lag getter is injected so
   * this module never imports the indexer.
   */
-export function createMetricsHandler(getIndexerLedgerLag: () => number = () => 0, getSseConnectionsActive: () => number = () => 0) {
+export function createMetricsHandler(
+  getIndexerLedgerLag: () => number = () => 0,
+  getSseConnectionsActive: () => number = () => 0,
+  getStuckPinsCount: () => number = () => getStuckPendingPinsCount(),
+) {
   return (_req: Request, res: Response): void => {
     res.set('Content-Type', PROMETHEUS_CONTENT_TYPE);
-    res.send(serializeMetrics({ indexerLedgerLag: getIndexerLedgerLag(), sseConnectionsActive: getSseConnectionsActive() }));
+    res.send(serializeMetrics({
+      indexerLedgerLag: getIndexerLedgerLag(),
+      sseConnectionsActive: getSseConnectionsActive(),
+      stuckPendingPinsCount: getStuckPinsCount(),
+    }));
   };
 }

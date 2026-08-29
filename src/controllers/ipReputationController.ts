@@ -1,6 +1,12 @@
 import { Request, Response } from 'express';
+import { z } from 'zod';
 import { setIpScore, getReputation } from '../services/ipReputation';
 import { isValidIpAddress } from '../utils/validators';
+
+export const setIpReputationSchema = z.object({
+  ip: z.string().min(1),
+  score: z.number().int().min(0).max(100),
+}).strict();
 
 /**
  * POST /api/admin/ip-allowlist
@@ -14,20 +20,19 @@ import { isValidIpAddress } from '../utils/validators';
  * @response 400 { success: false, error: string } - ip missing, malformed, or score out of range
  */
 export function setIpReputationController(req: Request, res: Response): void {
-  const { ip, score } = req.body as { ip?: string; score?: number };
-
-  if (!ip || typeof ip !== 'string' || ip.trim() === '') {
-    res.status(400).json({ success: false, error: 'ip is required' });
+  const parsed = setIpReputationSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({
+      success: false,
+      error: parsed.error.errors[0]?.message ?? 'Validation error',
+    });
     return;
   }
+
+  const { ip, score } = parsed.data;
 
   if (!isValidIpAddress(ip.trim())) {
     res.status(400).json({ success: false, error: 'ip must be a valid IPv4 or IPv6 address' });
-    return;
-  }
-
-  if (score === undefined || typeof score !== 'number' || score < 0 || score > 100) {
-    res.status(400).json({ success: false, error: 'score must be a number between 0 and 100' });
     return;
   }
 

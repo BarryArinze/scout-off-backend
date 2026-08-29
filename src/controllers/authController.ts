@@ -20,14 +20,14 @@ const challengeSchema = z.object({
   ),
 });
 
-const tokenSchema = z.object({
+export const tokenSchema = z.object({
   transaction: z.string().min(1),
   role: z.enum(['player', 'scout', 'validator', 'admin']).optional(),
-});
+}).strict();
 
-const refreshSchema = z.object({
+export const refreshSchema = z.object({
   refreshToken: z.string().min(1),
-});
+}).strict();
 
 // ─── Token issuance helpers ────────────────────────────────────────────────────
 
@@ -226,9 +226,9 @@ try {
 
 // ─── POST /auth/logout ─────────────────────────────────────────────────────────
 
-const logoutSchema = z.object({
+export const logoutSchema = z.object({
   refreshToken: z.string().min(1).optional(),
-});
+}).strict().default({});
 
 /**
  * POST /auth/logout

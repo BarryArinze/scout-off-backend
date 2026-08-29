@@ -48,8 +48,20 @@ import FormData from 'form-data';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { logger } from '../utils/logger';
-import { insertPendingPin, getPendingPins, deletePendingPin, deletePendingPinByHash, isPendingPinByHash, incrementPendingPinAttempts, setPendingPinResolvedCid, getResolvedCidByHash } from '../db';
-import { observeIpfsLatency } from '../middleware/metrics';
+import {
+  insertPendingPin,
+  getPendingPins,
+  deletePendingPin,
+  deletePendingPinByHash,
+  isPendingPinByHash,
+  incrementPendingPinAttempts,
+  setPendingPinResolvedCid,
+  getResolvedCidByHash,
+  getStalePendingPins,
+  updatePendingPinReconciliation,
+  countStuckPendingPins,
+} from '../db';
+import { observeIpfsLatency, setStuckPendingPinsCount } from '../middleware/metrics';
 
 const tracer = trace.getTracer('scout-off-backend');
 
@@ -106,6 +118,9 @@ function canonicalStringify(value: unknown): string {
 function hashMetadata(body: object): string {
   return createHash('sha256').update(canonicalStringify(body)).digest('hex');
 }
+
+/** Shared axios timeout option for all Pinata/IPFS HTTP calls (#1143). */
+const axiosTimeout = { timeout: config.ipfsHttpTimeoutMs };
 
 interface PinCacheEntry { cid: string; timestamp: number; }
 
@@ -228,7 +243,7 @@ export async function pinJson(body: object): Promise<string> {
           }
 
           try {
-            const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
+            const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders(), ...axiosTimeout });
             const uploadedCid = res.data.IpfsHash as string;
             // Persist the CID into the pending_pins row BEFORE deleting it so any
             // other instance waiting in its poll loop can read it via
@@ -276,6 +291,7 @@ export async function pinFile(buffer: Buffer, filename: string, mimeType: string
     const res = await axios.post(PINATA_PIN_FILE_URL, form, {
       headers: { ...pinataHeaders(), ...form.getHeaders() },
       maxBodyLength: Infinity,
+      ...axiosTimeout,
     });
     const cid = res.data.IpfsHash as string;
     span.setAttribute('ipfs.cid', cid);
@@ -318,7 +334,7 @@ export async function checkHealth(): Promise<void> {
       logger.warn('[ipfs] Pinata not configured — skipping IPFS health check in dev');
       return;
     }
-    await axios.get(PINATA_TEST_URL, { headers: pinataHeaders() });
+    await axios.get(PINATA_TEST_URL, { headers: pinataHeaders(), ...axiosTimeout });
   } finally {
     observeIpfsLatency('checkHealth', Date.now() - start);
   }
@@ -353,7 +369,7 @@ export async function retryPendingPins(): Promise<void> {
 
     try {
       const body = JSON.parse(row.payload) as object;
-      const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders() });
+      const res = await axios.post(PINATA_PIN_JSON_URL, body, { headers: pinataHeaders(), ...axiosTimeout });
       logger.info(`[ipfs] retried pending pin id=${row.id} cid=${res.data.IpfsHash as string}`);
       await deletePendingPin(row.id);
     } catch {
@@ -379,7 +395,7 @@ export async function unpinCid(cid: string): Promise<void> {
     return;
   }
   try {
-    await axios.delete(`${PINATA_UNPIN_URL}/${cid}`, { headers: pinataHeaders() });
+    await axios.delete(`${PINATA_UNPIN_URL}/${cid}`, { headers: pinataHeaders(), ...axiosTimeout });
     logger.info(`[ipfs] unpinned ${cid}`);
   } catch (err) {
     // 404 means already unpinned — not an error.
@@ -392,4 +408,224 @@ export async function unpinCid(cid: string): Promise<void> {
   }
 }
 
-export default { pinJson, pinFile, gatewayUrl, getCid, checkHealth, retryPendingPins, clearPinJsonCache, getPinJsonCacheSize, unpinCid };
+// ── Reconciliation ──────────────────────────────────────────────────────────
+
+const PINATA_PIN_LIST_URL = 'https://api.pinata.cloud/data/pinList';
+
+export interface PinataPinListItem {
+  ipfs_pin_hash: string;
+  size: number;
+  date_pinned: string;
+  metadata?: {
+    name?: string;
+    keyvalues?: Record<string, unknown>;
+  };
+}
+
+export interface PinataPinListResponse {
+  count: number;
+  rows: PinataPinListItem[];
+}
+
+export interface ReconcileResult {
+  processed: number;
+  resolved: number;
+  requeued: number;
+  expired: number;
+  skipped: number;
+}
+
+/**
+ * Check if a CID is reachable via configured IPFS gateway.
+ */
+export async function checkGatewayReachable(cid: string, timeoutMs = 5000): Promise<boolean> {
+  const url = gatewayUrl(cid);
+  try {
+    const res = await axios.head(url, { timeout: timeoutMs });
+    return res.status >= 200 && res.status < 300;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if a CID or hash exists on Pinata via pinList API.
+ */
+export async function checkPinataPinStatus(cid?: string, hash?: string): Promise<{ isPinned: boolean; pinnedCid?: string }> {
+  if (!isPinataConfigured()) {
+    return { isPinned: false };
+  }
+
+  try {
+    if (cid) {
+      const res = await axios.get<PinataPinListResponse>(`${PINATA_PIN_LIST_URL}?hashContains=${encodeURIComponent(cid)}&status=pinned`, {
+        headers: pinataHeaders(),
+      });
+      const rows = res.data?.rows ?? [];
+      const match = rows.find(r => r.ipfs_pin_hash === cid);
+      if (match) {
+        return { isPinned: true, pinnedCid: match.ipfs_pin_hash };
+      }
+    }
+
+    if (hash) {
+      const res = await axios.get<PinataPinListResponse>(`${PINATA_PIN_LIST_URL}?metadata[keyvalues][hash]={"value":"${hash}","op":"eq"}&status=pinned`, {
+        headers: pinataHeaders(),
+      });
+      if (res.data?.rows?.length > 0) {
+        return { isPinned: true, pinnedCid: res.data.rows[0].ipfs_pin_hash };
+      }
+    }
+
+    return { isPinned: false };
+  } catch (err) {
+    logger.warn('[ipfs] Pinata pinList query failed during reconciliation', err instanceof Error ? err.message : String(err));
+    return { isPinned: false };
+  }
+}
+
+/**
+ * Reconciles stale/unresolved pending_pins rows against Pinata and IPFS gateways.
+ * For each stale row past the age threshold:
+ *   - Checks Pinata pin status and gateway reachability.
+ *   - If found/reachable: marks resolved and updates CID.
+ *   - If not found and retryable: attempts re-pinning or increments attempts.
+ *   - If expired (attempts >= max or unrecoverable): marks expired with reason.
+ * Emits stuck pending pins metric.
+ */
+export async function reconcilePendingPins(options?: {
+  ageThresholdMs?: number;
+  maxAttempts?: number;
+  batchSize?: number;
+}): Promise<ReconcileResult> {
+  const ageThresholdMs = options?.ageThresholdMs ?? config.ipfsReconcileAgeMs;
+  const maxAttempts = options?.maxAttempts ?? config.ipfsReconcileMaxAttempts;
+  const batchSize = options?.batchSize ?? 50;
+
+  const cutoffTime = new Date(Date.now() - ageThresholdMs).toISOString();
+  const staleRows = await getStalePendingPins(cutoffTime, batchSize);
+
+  const result: ReconcileResult = {
+    processed: staleRows.length,
+    resolved: 0,
+    requeued: 0,
+    expired: 0,
+    skipped: 0,
+  };
+
+  if (!isPinataConfigured()) {
+    // In dev/test without credentials, update metrics and return
+    const stuckCount = await countStuckPendingPins(cutoffTime);
+    setStuckPendingPinsCount(stuckCount);
+    return result;
+  }
+
+  for (const row of staleRows) {
+    let payloadObj: object | null = null;
+    try {
+      payloadObj = JSON.parse(row.payload);
+    } catch {
+      // Unparseable payload -> expire immediately
+      await updatePendingPinReconciliation({
+        id: row.id,
+        status: 'expired',
+        expiredReason: 'invalid_json_payload',
+      });
+      result.expired++;
+      continue;
+    }
+
+    const candidateCid = row.resolved_cid ?? null;
+    let isPinned = false;
+    let resolvedCid: string | null = candidateCid;
+
+    // 1. If we have a candidate CID, check Pinata or Gateway
+    if (candidateCid) {
+      const pinataStatus = await checkPinataPinStatus(candidateCid, row.hash ?? undefined);
+      if (pinataStatus.isPinned) {
+        isPinned = true;
+        resolvedCid = pinataStatus.pinnedCid ?? candidateCid;
+      } else {
+        const reachable = await checkGatewayReachable(candidateCid);
+        if (reachable) {
+          isPinned = true;
+        }
+      }
+    } else if (row.hash) {
+      // Check Pinata by hash metadata
+      const pinataStatus = await checkPinataPinStatus(undefined, row.hash);
+      if (pinataStatus.isPinned && pinataStatus.pinnedCid) {
+        isPinned = true;
+        resolvedCid = pinataStatus.pinnedCid;
+      }
+    }
+
+    if (isPinned && resolvedCid) {
+      await updatePendingPinReconciliation({
+        id: row.id,
+        status: 'resolved',
+        resolvedCid,
+      });
+      logger.info(`[ipfs] reconciled pending pin id=${row.id} as resolved (cid=${resolvedCid})`);
+      result.resolved++;
+      continue;
+    }
+
+    // 2. Not pinned - check if we exceeded max attempts
+    if (row.attempts >= maxAttempts) {
+      const reason = `max_attempts_exceeded (${row.attempts}/${maxAttempts})`;
+      await updatePendingPinReconciliation({
+        id: row.id,
+        status: 'expired',
+        expiredReason: reason,
+      });
+      logger.warn(`[ipfs] reconciled pending pin id=${row.id} as expired: ${reason}`);
+      result.expired++;
+      continue;
+    }
+
+    // 3. Attempt re-pinning payload to Pinata
+    try {
+      const pinRes = await axios.post(PINATA_PIN_JSON_URL, payloadObj, { headers: pinataHeaders() });
+      const newCid = pinRes.data.IpfsHash as string;
+      await updatePendingPinReconciliation({
+        id: row.id,
+        status: 'resolved',
+        resolvedCid: newCid,
+      });
+      logger.info(`[ipfs] reconciled pending pin id=${row.id} by re-pinning (cid=${newCid})`);
+      result.resolved++;
+    } catch (err) {
+      await incrementPendingPinAttempts(row.id);
+      await updatePendingPinReconciliation({
+        id: row.id,
+        status: 'pending',
+        lastReconciledAt: new Date().toISOString(),
+      });
+      logger.warn(`[ipfs] reconciliation re-pin attempt failed for id=${row.id}: ${(err as Error).message}`);
+      result.requeued++;
+    }
+  }
+
+  // Update stuck pending pins metric gauge
+  const remainingStuck = await countStuckPendingPins(cutoffTime);
+  setStuckPendingPinsCount(remainingStuck);
+
+  return result;
+}
+
+export default {
+  pinJson,
+  pinFile,
+  gatewayUrl,
+  gatewayUrls,
+  getCid,
+  checkHealth,
+  retryPendingPins,
+  reconcilePendingPins,
+  checkGatewayReachable,
+  checkPinataPinStatus,
+  clearPinJsonCache,
+  getPinJsonCacheSize,
+  unpinCid,
+};

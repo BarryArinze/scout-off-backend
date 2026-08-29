@@ -7,12 +7,16 @@
  *   - Duplicate-safe insertion via the existing UNIQUE constraint on tx_hash
  *   - Live progress tracking exposed through getReindexStatus()
  *   - Audit log entries for reindex_started and reindex_completed
+ *   - Catch-up mode: when ledger lag exceeds CATCHUP_THRESHOLD, batch size
+ *     widens to CATCHUP_BATCH_SIZE and the inter-batch delay drops to 0.
+ *     Returns to steady-state parameters once caught up.
  *
  * Design notes:
  *   • Only one reindex job may run at a time (singleton guard).
  *   • The job runs in the background (fire-and-forget); callers poll status.
  *   • normalizePayload / normalizeEventId from indexer.ts are reused so
  *     deduplication semantics are identical to the normal polling loop.
+ *   • RPC 429/rate-limit responses trigger a backoff regardless of mode.
  */
 
 import { server } from './stellar';
@@ -28,11 +32,66 @@ import { logger } from '../utils/logger';
 /** Ledger range limit enforced at the API layer (10 000). */
 export const MAX_REINDEX_RANGE = 10_000;
 
-/** How many ledgers to request per RPC batch. */
-const BATCH_SIZE = 100;
+// ── Catch-up mode parameters ──────────────────────────────────────────────────
+//
+// When ledger lag (remaining ledgers) exceeds CATCHUP_THRESHOLD the batch loop
+// switches into catch-up mode: larger batch and zero inter-batch delay.
+//
+// All values are configurable via environment variables so operators can tune
+// without a code change.
 
-/** Milliseconds to wait between batches (avoids RPC rate-limit). */
-const BATCH_DELAY_MS = 50;
+/** Hard ceiling on catch-up batch size to keep individual RPC responses sane. */
+const MAX_ALLOWED_CATCHUP_BATCH_SIZE = 1_000;
+
+/**
+ * Remaining-ledger threshold above which catch-up mode activates.
+ * Configurable via REINDEX_CATCHUP_THRESHOLD (default: 500).
+ */
+function getCatchupThreshold(): number {
+  return parseInt(process.env.REINDEX_CATCHUP_THRESHOLD ?? '500', 10);
+}
+
+/**
+ * Batch size used in catch-up mode.
+ * Configurable via REINDEX_CATCHUP_BATCH_SIZE (default: 500).
+ * Hard-capped at MAX_ALLOWED_CATCHUP_BATCH_SIZE.
+ */
+function getCatchupBatchSize(): number {
+  const raw = parseInt(process.env.REINDEX_CATCHUP_BATCH_SIZE ?? '500', 10);
+  return Math.min(raw, MAX_ALLOWED_CATCHUP_BATCH_SIZE);
+}
+
+/**
+ * Normal steady-state batch size.
+ * Configurable via REINDEX_BATCH_SIZE (default: 100).
+ */
+function getSteadyBatchSize(): number {
+  return parseInt(process.env.REINDEX_BATCH_SIZE ?? '100', 10);
+}
+
+/**
+ * Normal steady-state inter-batch delay in ms.
+ * Configurable via REINDEX_BATCH_DELAY_MS (default: 50).
+ */
+function getSteadyBatchDelay(): number {
+  return parseInt(process.env.REINDEX_BATCH_DELAY_MS ?? '50', 10);
+}
+
+/**
+ * Backoff delay applied after an RPC 429 (rate-limit) error, regardless of mode.
+ * Configurable via REINDEX_RATE_LIMIT_BACKOFF_MS (default: 2 000).
+ */
+function getRateLimitBackoffMs(): number {
+  return parseInt(process.env.REINDEX_RATE_LIMIT_BACKOFF_MS ?? '2000', 10);
+}
+
+/** Determine whether an error is an RPC rate-limit response. */
+function isRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /429|rate.?limit|too many requests/i.test(msg);
+}
+
+export type IndexerMode = 'steady' | 'catchup';
 
 // ── Status ────────────────────────────────────────────────────────────────────
 
@@ -48,9 +107,8 @@ export interface ReindexState {
   startedAt: string | null;
   completedAt: string | null;
   errorMessage: string | null;
-  /** Set when the job was cancelled — records who cancelled and the last processed ledger. */
-  cancelledBy: string | null;
-  lastProcessedLedger: number | null;
+  /** Current operating mode — updated on each mode transition. */
+  mode: IndexerMode;
 }
 
 const initialState = (): ReindexState => ({
@@ -63,8 +121,7 @@ const initialState = (): ReindexState => ({
   startedAt: null,
   completedAt: null,
   errorMessage: null,
-  cancelledBy: null,
-  lastProcessedLedger: null,
+  mode: 'steady',
 });
 
 let _state: ReindexState = initialState();
@@ -118,8 +175,8 @@ export function cancelReindex(adminWallet: string): boolean {
  * Throws synchronously if a job is already running (caller must check status
  * before calling).
  *
- * @param fromLedger - First ledger to replay (inclusive).
- * @param toLedger   - Last ledger to replay (inclusive).
+ * @param fromLedger  - First ledger to replay (inclusive).
+ * @param toLedger    - Last ledger to replay (inclusive).
  * @param adminWallet - Wallet of the admin who triggered the reindex (for audit).
  */
 export function startReindex(
@@ -143,8 +200,7 @@ export function startReindex(
     startedAt: new Date().toISOString(),
     completedAt: null,
     errorMessage: null,
-    cancelledBy: null,
-    lastProcessedLedger: null,
+    mode: 'steady',
   };
 
   logAuditEvent({
@@ -174,10 +230,26 @@ async function _runReindex(
 
   let eventsInserted = 0;
   let currentBatchStart = fromLedger;
+  let currentMode: IndexerMode = 'steady';
 
   try {
     while (currentBatchStart <= toLedger) {
-      const batchEnd = Math.min(currentBatchStart + BATCH_SIZE - 1, toLedger);
+      const remaining = toLedger - currentBatchStart + 1;
+      const threshold = getCatchupThreshold();
+
+      // ── Mode selection ────────────────────────────────────────────────────
+      const newMode: IndexerMode = remaining > threshold ? 'catchup' : 'steady';
+      if (newMode !== currentMode) {
+        logger.info(
+          `[reindex] mode transition: ${currentMode} -> ${newMode} ` +
+          `(remaining=${remaining}, threshold=${threshold})`,
+        );
+        currentMode = newMode;
+        _state = { ..._state, mode: currentMode };
+      }
+
+      const batchSize = currentMode === 'catchup' ? getCatchupBatchSize() : getSteadyBatchSize();
+      const batchEnd = Math.min(currentBatchStart + batchSize - 1, toLedger);
 
       let batchEvents: Awaited<ReturnType<typeof server.getEvents>>['events'] = [];
       try {
@@ -189,12 +261,22 @@ async function _runReindex(
           (e: (typeof response.events)[number]) => e.ledger >= currentBatchStart && e.ledger <= batchEnd,
         );
       } catch (rpcErr: unknown) {
+        if (isRateLimitError(rpcErr)) {
+          // RPC 429: back off regardless of mode, then retry the same batch.
+          const backoff = getRateLimitBackoffMs();
+          logger.warn(
+            `[reindex] rate-limited (mode=${currentMode}), backing off ${backoff}ms ` +
+            `(ledger ${currentBatchStart}-${batchEnd})`,
+          );
+          await _delay(backoff);
+          continue; // retry without advancing currentBatchStart
+        }
         logger.warn(
           `[reindex] RPC error on ledger batch ${currentBatchStart}-${batchEnd}: ${
             rpcErr instanceof Error ? rpcErr.message : String(rpcErr)
           }`,
         );
-        // Continue to next batch — partial failures don't abort the job.
+        // Non-rate-limit errors: continue to next batch (partial failures don't abort the job).
       }
 
       // Insert events from this batch in a single transaction.
@@ -237,17 +319,20 @@ async function _runReindex(
         ..._state,
         ledgersProcessed,
         eventsInserted,
+        mode: currentMode,
       };
 
       logger.info(
-        `[reindex] batch done ledgers=${currentBatchStart}-${batchEnd} eventsInserted=${eventsInserted} total`,
+        `[reindex] batch done ledgers=${currentBatchStart}-${batchEnd} ` +
+        `mode=${currentMode} batchSize=${batchSize} eventsInserted=${eventsInserted} total`,
       );
 
       currentBatchStart = batchEnd + 1;
 
-      // Throttle: wait between batches to avoid overwhelming the RPC.
-      if (currentBatchStart <= toLedger) {
-        await _delay(BATCH_DELAY_MS);
+      // Throttle: steady mode waits between batches; catch-up mode has no delay.
+      const delayMs = currentMode === 'steady' ? getSteadyBatchDelay() : 0;
+      if (delayMs > 0 && currentBatchStart <= toLedger) {
+        await _delay(delayMs);
       }
 
       // ── Cooperative cancellation check-point ──────────────────────────────

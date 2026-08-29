@@ -458,18 +458,35 @@ A: Use tools like:
 
 A: No. `.github/workflows/ci.yml`'s `postgres` job runs the application test
 suite against a real `postgres:16-alpine` service container on every push
-and pull request (excluding only the test files that exercise the
-events/indexer, admin-multisig, and webhook-delivery subsystems, which are
-owned by separate issues and still use SQLite directly by design). You can
-run the same thing locally with `npm run test:postgres` against a Postgres
-instance reachable at `DATABASE_URL` (`docker-compose up -d postgres` starts
-one). Separately, `tests/db/postgresIntegration.test.ts` runs against a live
-instance too (set `POSTGRES_TEST_URL` or `DATABASE_URL`) and specifically
-proves: 60+ concurrent queries complete in pool-bounded parallel time (not
-serialized), a slow in-flight query never blocks the Node event loop, `NULL`
-inserts into `audit_log.hash`/`event_source` are rejected, and 120
-simultaneous audit-log writes produce zero silent loss with an unbroken hash
-chain.
+and pull request. You can run the same thing locally with
+`npm run test:postgres` against a Postgres instance reachable at
+`DATABASE_URL` (`docker-compose up -d postgres` starts one). Separately,
+`tests/db/postgresIntegration.test.ts` runs against a live instance too
+(set `POSTGRES_TEST_URL` or `DATABASE_URL`) and specifically proves: 60+
+concurrent queries complete in pool-bounded parallel time (not serialized),
+a slow in-flight query never blocks the Node event loop, `NULL` inserts
+into `audit_log.hash`/`event_source` are rejected, and 120 simultaneous
+audit-log writes produce zero silent loss with an unbroken hash chain.
+
+A small set of suites is still excluded from the Postgres CI job /
+`test:postgres` because they exercise SQLite-specific or sync-`getDb()`
+paths. `tests/routes/adminPagination.test.ts` was re-enabled (fully
+mocked — passes under `DB_DRIVER=postgres`). Remaining exclusions and the
+follow-ups needed for each (file a tracking issue per exclusion if one
+does not already exist; related work under #1014 / #1018):
+
+| Suite | Why excluded / follow-up |
+| --- | --- |
+| `tests/services/indexer.test.ts`, `indexerDispatch.test.ts`, `tierPromotion.test.ts`, `tests/routes/reindex.test.ts`, `tests/db/backfill.test.ts` | Raw `getDb()` / SQLite SQL in indexer/reindex/tier/backfill paths |
+| `tests/services/webhooks.test.ts`, `tests/controllers/webhookAdminController.test.ts` | Sync `getDb()` in webhook delivery / admin |
+| `tests/routes/adminExport.test.ts`, `exportStreaming.test.ts`, `adminQuerySchema.test.ts` | `better-sqlite3` `.iterate()` / export streaming assumptions |
+| `tests/e2e/milestonePromotion.e2e.test.ts`, `scoutUnlock.e2e.test.ts` | E2E suites still SQLite-oriented |
+| `tests/db/sqlInjectionRegression.test.ts` | Driver-specific SQL regression harness |
+| `tests/routes/playerListFreshness.test.ts`, `trialOffers.test.ts` | Suites that call sync `getDb()` directly |
+| `tests/routes/adminAuditTrail.test.ts` | Audit-trail path still tied to SQLite assumptions |
+
+Keep CI and `package.json` `test:postgres` ignore lists in sync when
+re-enabling a suite.
 
 ## Support
 

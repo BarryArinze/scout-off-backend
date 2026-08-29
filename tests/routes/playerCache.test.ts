@@ -96,20 +96,24 @@ describe('#307 PUT /api/players/:playerId — cache bust', () => {
 
     const token = makeToken(PLAYER_ROW.wallet, 'player');
 
-    // Prime the cache with first GET.
-    await request(app).get(`/api/players/${PLAYER_ROW.player_id}`);
+    // Prime the cache with first GET and capture the ETag (the concurrency
+    // token the PUT must echo as If-Match, #1151).
+    const prime = await request(app).get(`/api/players/${PLAYER_ROW.player_id}`);
+    expect(prime.status).toBe(200);
     expect(mockGetPlayerById).toHaveBeenCalledTimes(1);
 
     // Update the player profile — should bust the single-player cache.
     const putRes = await request(app)
       .put(`/api/players/${PLAYER_ROW.player_id}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('If-Match', prime.headers.etag)
       .send({ metadataUri: 'QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG' });
     expect(putRes.status).toBe(200);
 
-    // After bust, next GET must hit DB again (cache miss).
+    // After bust, next GET must hit DB again (cache miss). The PUT itself
+    // also re-read the row to validate If-Match, hence 3 total calls.
     await request(app).get(`/api/players/${PLAYER_ROW.player_id}`);
-    expect(mockGetPlayerById).toHaveBeenCalledTimes(2);
+    expect(mockGetPlayerById).toHaveBeenCalledTimes(3);
   });
 
   it('returns fresh data (not stale cache) immediately after a PUT update', async () => {
@@ -121,7 +125,7 @@ describe('#307 PUT /api/players/:playerId — cache bust', () => {
 
     const token = makeToken(PLAYER_ROW.wallet, 'player');
 
-    // Prime cache with old data.
+    // Prime cache with old data and capture the ETag for If-Match.
     const pre = await request(app).get(`/api/players/${PLAYER_ROW.player_id}`);
     expect(pre.status).toBe(200);
     expect(pre.body.data.metadataUri).toBe(OLD_CID);
@@ -129,6 +133,7 @@ describe('#307 PUT /api/players/:playerId — cache bust', () => {
     const putRes = await request(app)
       .put(`/api/players/${PLAYER_ROW.player_id}`)
       .set('Authorization', `Bearer ${token}`)
+      .set('If-Match', pre.headers.etag)
       .send({ metadataUri: NEW_CID });
     expect(putRes.status).toBe(200);
 
