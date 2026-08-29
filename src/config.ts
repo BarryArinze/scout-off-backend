@@ -511,6 +511,22 @@ const config = {
   /** Minimum response size in bytes to trigger compression (default: 1024 bytes). */
   compressionThresholdBytes: parseNumericEnv('COMPRESSION_THRESHOLD', process.env.COMPRESSION_THRESHOLD ?? process.env.COMPRESSION_THRESHOLD_BYTES, 1024, { min: 1, integer: true }),
 
+  /**
+   * Maximum indexer ledger lag (in ledgers) allowed for readiness check.
+   * If the indexer is more than this many ledgers behind the chain tip,
+   * the readiness check will report the indexer as unavailable.
+   * Default: 100 ledgers. Set to 0 to disable the lag check.
+   */
+  readinessMaxLag: parseNumericEnv('READINESS_MAX_LAG', process.env.READINESS_MAX_LAG, 100, { min: 0, integer: true }),
+
+  /**
+   * Startup grace period in milliseconds for the readiness lag check.
+   * After process startup, the indexer is allowed to lag without failing
+   * readiness for this duration (to accommodate initial sync from persisted cursor).
+   * Default: 5 minutes. Set to 0 to disable the grace period.
+   */
+  readinessGracePeriodMs: parseNumericEnv('READINESS_GRACE_PERIOD_MS', process.env.READINESS_GRACE_PERIOD_MS, 5 * 60 * 1000, { min: 0, integer: true }),
+
 };
 
 export default config;

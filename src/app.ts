@@ -132,6 +132,8 @@ const corsOptions: CorsOptions = {
 };
 
 const app = express();
+// Track process startup time for readiness grace period
+const processStartTime = Date.now();
 // Disable Express's default X-Powered-By header. helmet() also does this, but
 // being explicit here ensures it is suppressed regardless of middleware order.
 app.disable('x-powered-by');
@@ -234,7 +236,7 @@ app.get('/health', async (_req, res) => {
 async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | 'disabled'>> {
   const services: Record<string, 'ok' | 'unavailable' | 'disabled'> = {};
 
-  const [dbResult, ipfsResult, stellarResult] = await Promise.all([
+  const [dbResult, ipfsResult, stellarResult, indexerResult] = await Promise.all([
     (async (): Promise<'ok' | 'unavailable'> => {
       return (await probeDbWritable()) === 'ok' ? 'ok' : 'unavailable';
     })(),
@@ -256,11 +258,23 @@ async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | '
         return 'unavailable';
       }
     })(),
+    (async (): Promise<'ok' | 'unavailable' | 'disabled'> => {
+      // If max lag is 0, the check is disabled
+      if (config.readinessMaxLag === 0) return 'disabled';
+      
+      // During grace period, always report ok regardless of lag
+      const uptimeMs = Date.now() - processStartTime;
+      if (uptimeMs < config.readinessGracePeriodMs) return 'ok';
+      
+      // After grace period, check if lag is within threshold
+      return indexerLedgerLag <= config.readinessMaxLag ? 'ok' : 'unavailable';
+    })(),
   ]);
 
   services.db = dbResult;
   services.ipfs = ipfsResult;
   services.stellar = stellarResult;
+  services.indexer = indexerResult;
 
   return services;
 }
