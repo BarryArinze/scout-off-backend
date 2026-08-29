@@ -25,7 +25,7 @@ import {
 } from "../db";
 
 import { queryMilestones, updateProfile } from "../services/stellar";
-import { cacheGet, cacheSet, invalidatePlayerCache } from "../services/cache";
+import { cacheGet, cacheSet, invalidatePlayerCache, getPlayerListLastModified } from "../services/cache";
 import { ApiResponse } from "../types";
 import { ErrorCode } from "../utils/errorCodes";
 import { getTierMeta, tierName } from "../utils/tier";
@@ -227,6 +227,51 @@ function projectFields(
   return result;
 }
 
+/** Short CDN/client revalidation window — cheap validators, not long staleness. */
+const PLAYER_LIST_CACHE_CONTROL = 'public, max-age=10, must-revalidate';
+
+/**
+ * Apply Cache-Control / Last-Modified / ETag for the player list and honour
+ * conditional request headers. Returns true when a 304 was sent.
+ */
+function maybeNotModifiedPlayerList(
+  req: Request,
+  res: Response,
+  cacheKey: string,
+): boolean {
+  const listVersion = getPlayerListLastModified();
+  // Truncate to seconds — HTTP Last-Modified has second resolution.
+  const lastModifiedSec = Math.floor(listVersion / 1000) * 1000;
+  const etag = `"${createHash('sha1').update(`${cacheKey}:${lastModifiedSec}`).digest('hex')}"`;
+  const lastModifiedHttp = new Date(lastModifiedSec).toUTCString();
+
+  res.set('Cache-Control', PLAYER_LIST_CACHE_CONTROL);
+  res.set('Last-Modified', lastModifiedHttp);
+  res.set('ETag', etag);
+
+  const ifNoneMatch = req.headers['if-none-match'];
+  if (typeof ifNoneMatch === 'string' && ifNoneMatch === etag) {
+    res.status(304).end();
+    return true;
+  }
+
+  // If-None-Match takes precedence over If-Modified-Since when both are sent.
+  if (ifNoneMatch) {
+    return false;
+  }
+
+  const ims = req.headers['if-modified-since'];
+  if (typeof ims === 'string') {
+    const imsMs = Date.parse(ims);
+    if (!Number.isNaN(imsMs) && lastModifiedSec <= imsMs) {
+      res.status(304).end();
+      return true;
+    }
+  }
+
+  return false;
+}
+
 /** GET /api/players?region=&position=&minTier=&sortBy=&sortOrder=&cursor= */
 export async function filterPlayers(
   req: Request,
@@ -261,6 +306,10 @@ export async function filterPlayers(
     cursor: cursor ?? null,
     pageSize,
   })}`;
+
+  if (maybeNotModifiedPlayerList(req, res, cacheKey)) {
+    return;
+  }
 
   const cached = await cacheGet<FilterPlayersResult>(cacheKey);
   if (cached) {

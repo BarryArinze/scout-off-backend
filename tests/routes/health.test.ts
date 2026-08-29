@@ -2,6 +2,9 @@
  * Tests for the readiness probe endpoints (/ready and /health/readiness).
  * Both delegates to the shared checkReadiness() helper, so they must return
  * identical responses for the same service states.
+ *
+ * #1226 — each dependency failing in isolation must 503 with status
+ * 'degraded' and that service marked unavailable while others stay ok/disabled.
  */
 
 jest.mock('../../src/services/ipfs', () => ({
@@ -10,6 +13,14 @@ jest.mock('../../src/services/ipfs', () => ({
   gatewayUrl: jest.fn((cid: string) => `https://gateway.pinata.cloud/ipfs/${cid}`),
   checkHealth: jest.fn(),
 }));
+
+jest.mock('../../src/services/stellar', () => {
+  const actual = jest.requireActual<typeof import('../../src/services/stellar')>('../../src/services/stellar');
+  return {
+    ...actual,
+    stellarHealth: jest.fn().mockResolvedValue(true),
+  };
+});
 
 // Partially mock the db module so individual tests can control getDriver() —
 // src/app.ts's /health and /ready probes go through the DbDriver, not the raw
@@ -22,10 +33,13 @@ jest.mock('../../src/db', () => {
 
 import request from 'supertest';
 import app from '../../src/app';
+import config from '../../src/config';
 import * as ipfsService from '../../src/services/ipfs';
+import * as stellarService from '../../src/services/stellar';
 import * as dbModule from '../../src/db';
 
 const mockCheckHealth = ipfsService.checkHealth as jest.Mock;
+const mockStellarHealth = stellarService.stellarHealth as jest.Mock;
 const mockGetDriver = dbModule.getDriver as jest.Mock;
 // getDriver() throws until initDb() has run (tests/setup.ts's beforeAll), so
 // this can't be resolved at module-import time — read it lazily instead.
@@ -54,25 +68,50 @@ function driverWith(overrides: Partial<ReturnType<typeof getRealDriver>>) {
   };
 }
 
+function expectHealthyOthers(
+  services: Record<string, string>,
+  failing: 'db' | 'ipfs' | 'stellar',
+) {
+  for (const [name, status] of Object.entries(services)) {
+    if (name === failing) {
+      expect(status).toBe('unavailable');
+    } else {
+      expect(['ok', 'disabled']).toContain(status);
+    }
+  }
+}
+
 // ─── /ready ──────────────────────────────────────────────────────────────────
 
 const READINESS_PATHS = ['/ready', '/health/readiness'];
 
 describe.each(READINESS_PATHS)('%s', (path) => {
+  const previousBreakerState = stellarService.stellarBreaker.state;
+
   afterEach(() => {
     mockCheckHealth.mockReset();
+    mockStellarHealth.mockReset();
+    mockStellarHealth.mockResolvedValue(true);
     mockGetDriver.mockReset();
     // Restore to the real implementation between tests
     mockGetDriver.mockImplementation(getRealDriver);
+    stellarService.stellarBreaker.state = previousBreakerState;
+    config.stellarHealthCheckEnabled = process.env.STELLAR_HEALTH_CHECK !== 'false';
   });
 
-  it('returns 200 and includes db:ok when all dependencies are healthy', async () => {
+  it('returns 200 and status ok when all dependencies are healthy (#1226)', async () => {
     mockCheckHealth.mockResolvedValueOnce(undefined);
+    mockStellarHealth.mockResolvedValueOnce(true);
     const res = await request(app).get(path);
     expect(res.status).toBe(200);
-    expect(res.body.status).toBe('ok');
-    expect(res.body.services.ipfs).toBe('ok');
-    expect(res.body.services.db).toBe('ok');
+    expect(res.body).toEqual({
+      status: 'ok',
+      services: expect.objectContaining({
+        db: 'ok',
+        ipfs: 'ok',
+        stellar: expect.stringMatching(/^(ok|disabled)$/),
+      }),
+    });
   });
 
   it('includes db field in the services object', async () => {
@@ -82,15 +121,21 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     expect(['ok', 'unavailable']).toContain(res.body.services.db);
   });
 
-  it('returns 503 with ipfs:unavailable when IPFS is unreachable', async () => {
+  it('returns 503 with ipfs:unavailable when IPFS check throws (#1226)', async () => {
     mockCheckHealth.mockRejectedValueOnce(new Error('IPFS connection refused'));
     const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
-    expect(res.body.services.ipfs).toBe('unavailable');
+    expect(res.body.services).toEqual(
+      expect.objectContaining({
+        ipfs: 'unavailable',
+        db: 'ok',
+      }),
+    );
+    expectHealthyOthers(res.body.services, 'ipfs');
   });
 
-  it('returns 503 with db:unavailable when the database probe throws', async () => {
+  it('returns 503 with db:unavailable when the database probe throws (#1226)', async () => {
     mockCheckHealth.mockResolvedValueOnce(undefined);
     // Simulate a locked or corrupted DB. /ready's readiness probe
     // (probeDbWritable in src/app.ts) checks writability via driver.run(),
@@ -98,10 +143,11 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     mockGetDriver.mockImplementation(() =>
       driverWith({ run: () => Promise.reject(new Error('SQLITE_BUSY: database is locked')) }),
     );
-    const res = await request(app).get('/ready');
+    const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
     expect(res.body.services.db).toBe('unavailable');
+    expectHealthyOthers(res.body.services, 'db');
   });
 
   it('returns 503 with db:unavailable when the DB is read-only (writes fail, reads still succeed)', async () => {
@@ -121,6 +167,24 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
     expect(res.body.services.db).toBe('unavailable');
+  });
+
+  it('returns 503 with stellar:unavailable when the Stellar breaker is OPEN (#1226)', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    config.stellarHealthCheckEnabled = true;
+    stellarService.stellarBreaker.state = 'OPEN';
+
+    const res = await request(app).get(path);
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('degraded');
+    expect(res.body.services).toEqual(
+      expect.objectContaining({
+        stellar: 'unavailable',
+        db: 'ok',
+        ipfs: 'ok',
+      }),
+    );
+    expectHealthyOthers(res.body.services, 'stellar');
   });
 });
 

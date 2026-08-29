@@ -1,4 +1,4 @@
-import Database from 'better-sqlite3';
+import type Database from 'better-sqlite3';
 import crypto from 'crypto';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
@@ -11,6 +11,10 @@ import { DbDriver } from './driver';
 import { SqliteDriver } from './sqlite-driver';
 import { PostgresDriver } from './postgres-driver';
 import { observeDbQueryDuration } from '../middleware/metrics';
+import {
+  createBetterSqlite3LoadError,
+  isBetterSqlite3LoadFailure,
+} from './betterSqlite3Error';
 
 const dbTracer = trace.getTracer('scout-off-backend');
 
@@ -112,15 +116,34 @@ export async function initDb(): Promise<void> {
 
     logger.info(`[db] Connected to PostgreSQL (pool size ${config.databasePoolSize})`);
   } else {
-    // SQLite initialization (default)
-    _db = new Database(config.dbPath);
+    // SQLite initialization (default). Load the native addon lazily so a
+    // missing/wrong-ABI binding becomes a clear startup error instead of an
+    // opaque require failure at module import time.
+    let BetterSqlite3: typeof import('better-sqlite3');
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      BetterSqlite3 = require('better-sqlite3');
+    } catch (err) {
+      throw createBetterSqlite3LoadError(err);
+    }
+
+    let sqliteDb: Database.Database;
+    try {
+      sqliteDb = new BetterSqlite3(config.dbPath);
+    } catch (err) {
+      if (isBetterSqlite3LoadFailure(err)) {
+        throw createBetterSqlite3LoadError(err);
+      }
+      throw err;
+    }
     // WAL mode lets readers and a writer proceed concurrently instead of
     // blocking each other on the default rollback journal, and busy_timeout
     // makes a writer that does contend for the single write lock retry for
     // up to 5s instead of failing immediately with SQLITE_BUSY.
-    _db.pragma('journal_mode = WAL');
-    _db.pragma('busy_timeout = 5000');
-    _driver = new SqliteDriver(_db);
+    sqliteDb.pragma('journal_mode = WAL');
+    sqliteDb.pragma('busy_timeout = 5000');
+    _db = sqliteDb;
+    _driver = new SqliteDriver(sqliteDb);
 
     // Create initial schema inline (for backwards compatibility with in-memory test databases)
     _driver.exec(`
