@@ -442,6 +442,13 @@ const config = {
   /** Refresh token TTL in seconds (default: 7 days). */
   jwtRefreshTtlSeconds: 7 * 24 * 60 * 60,
 
+  /**
+   * How long a trial offer remains open for accept/reject, in milliseconds.
+   * After this window the offer is considered expired and cannot be responded to.
+   * Default: 30 days. Set TRIAL_OFFER_TTL_MS=0 to disable expiry (not recommended).
+   */
+  trialOfferTtlMs: parseNumericEnv('TRIAL_OFFER_TTL_MS', process.env.TRIAL_OFFER_TTL_MS, 30 * 24 * 60 * 60 * 1000, { min: 0, integer: true }),
+
   playerImport: {
     /** Maximum number of rows accepted per bulk player import request. */
     maxBatchSize: parseNumericEnv('PLAYER_IMPORT_MAX_BATCH', process.env.PLAYER_IMPORT_MAX_BATCH, 500, { min: 1, integer: true }),

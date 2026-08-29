@@ -17,6 +17,9 @@ import { initDb, closeDb, getDriver } from '../../src/db';
 import config from '../../src/config';
 import { proposeAction, approveAction } from '../../src/services/adminMultiSig';
 import * as stellar from '../../src/services/stellar';
+import * as db from '../../src/db';
+import { logger } from '../../src/utils/logger';
+import { getFeeWithdrawalDbWriteFailuresTotal } from '../../src/middleware/metrics';
 
 // Mirrors tests/routes/adminAudit.test.ts's helper: requireRole('admin') on
 // the HTTP layer verifies a real challenge/response signature and only
@@ -301,6 +304,28 @@ describe('Admin Multi-Signature Execution and Atomicity', () => {
       // Action should be marked as executed
       const action = await getDriver().get('SELECT * FROM pending_admin_actions WHERE id = ?', [proposal.actionId]);
       expect((action as any)?.status).toBe('executed');
+    });
+  });
+
+  describe('Acceptance Criteria 6: Fee withdrawal DB-write failure is surfaced (#1207)', () => {
+    test('a failed insertFeeWithdrawal after a successful on-chain withdrawal logs critical and increments the metric, but still reports success', async () => {
+      const insertSpy = jest.spyOn(db, 'insertFeeWithdrawal').mockRejectedValueOnce(new Error('disk full'));
+      const criticalSpy = jest.spyOn(logger, 'critical').mockImplementation(() => {});
+      const before = getFeeWithdrawalDbWriteFailuresTotal();
+
+      const proposal = proposeAction('withdraw_fees', { recipient: treasuryAddress }, adminWallet1);
+      const result = await approveAction(proposal.actionId, adminWallet2);
+
+      expect(result.status).toBe('approved');
+      expect(insertSpy).toHaveBeenCalled();
+      expect(criticalSpy).toHaveBeenCalledWith(
+        expect.stringContaining('tx_withdraw_123'),
+      );
+      expect(criticalSpy.mock.calls[0][0]).toContain(treasuryAddress);
+      expect(getFeeWithdrawalDbWriteFailuresTotal()).toBe(before + 1);
+
+      insertSpy.mockRestore();
+      criticalSpy.mockRestore();
     });
   });
 

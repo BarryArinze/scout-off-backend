@@ -162,6 +162,11 @@
             "type": "integer",
             "description": "Unix timestamp (seconds)"
           },
+          "registered_at": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Unix timestamp (seconds) of the on-chain registration, when known"
+          },
           "progress_tier_name": {
             "type": "string",
             "enum": [
@@ -183,6 +188,14 @@
               0,
               1
             ]
+          },
+          "progressLabel": {
+            "type": "string",
+            "description": "UI label for the player's progress tier"
+          },
+          "verificationBadge": {
+            "type": "string",
+            "description": "Verification badge key for the player's progress tier"
           }
         }
       },
@@ -218,7 +231,8 @@
               "total",
               "page",
               "pageSize",
-              "pages"
+              "pages",
+              "nextCursor"
             ],
             "properties": {
               "data": {
@@ -238,6 +252,11 @@
               },
               "pages": {
                 "type": "integer"
+              },
+              "nextCursor": {
+                "type": "string",
+                "nullable": true,
+                "description": "Opaque cursor for the next page of results, null on the last page"
               }
             }
           }
@@ -334,6 +353,14 @@
           "approved_at": {
             "type": "integer",
             "nullable": true
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "approved"
+            ],
+            "description": "Approval state added by the milestones endpoint (\"all\" status param)"
           }
         }
       }
@@ -4422,6 +4449,65 @@
           },
           "409": {
             "description": "{ success: false, error: string } - Idempotency key reused with a different request"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": [
+              "write:trial_offers"
+            ]
+          }
+        ],
+        "x-required-role": [
+          "scout"
+        ],
+        "x-api-key-scope": "write:trial_offers",
+        "x-owner-only": true
+      }
+    },
+    "/scouts/{wallet}/trial-offers/{offerId}": {
+      "delete": {
+        "tags": [
+          "scouts"
+        ],
+        "summary": "Cancel (withdraw) a pending trial offer submitted by this scout.",
+        "operationId": "cancelTrialOfferHandler",
+        "description": "Cancel (withdraw) a pending trial offer submitted by this scout.\nOnly the originating scout may cancel their own offer, and only while it is\nstill in 'pending' status — the player has not yet accepted or rejected it.\n\nAfter cancellation, the player's accept/reject attempts return 410 Gone.",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Scout's Stellar public key"
+          },
+          {
+            "name": "offerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Trial offer ID to cancel"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ success: true, data: { offerId, status: 'cancelled', cancelledAt } }"
+          },
+          "403": {
+            "description": "{ success: false, error: string } - Wallet mismatch or offer belongs to another scout"
+          },
+          "404": {
+            "description": "{ success: false, error: string } - Trial offer not found"
+          },
+          "409": {
+            "description": "{ success: false, error: string } - Offer already accepted/rejected or already cancelled"
           }
         },
         "security": [

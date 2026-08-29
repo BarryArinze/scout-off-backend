@@ -1424,6 +1424,10 @@ export interface TrialOfferRow {
   reject_reason: string | null;
   responded_at: number | null;
   created_at: number;
+  /** Unix epoch seconds after which accept/reject is rejected. NULL = no expiry (pre-migration rows). */
+  expires_at: number | null;
+  /** Unix epoch seconds when the originating scout withdrew the offer. NULL = not cancelled. */
+  cancelled_at: number | null;
 }
 
 export async function getTrialOfferById(offerId: string): Promise<TrialOfferRow | null> {
@@ -1439,10 +1443,11 @@ export async function insertTrialOffer(p: {
   player_id: string;
   details_uri: string;
   created_at: number;
+  expires_at?: number | null;
 }): Promise<void> {
-  const sql = `INSERT INTO trial_offers (offer_id, scout_wallet, player_id, details_uri, created_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT (offer_id) DO NOTHING`;
+  const sql = `INSERT INTO trial_offers (offer_id, scout_wallet, player_id, details_uri, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (offer_id) DO NOTHING`;
   await timedQueryAsync(sql, () =>
-    getDriver().run(sql, [p.offer_id, p.scout_wallet, p.player_id, p.details_uri, p.created_at])
+    getDriver().run(sql, [p.offer_id, p.scout_wallet, p.player_id, p.details_uri, p.created_at, p.expires_at ?? null])
   );
 }
 
@@ -1456,6 +1461,25 @@ export async function respondToTrialOffer(p: {
   await timedQueryAsync(sql, () =>
     getDriver().run(sql, [p.status, p.reject_reason ?? null, p.responded_at, p.offer_id])
   );
+}
+
+/**
+ * Cancel (withdraw) a still-pending trial offer.
+ * Only succeeds when the offer exists, belongs to the given scout, and is
+ * still in 'pending' status. Returns true when the cancellation was applied,
+ * false when no matching pending offer was found.
+ */
+export async function cancelTrialOffer(offerId: string, scoutWallet: string): Promise<boolean> {
+  const now = Math.floor(Date.now() / 1000);
+  const sql = `
+    UPDATE trial_offers
+    SET status = 'cancelled', cancelled_at = ?
+    WHERE offer_id = ? AND scout_wallet = ? AND status = 'pending'
+  `;
+  return timedQueryAsync(sql, async () => {
+    const info = await getDriver().run(sql, [now, offerId, scoutWallet]);
+    return info.changes > 0;
+  });
 }
 
 /**
@@ -2186,6 +2210,66 @@ export async function countBookmarksInFolder(folderId: number): Promise<number> 
     const row = await getDriver().get<{ count: number | string }>(sql, [folderId]);
     return Number(row?.count ?? 0);
   });
+}
+
+/**
+ * Joined row returned by getBookmarkedPlayersWithDetails().
+ * Combines bookmark metadata with the bookmarked player's full profile.
+ */
+export interface BookmarkedPlayerRow extends PlayerRow {
+  bookmarked_at: number;
+  bookmark_folder_id: number | null;
+  bookmark_note: string | null;
+}
+
+/**
+ * Fetch all bookmarked players for a scout in a single JOIN query, eliminating
+ * the N+1 pattern of calling getPlayerById() once per bookmark row.
+ *
+ * Returns rows ordered by bookmark creation time (newest first), matching the
+ * ordering of getBookmarksByScout(). Bookmarks whose player_id no longer
+ * exists in the players table are silently dropped (INNER JOIN semantics).
+ *
+ * @param scoutWallet  The scout's Stellar wallet address.
+ * @param folderId     Optional folder filter. When provided, only bookmarks in
+ *                     that folder are returned.
+ */
+export async function getBookmarkedPlayersWithDetails(
+  scoutWallet: string,
+  folderId?: number | null,
+): Promise<BookmarkedPlayerRow[]> {
+  let sql: string;
+  let params: (string | number | null)[];
+
+  if (folderId !== undefined) {
+    sql = `
+      SELECT
+        p.*,
+        b.created_at AS bookmarked_at,
+        b.folder_id  AS bookmark_folder_id,
+        b.note       AS bookmark_note
+      FROM scout_bookmarks b
+      INNER JOIN players p ON p.player_id = b.player_id
+      WHERE b.scout_wallet = ? AND b.folder_id = ?
+      ORDER BY b.created_at DESC
+    `;
+    params = [scoutWallet, folderId];
+  } else {
+    sql = `
+      SELECT
+        p.*,
+        b.created_at AS bookmarked_at,
+        b.folder_id  AS bookmark_folder_id,
+        b.note       AS bookmark_note
+      FROM scout_bookmarks b
+      INNER JOIN players p ON p.player_id = b.player_id
+      WHERE b.scout_wallet = ?
+      ORDER BY b.created_at DESC
+    `;
+    params = [scoutWallet];
+  }
+
+  return timedQueryAsync(sql, () => getDriver().all<BookmarkedPlayerRow>(sql, params));
 }
 
 // ─── Scout saved-search helpers (#486) ───────────────────────────────────────

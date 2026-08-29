@@ -26,7 +26,7 @@ jest.mock('../../src/db', () => ({
   insertContactUnlock: jest.fn(),
   getContactUnlocksByScout: jest.fn().mockReturnValue([]),
   hasContactUnlock: jest.fn().mockReturnValue(false),
-  // player lookup (used by bookmarks controller)
+  // player lookup (used by bookmarks controller addBookmark/removeBookmark)
   getPlayerById: jest.fn(),
   // notes
   upsertScoutNote: jest.fn(),
@@ -43,6 +43,7 @@ jest.mock('../../src/db', () => ({
   insertBookmark: jest.fn(),
   deleteBookmark: jest.fn(),
   getBookmarksByScout: jest.fn(),
+  getBookmarkedPlayersWithDetails: jest.fn(),
   insertBookmarkFolder: jest.fn(),
   getBookmarkFoldersByScout: jest.fn(),
   getBookmarkFolderById: jest.fn(),
@@ -75,6 +76,7 @@ import {
   insertBookmark,
   deleteBookmark,
   getBookmarksByScout,
+  getBookmarkedPlayersWithDetails,
   insertBookmarkFolder,
   getBookmarkFoldersByScout,
   getBookmarkFolderById,
@@ -87,6 +89,7 @@ const mockGetPlayerById        = getPlayerById        as jest.Mock;
 const mockInsertBookmark       = insertBookmark       as jest.Mock;
 const mockDeleteBookmark       = deleteBookmark       as jest.Mock;
 const mockGetBookmarks         = getBookmarksByScout   as jest.Mock;
+const mockGetBookmarkedPlayers = getBookmarkedPlayersWithDetails as jest.Mock;
 const mockInsertBookmarkFolder = insertBookmarkFolder as jest.Mock;
 const mockGetBookmarkFolders   = getBookmarkFoldersByScout as jest.Mock;
 const mockGetBookmarkFolderById = getBookmarkFolderById as jest.Mock;
@@ -281,11 +284,23 @@ describe('DELETE /api/scouts/:wallet/bookmarks/:playerId', () => {
 describe('GET /api/scouts/:wallet/bookmarks', () => {
   beforeEach(() => jest.clearAllMocks());
 
-  it('returns full player profile summaries (not bare ids)', async () => {
-    mockGetBookmarks.mockReturnValueOnce([
-      { id: 1, scout_wallet: SCOUT_A, player_id: PLAYER_ID, folder_id: null, note: null, created_at: 1_700_000_010 },
+  it('returns full player profile summaries via a single joined query (no N+1)', async () => {
+    mockGetBookmarkedPlayers.mockReturnValueOnce([
+      {
+        player_id: PLAYER_ID,
+        wallet: MOCK_PLAYER.wallet,
+        position: MOCK_PLAYER.position,
+        region: MOCK_PLAYER.region,
+        metadata_uri: MOCK_PLAYER.metadata_uri,
+        progress_level: MOCK_PLAYER.progress_level,
+        created_at: MOCK_PLAYER.created_at,
+        registered_at: MOCK_PLAYER.created_at,
+        is_active: 1,
+        bookmarked_at: 1_700_000_010,
+        bookmark_folder_id: null,
+        bookmark_note: null,
+      },
     ]);
-    mockGetPlayerById.mockReturnValueOnce(MOCK_PLAYER);
 
     const res = await request(app)
       .get(`/api/scouts/${SCOUT_A}/bookmarks`)
@@ -307,13 +322,60 @@ describe('GET /api/scouts/:wallet/bookmarks', () => {
     expect(p.bookmarked_at).toBe(1_700_000_010);
     expect(p.folder_id).toBeNull();
     expect(p.note).toBeNull();
+
+    // Single joined query — getPlayerById must NOT have been called
+    expect(mockGetBookmarkedPlayers).toHaveBeenCalledTimes(1);
+    expect(mockGetPlayerById).not.toHaveBeenCalled();
+  });
+
+  it('issues only one query for multiple bookmarks (no N+1)', async () => {
+    const PLAYER_IDS = ['p1', 'p2', 'p3', 'p4', 'p5'];
+    mockGetBookmarkedPlayers.mockReturnValueOnce(
+      PLAYER_IDS.map((pid, i) => ({
+        player_id: pid,
+        wallet: `GWALLET${i}AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA`,
+        position: 'Forward',
+        region: 'West Africa',
+        metadata_uri: `ipfs://Qm${pid}`,
+        progress_level: 1,
+        created_at: 1_700_000_000 + i,
+        registered_at: 1_700_000_000 + i,
+        is_active: 1,
+        bookmarked_at: 1_700_000_010 + i,
+        bookmark_folder_id: null,
+        bookmark_note: null,
+      })),
+    );
+
+    const res = await request(app)
+      .get(`/api/scouts/${SCOUT_A}/bookmarks`)
+      .set('Authorization', `Bearer ${scoutAToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.data).toHaveLength(5);
+
+    // Only one DB call regardless of how many bookmarks there are
+    expect(mockGetBookmarkedPlayers).toHaveBeenCalledTimes(1);
+    expect(mockGetPlayerById).not.toHaveBeenCalled();
   });
 
   it('filters by folderId when query param is provided', async () => {
-    mockGetBookmarks.mockReturnValueOnce([
-      { id: 1, scout_wallet: SCOUT_A, player_id: PLAYER_ID, folder_id: 1, note: 'Test note', created_at: 1_700_000_010 },
+    mockGetBookmarkedPlayers.mockReturnValueOnce([
+      {
+        player_id: PLAYER_ID,
+        wallet: MOCK_PLAYER.wallet,
+        position: MOCK_PLAYER.position,
+        region: MOCK_PLAYER.region,
+        metadata_uri: MOCK_PLAYER.metadata_uri,
+        progress_level: MOCK_PLAYER.progress_level,
+        created_at: MOCK_PLAYER.created_at,
+        registered_at: MOCK_PLAYER.created_at,
+        is_active: 1,
+        bookmarked_at: 1_700_000_010,
+        bookmark_folder_id: 1,
+        bookmark_note: 'Test note',
+      },
     ]);
-    mockGetPlayerById.mockReturnValueOnce(MOCK_PLAYER);
 
     const res = await request(app)
       .get(`/api/scouts/${SCOUT_A}/bookmarks?folderId=1`)
@@ -322,30 +384,11 @@ describe('GET /api/scouts/:wallet/bookmarks', () => {
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
     expect(res.body.data).toHaveLength(1);
-    expect(mockGetBookmarks).toHaveBeenCalledWith(SCOUT_A, 1);
-  });
-
-  it('skips bookmarks for players that no longer exist', async () => {
-    mockGetBookmarks.mockReturnValueOnce([
-      { id: 1, scout_wallet: SCOUT_A, player_id: 'deleted-player', folder_id: null, note: null, created_at: 1 },
-      { id: 2, scout_wallet: SCOUT_A, player_id: PLAYER_ID, folder_id: null, note: null, created_at: 2 },
-    ]);
-    // deleted-player returns null; MOCK_PLAYER is returned for the second
-    mockGetPlayerById
-      .mockReturnValueOnce(null)
-      .mockReturnValueOnce(MOCK_PLAYER);
-
-    const res = await request(app)
-      .get(`/api/scouts/${SCOUT_A}/bookmarks`)
-      .set('Authorization', `Bearer ${scoutAToken}`);
-
-    expect(res.status).toBe(200);
-    expect(res.body.data).toHaveLength(1);
-    expect(res.body.data[0].player_id).toBe(PLAYER_ID);
+    expect(mockGetBookmarkedPlayers).toHaveBeenCalledWith(SCOUT_A, 1);
   });
 
   it('returns empty array when scout has no bookmarks', async () => {
-    mockGetBookmarks.mockReturnValueOnce([]);
+    mockGetBookmarkedPlayers.mockReturnValueOnce([]);
 
     const res = await request(app)
       .get(`/api/scouts/${SCOUT_A}/bookmarks`)
@@ -361,7 +404,7 @@ describe('GET /api/scouts/:wallet/bookmarks', () => {
       .set('Authorization', `Bearer ${scoutBToken}`);
 
     expect(res.status).toBe(403);
-    expect(mockGetBookmarks).not.toHaveBeenCalled();
+    expect(mockGetBookmarkedPlayers).not.toHaveBeenCalled();
   });
 
   it('returns 401 with no token', async () => {
@@ -398,10 +441,22 @@ describe('add / list / remove bookmark cycle', () => {
     expect(addRes.status).toBe(200);
 
     // 2. List
-    mockGetBookmarks.mockReturnValueOnce([
-      { id: 1, scout_wallet: SCOUT_A, player_id: PLAYER_ID, folder_id: null, note: null, created_at: 1 },
+    mockGetBookmarkedPlayers.mockReturnValueOnce([
+      {
+        player_id: PLAYER_ID,
+        wallet: MOCK_PLAYER.wallet,
+        position: MOCK_PLAYER.position,
+        region: MOCK_PLAYER.region,
+        metadata_uri: MOCK_PLAYER.metadata_uri,
+        progress_level: MOCK_PLAYER.progress_level,
+        created_at: MOCK_PLAYER.created_at,
+        registered_at: MOCK_PLAYER.created_at,
+        is_active: 1,
+        bookmarked_at: 1,
+        bookmark_folder_id: null,
+        bookmark_note: null,
+      },
     ]);
-    mockGetPlayerById.mockReturnValueOnce(MOCK_PLAYER);
 
     const listRes = await request(app)
       .get(`/api/scouts/${SCOUT_A}/bookmarks`)

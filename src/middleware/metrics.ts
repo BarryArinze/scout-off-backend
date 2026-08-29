@@ -345,6 +345,20 @@ export function getWebhookCounters(): WebhookCounters {
   return { ...webhookCountersStore };
 }
 
+// ─── Fee withdrawal DB-write failure counter ──────────────────────────────────
+
+const feeWithdrawalDbWriteFailuresStore = { total: 0 };
+
+/** Increment scout_off_fee_withdrawal_db_write_failures_total counter. */
+export function incrementFeeWithdrawalDbWriteFailuresTotal(): void {
+  feeWithdrawalDbWriteFailuresStore.total += 1;
+}
+
+/** Returns the current fee-withdrawal DB-write-failure counter. */
+export function getFeeWithdrawalDbWriteFailuresTotal(): number {
+  return feeWithdrawalDbWriteFailuresStore.total;
+}
+
 // ─── Prometheus exposition ──────────────────────────────────────────────────────
 
 /** Content-Type for the Prometheus text exposition format (v0.0.4). */

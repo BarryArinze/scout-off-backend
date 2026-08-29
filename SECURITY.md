@@ -2,13 +2,38 @@
 
 ## Supported Versions
 
-We release security patches for the latest version of the ScoutOff backend.
-Older versions are not guaranteed to receive backports.
+Security patches are released for the current major version line. Older
+versions are supported for a grace period after a new major release, after
+which they receive critical patches only at maintainer discretion.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| latest  | ✅ Yes             |
-| older   | ❌ No              |
+| Version | Status            | Support ends     |
+| ------- | ----------------- | ---------------- |
+| 2.x     | ✅ Active support  | Current          |
+| 1.x     | ⚠️ Security-only  | 2026-12-31       |
+| < 1.0   | ❌ Unsupported    | —                |
+
+### Disclosure SLA
+
+We commit to the following response timelines for privately reported
+security vulnerabilities:
+
+| Severity | First response | Patch targeted | Disclosure coordinated |
+| -------- | -------------- | -------------- | ---------------------- |
+| Critical | 24 hours       | 72 hours       | After patch deployed   |
+| High     | 48 hours       | 7 days         | After patch deployed   |
+| Medium   | 5 days         | 30 days        | After patch deployed   |
+| Low      | 10 days        | Next release   | Release notes          |
+
+**Critical** vulnerabilities are those that allow unauthenticated remote code
+execution, unrestricted data exfiltration, or total auth bypass with no
+preconditions. **High** vulnerabilities require some preconditions (e.g. a
+valid account) but still bypass core security boundaries.
+
+These timelines are commitments to the *reporter*, not guarantees of a public
+fix — the complexity of a fix and the need for ecosystem coordination (e.g.
+coordinating with Stellar testnet reset windows) may extend the patch timeline.
+When a delay beyond the targeted window is needed, we will communicate the
+revised timeline to the reporter within the original response window.
 
 ## Reporting a Vulnerability
 

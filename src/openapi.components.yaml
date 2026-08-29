@@ -121,6 +121,10 @@ components:
         created_at:
           type: integer
           description: Unix timestamp (seconds)
+        registered_at:
+          type: integer
+          nullable: true
+          description: Unix timestamp (seconds) of the on-chain registration, when known
         progress_tier_name:
           type: string
           enum: [Unverified, "Verified Identity", "Performance Milestones", "Elite Tier"]
@@ -131,6 +135,12 @@ components:
         is_active:
           type: integer
           enum: [0, 1]
+        progressLabel:
+          type: string
+          description: UI label for the player's progress tier
+        verificationBadge:
+          type: string
+          description: Verification badge key for the player's progress tier
 
     PlayerDetail:
       allOf:
@@ -147,7 +157,7 @@ components:
       allOf:
         - $ref: "#/components/schemas/SuccessEnvelope"
         - type: object
-          required: [data, total, page, pageSize, pages]
+          required: [data, total, page, pageSize, pages, nextCursor]
           properties:
             data:
               type: array
@@ -161,6 +171,10 @@ components:
               type: integer
             pages:
               type: integer
+            nextCursor:
+              type: string
+              nullable: true
+              description: Opaque cursor for the next page of results, null on the last page
 
     # ── Subscription ──────────────────────────────────────────────────────────
     SubscriptionStatus:
@@ -223,6 +237,10 @@ components:
         approved_at:
           type: integer
           nullable: true
+        status:
+          type: string
+          enum: [pending, approved]
+          description: Approval state added by the milestones endpoint ("all" status param)
 
   responses:
     Unauthorized:
