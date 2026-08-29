@@ -23,6 +23,7 @@ not a directory listing.
 | Doc | Audience | Description |
 | --- | -------- | ----------- |
 | [auth.md](auth.md) | Contributor | SEP-10 challenge/response, JWT issuance and claims, refresh, logout, API keys, admin wallets, and live SSE revocation |
+| [audit-log.md](audit-log.md) | Operator | Tamper-evident audit trail: schema, hash-chain construction, what actions are logged, verification procedures, and tamper detection |
 | [secrets-rotation.md](secrets-rotation.md) | Operator | Rotation policy and step-by-step procedures for every long-lived secret (JWT, Pinata, Stellar keys, webhook secrets) |
 | [ip-reputation.md](ip-reputation.md) | Operator | The IP reputation scoring model (0–100, tiers, decay, bad user-agents) and the admin whitelist/blacklist endpoints |
 
