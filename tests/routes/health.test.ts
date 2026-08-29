@@ -11,10 +11,13 @@ jest.mock('../../src/services/ipfs', () => ({
   checkHealth: jest.fn(),
 }));
 
-// Partially mock the db module so individual tests can control getDb().
+// Partially mock the db module so individual tests can control getDriver() —
+// src/app.ts's /health and /ready probes go through the DbDriver, not the raw
+// getDb() handle, so they work identically under DB_DRIVER=sqlite and
+// DB_DRIVER=postgres.
 jest.mock('../../src/db', () => {
   const actual = jest.requireActual<typeof import('../../src/db')>('../../src/db');
-  return { ...actual, getDb: jest.fn(actual.getDb) };
+  return { ...actual, getDriver: jest.fn(actual.getDriver) };
 });
 
 import request from 'supertest';
@@ -23,7 +26,33 @@ import * as ipfsService from '../../src/services/ipfs';
 import * as dbModule from '../../src/db';
 
 const mockCheckHealth = ipfsService.checkHealth as jest.Mock;
-const mockGetDb = dbModule.getDb as jest.Mock;
+const mockGetDriver = dbModule.getDriver as jest.Mock;
+// getDriver() throws until initDb() has run (tests/setup.ts's beforeAll), so
+// this can't be resolved at module-import time — read it lazily instead.
+function getRealDriver() {
+  return jest.requireActual<typeof import('../../src/db')>('../../src/db').getDriver();
+}
+
+/**
+ * Build a driver-shaped object that delegates every method to the real
+ * driver except the ones named in `overrides`. A plain object spread
+ * (`{ ...getRealDriver() }`) does NOT work here — SqliteDriver's methods are
+ * defined on its class prototype, not as the instance's own enumerable
+ * properties, so a spread silently drops them all.
+ */
+function driverWith(overrides: Partial<ReturnType<typeof getRealDriver>>) {
+  const real = getRealDriver();
+  return {
+    all: real.all.bind(real),
+    get: real.get.bind(real),
+    value: real.value.bind(real),
+    run: real.run.bind(real),
+    exec: real.exec.bind(real),
+    transaction: real.transaction.bind(real),
+    close: real.close.bind(real),
+    ...overrides,
+  };
+}
 
 // ─── /ready ──────────────────────────────────────────────────────────────────
 
@@ -32,11 +61,9 @@ const READINESS_PATHS = ['/ready', '/health/readiness'];
 describe.each(READINESS_PATHS)('%s', (path) => {
   afterEach(() => {
     mockCheckHealth.mockReset();
-    mockGetDb.mockReset();
+    mockGetDriver.mockReset();
     // Restore to the real implementation between tests
-    mockGetDb.mockImplementation(
-      jest.requireActual<typeof import('../../src/db')>('../../src/db').getDb,
-    );
+    mockGetDriver.mockImplementation(getRealDriver);
   });
 
   it('returns 200 and includes db:ok when all dependencies are healthy', async () => {
@@ -65,11 +92,32 @@ describe.each(READINESS_PATHS)('%s', (path) => {
 
   it('returns 503 with db:unavailable when the database probe throws', async () => {
     mockCheckHealth.mockResolvedValueOnce(undefined);
-    // Simulate a locked or corrupted DB
-    mockGetDb.mockImplementation(() => {
-      throw new Error('SQLITE_BUSY: database is locked');
-    });
+    // Simulate a locked or corrupted DB. /ready's readiness probe
+    // (probeDbWritable in src/app.ts) checks writability via driver.run(),
+    // not driver.get() — unlike /health's liveness probe.
+    mockGetDriver.mockImplementation(() =>
+      driverWith({ run: () => Promise.reject(new Error('SQLITE_BUSY: database is locked')) }),
+    );
     const res = await request(app).get('/ready');
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('degraded');
+    expect(res.body.services.db).toBe('unavailable');
+  });
+
+  it('returns 503 with db:unavailable when the DB is read-only (writes fail, reads still succeed)', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    const real = getRealDriver();
+    mockGetDriver.mockImplementation(() =>
+      driverWith({
+        run: (sql: string, params?: unknown[]) => {
+          if (sql.includes('INSERT INTO indexer_state')) {
+            return Promise.reject(new Error('SQLITE_READONLY: attempt to write a readonly database'));
+          }
+          return real.run(sql, params);
+        },
+      }),
+    );
+    const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
     expect(res.body.services.db).toBe('unavailable');
@@ -80,10 +128,8 @@ describe.each(READINESS_PATHS)('%s', (path) => {
 
 describe('GET /health', () => {
   afterEach(() => {
-    mockGetDb.mockReset();
-    mockGetDb.mockImplementation(
-      jest.requireActual<typeof import('../../src/db')>('../../src/db').getDb,
-    );
+    mockGetDriver.mockReset();
+    mockGetDriver.mockImplementation(getRealDriver);
   });
 
   it('returns 200 and includes db field in healthStatus', async () => {
@@ -102,9 +148,9 @@ describe('GET /health', () => {
   it('reports db:error in healthStatus but still returns 200 when the DB probe fails', async () => {
     // /health is a liveness probe — it always returns 200.
     // A DB failure is surfaced in healthStatus.db without changing the HTTP status.
-    mockGetDb.mockImplementation(() => {
-      throw new Error('SQLITE_BUSY: database is locked');
-    });
+    mockGetDriver.mockImplementation(() =>
+      driverWith({ get: () => Promise.reject(new Error('SQLITE_BUSY: database is locked')) }),
+    );
     const res = await request(app).get('/health');
     expect(res.status).toBe(200);
     expect(res.body.healthStatus.db).toBe('error');

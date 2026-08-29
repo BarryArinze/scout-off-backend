@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * Tests for the new subscription endpoints:
  *   PUT  /api/scouts/:wallet/subscribe  — renewal + new-via-PUT
@@ -18,7 +19,7 @@ jest.mock('../../src/db', () => {
   let idSeq = 1;
 
   return {
-    getEvents: jest.fn().mockReturnValue([]),
+    queryEvents: jest.fn().mockReturnValue([]),
     getLatestSubscription: jest.fn().mockImplementation((wallet: string) => {
       const rows = subscriptions
         .filter((s) => s.scout_wallet === wallet && s.cancelled_at === null)
@@ -30,14 +31,14 @@ jest.mock('../../src/db', () => {
       subscriptions.push({ id, ...p, cancelled_at: null });
       return id;
     }),
-    renewSubscription: jest.fn().mockImplementation((p: any) => {
+    dbRenewSubscription: jest.fn().mockImplementation((p: any) => {
       const idx = subscriptions.findIndex((s) => s.id === p.id);
       if (idx >= 0) {
         subscriptions[idx].tier = p.tier;
         subscriptions[idx].expires_at = p.expires_at;
       }
     }),
-    cancelSubscription: jest.fn().mockImplementation((p: any) => {
+    dbCancelSubscription: jest.fn().mockImplementation((p: any) => {
       const idx = subscriptions.findIndex((s) => s.id === p.id);
       if (idx >= 0) subscriptions[idx].cancelled_at = p.cancelled_at;
     }),
@@ -55,21 +56,25 @@ jest.mock('../../src/services/stellar', () => ({
   renewSubscription: jest.fn(),
   cancelSubscriptionOnChain: jest.fn(),
   PaymentError: class PaymentError extends Error {
-    constructor(public message: string, public code: string) { super(message); }
+    constructor(public message: string, public code: string) { super(message); this.name = 'PaymentError'; }
+  },
+  SubscriptionError: class SubscriptionError extends Error {
+    constructor(public message: string, public code: string) { super(message); this.name = 'SubscriptionError'; }
   },
 }));
 
 import {
   getLatestSubscription,
   insertSubscription,
-  renewSubscription as dbRenew,
-  cancelSubscription as dbCancel,
+  dbRenewSubscription as dbRenew,
+  dbCancelSubscription as dbCancel,
 } from '../../src/db';
 import {
   purchaseSubscription,
   renewSubscription as stellarRenew,
   cancelSubscriptionOnChain,
   isSubscribed,
+  SubscriptionError,
 } from '../../src/services/stellar';
 
 const mockGetLatest = getLatestSubscription as jest.Mock;
@@ -81,8 +86,8 @@ const mockStellarRenew = stellarRenew as jest.Mock;
 const mockCancelOnChain = cancelSubscriptionOnChain as jest.Mock;
 const mockIsSubscribed = isSubscribed as jest.Mock;
 
-const WALLET = 'GSCOUTWALLET1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
-const OTHER  = 'GOTHERWALLET2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const WALLET = 'GDKSHEL5SMPOFACYRWBN7R5ONIF34MSBJWBVAFFTW6OB3B4WPEUYNQC5';
+const OTHER  = 'GAKDJUDRDDNTQFJAXI7T5HQ6ZFBRC2ICLEQHSCQJYU46UFC26GVQO52Q';
 
 function makeToken(wallet: string, role = 'scout'): string {
   return jwt.sign({ sub: wallet, role }, SECRET, { expiresIn: '1h' });
@@ -251,6 +256,62 @@ describe('DELETE /api/scouts/:wallet/subscribe', () => {
     expect(res.body.data.cancelledAt).toBeGreaterThan(0);
     expect(mockCancelOnChain).toHaveBeenCalledWith(WALLET);
     expect(mockDbCancel).toHaveBeenCalledWith(expect.objectContaining({ id: 5 }));
+  });
+
+  it('returns 404 when on-chain cancel throws SubscriptionError NOT_SUBSCRIBED', async () => {
+    const existingSub = { id: 6, scout_wallet: WALLET, tier: 'basic', expires_at: Math.floor(Date.now() / 1000) + 86400, cancelled_at: null, created_at: 0 };
+    mockGetLatest.mockReturnValue(existingSub);
+    mockCancelOnChain.mockRejectedValue(
+      new (SubscriptionError as any)('Scout has no active on-chain subscription', 'NOT_SUBSCRIBED'),
+    );
+
+    const token = makeToken(WALLET);
+    const res = await request(app)
+      .delete(`/api/scouts/${WALLET}/subscribe`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.success).toBe(false);
+    expect(res.body.code).toBe('NOT_SUBSCRIBED');
+    // DB must NOT be updated when on-chain call fails
+    expect(mockDbCancel).not.toHaveBeenCalled();
+  });
+
+  it('returns 403 when on-chain cancel throws SubscriptionError UNAUTHORIZED', async () => {
+    const existingSub = { id: 7, scout_wallet: WALLET, tier: 'premium', expires_at: Math.floor(Date.now() / 1000) + 86400, cancelled_at: null, created_at: 0 };
+    mockGetLatest.mockReturnValue(existingSub);
+    mockCancelOnChain.mockRejectedValue(
+      new (SubscriptionError as any)('Unauthorized: wallet is not allowed to cancel', 'UNAUTHORIZED'),
+    );
+
+    const token = makeToken(WALLET);
+    const res = await request(app)
+      .delete(`/api/scouts/${WALLET}/subscribe`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.success).toBe(false);
+    expect(res.body.code).toBe('UNAUTHORIZED');
+    expect(mockDbCancel).not.toHaveBeenCalled();
+  });
+
+  it('does not update the DB when the on-chain call throws a PaymentError (RPC failure)', async () => {
+    const existingSub = { id: 8, scout_wallet: WALLET, tier: 'basic', expires_at: Math.floor(Date.now() / 1000) + 86400, cancelled_at: null, created_at: 0 };
+    mockGetLatest.mockReturnValue(existingSub);
+
+    // PaymentError is imported via the mock factory above
+    const { PaymentError: MockPaymentError } = jest.requireMock('../../src/services/stellar');
+    mockCancelOnChain.mockRejectedValue(new MockPaymentError('RPC error', 'NETWORK_ERROR'));
+
+    const token = makeToken(WALLET);
+    const res = await request(app)
+      .delete(`/api/scouts/${WALLET}/subscribe`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(402);
+    expect(res.body.success).toBe(false);
+    // The DB must NOT be updated when the on-chain transaction fails
+    expect(mockDbCancel).not.toHaveBeenCalled();
   });
 });
 

@@ -38,6 +38,25 @@ The thresholds are defined once, as data, in
 (`TIER_THRESHOLDS`). The indexer and the tests both consume that single source
 of truth, so retuning promotion is a one-line change to the thresholds.
 
+```mermaid
+stateDiagram-v2
+    [*] --> Unverified: 0 approved milestones
+    state "Level 0: Unverified" as Unverified
+    state "Level 1: Emerging" as Emerging
+    state "Level 2: Established" as Established
+    state "Level 3: Elite" as Elite
+
+    Unverified --> Emerging: approved count reaches 1
+    Emerging --> Established: approved count reaches 3
+    Established --> Elite: approved count reaches 6
+```
+
+These transitions show the backend promotion model implemented by
+`tierForApprovedMilestones`. Product-facing material may describe levels 1 and
+2 as "Verified Identity" and "Performance Milestones", but those labels do not
+add KYC, academy, footage, or trial-offer conditions to this service. In the
+backend, only the recorded `milestone_approved` count controls these transitions.
+
 ## When promotion happens
 
 Promotion is applied by the indexer ([`src/services/indexer.ts`](../src/services/indexer.ts))
@@ -53,3 +72,56 @@ Tier is **recomputed from the authoritative event count** rather than trusting a
 `progress_level` field on the event payload. Because the `events` table dedups on
 `tx_hash` (`INSERT OR IGNORE`), replaying a ledger range is idempotent — a player
 can never be double-counted or demoted by a re-index.
+
+## Trial Offer Expiry and Cancellation
+
+A trial offer is a time-sensitive, real-world proposal. The platform
+enforces two guards to prevent stale or unintended offers from being acted upon.
+
+### Expiry
+
+Every new trial offer receives an `expires_at` timestamp at creation time:
+
+```
+expires_at = created_at + TRIAL_OFFER_TTL_MS (default: 30 days)
+```
+
+Setting `TRIAL_OFFER_TTL_MS=0` disables automatic expiry (not recommended
+for production). After `expires_at`, any accept or reject attempt by the
+player returns **410 Gone** with `error: "Trial offer has expired"`.
+
+Rows created before this feature was deployed (`expires_at IS NULL`) are
+treated as non-expiring for backward compatibility.
+
+### Cancellation (scout withdrawal)
+
+The originating scout may withdraw a **pending** offer at any time before
+the player responds:
+
+```
+DELETE /api/scouts/:wallet/trial-offers/:offerId
+```
+
+| Condition | Status |
+| --------- | ------ |
+| Offer is pending | 200 — cancelled |
+| Offer already accepted/rejected | 409 — Conflict |
+| Offer already cancelled | 409 — Conflict |
+| Offer belongs to another scout | 403 — Forbidden |
+| Offer not found | 404 — Not Found |
+
+After cancellation the player's accept and reject attempts return
+**410 Gone** with `error: "Trial offer has been withdrawn by the scout"`.
+
+### State machine
+
+```
+pending ──(player accepts)──► accepted
+        ──(player rejects)──► rejected
+        ──(expires_at past)──► [expired, immutable]
+        ──(scout cancels)───► cancelled
+```
+
+Expired and cancelled offers are terminal: no further transitions are
+possible. The `cancelled_at` column records when the scout withdrew the
+offer; `expires_at` records the deadline set at creation.
