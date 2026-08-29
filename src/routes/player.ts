@@ -21,12 +21,13 @@ import {
 import { getPlayerHistory, getPlayerHistoryVersion, getPlayerHistoryDiff } from "../controllers/playerHistoryController";
 import { anonymizePlayer } from "../controllers/playerAnonymizationController";
 import { acceptTrialOffer, rejectTrialOffer, rejectOfferSchema } from "../controllers/trialOfferController";
-import { getPlayerTokenHolders, buyPlayerToken } from "../controllers/playerTokenController";
+import { getPlayerTokenHolders, buyPlayerToken, buyTokenSchema } from "../controllers/playerTokenController";
 
 import { validateBody, validateQuery } from "../middleware/validate";
 import { requireRole, optionalAuth, requireApiKeyScope } from "../middleware/auth";
 import { requireOwner } from "../middleware/requireOwner";
 import { methodNotAllowed } from "../middleware/methodNotAllowed";
+import { emptyBodySchema } from "../validators/emptyBody";
 
 const router = Router();
 
@@ -105,8 +106,9 @@ router.route("/:playerId")
  * GET /api/players/:playerId/milestones
  *
  * List a player's milestones, merging on-chain milestone events with
- * pending/approved submission events. Supports `status` (pending|approved|all),
- * `sortBy`, `order`/`sort`, and `limit` (max 50) query params.
+ * pending/approved/rejected submission events. Supports `status`
+ * (pending|approved|rejected; omit for all), `sortBy`, `order`/`sort`, and
+ * `limit` (max 50) query params.
  *
  * @param playerId {string} - Player's unique identifier (cuid2)
  * @response 200 { success: true, data: Milestone[] }
@@ -132,6 +134,7 @@ router.route("/:playerId/deactivate")
   .post(
     requireRole("player"),
     requireOwner,
+    validateBody(emptyBodySchema),
     deactivatePlayerEndpoint,
   )
   .all(methodNotAllowed(['POST']));
@@ -151,6 +154,7 @@ router.route("/:playerId/reactivate")
   .post(
     requireRole("player"),
     requireOwner,
+    validateBody(emptyBodySchema),
     reactivatePlayerEndpoint,
   )
   .all(methodNotAllowed(['POST']));
@@ -175,6 +179,7 @@ router.route("/:playerId/anonymize")
   .post(
     requireRole("player"),
     requireOwner,
+    validateBody(emptyBodySchema),
     anonymizePlayer,
   )
   .all(methodNotAllowed(['POST']));
@@ -274,7 +279,7 @@ router.route("/:playerId/analytics")
  * @auth Bearer (player role required)
  */
 router.route("/:playerId/trial-offers/:offerId/accept")
-  .post(requireRole("player"), acceptTrialOffer)
+  .post(requireRole("player"), validateBody(emptyBodySchema), acceptTrialOffer)
   .all(methodNotAllowed(['POST']));
 
 /**
@@ -328,7 +333,7 @@ router.route("/:playerId/tokens")
  * @auth Bearer (scout or player role required)
  */
 router.route("/:playerId/tokens/buy")
-  .post(requireRole("scout"), requireApiKeyScope("write:player_tokens"), buyPlayerToken)
+  .post(requireRole("scout"), requireApiKeyScope("write:player_tokens"), validateBody(buyTokenSchema), buyPlayerToken)
   .all(methodNotAllowed(['POST']));
 
 export default router;

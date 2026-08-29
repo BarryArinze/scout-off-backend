@@ -51,7 +51,7 @@ export const createSavedSearchSchema = z.object({
     .min(1, 'name is required')
     .max(100, 'name must be 100 characters or fewer'),
   filters: savedSearchFilterSchema,
-});
+}).strict();
 
 export type CreateSavedSearchRequest = z.infer<typeof createSavedSearchSchema>;
 
@@ -61,7 +61,7 @@ export type CreateSavedSearchRequest = z.infer<typeof createSavedSearchSchema>;
 export const updateSavedSearchSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   filters: savedSearchFilterSchema.optional(),
-});
+}).strict();
 
 export type UpdateSavedSearchRequest = z.infer<typeof updateSavedSearchSchema>;
 

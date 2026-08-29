@@ -813,10 +813,10 @@ try {
   }
 }
 
-const revokeTokenSchema = z.object({
+export const revokeTokenSchema = z.object({
   jti: z.string().min(1).optional(),
   token: z.string().min(1).optional(),
-}).refine((d) => !!d.jti || !!d.token, { message: 'jti or token is required' });
+}).strict().refine((d) => !!d.jti || !!d.token, { message: 'jti or token is required' });
 
 /** POST /api/admin/tokens/revoke */
 export async function revokeTokenController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -897,7 +897,7 @@ export const withdrawFeesSchema = z.object({
   recipient: z
     .string()
     .refine((v) => STELLAR_ADDRESS_RE.test(v), 'Invalid Stellar address'),
-});
+}).strict();
 
 /**
  * In-process mutex: prevents concurrent fee withdrawals.
@@ -1044,9 +1044,9 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
   }
 }
 
-const reindexSchema = z.object({
+export const reindexSchema = z.object({
   fromLedger: z.number().int().min(0),
-});
+}).strict();
 
 /**
  * GET /api/admin/validators/:wallet/stats
@@ -1308,6 +1308,11 @@ export function parseCsvBody(text: string): ImportValidatorEntry[] {
   }
   return entries;
 }
+
+/** Envelope schema for the JSON body variant of POST /api/admin/validators/import. */
+export const importValidatorsBodySchema = z.object({
+  validators: z.array(z.unknown()).min(1),
+}).strict();
 
 /**
  * Process a batch of ImportValidatorEntry items and return per-entry results.
@@ -1579,7 +1584,7 @@ export async function importValidators(req: Request, res: Response, next: NextFu
 //                  writes to the fee_withdrawals idempotency_key column
 //                  as a storage-layer guard.
 
-const withdrawFeesV2Schema = z.object({
+export const withdrawFeesV2Schema = z.object({
   treasuryAddress: z
     .string({ required_error: 'treasuryAddress is required' })
     .refine(isValidStellarAddress, {
@@ -1591,7 +1596,7 @@ const withdrawFeesV2Schema = z.object({
     .refine((v) => /^\d+$/.test(v) && BigInt(v) > 0n, {
       message: 'amountStroops must be a positive integer',
     }),
-});
+}).strict();
 
 /**
  * POST /api/admin/fees/withdraw

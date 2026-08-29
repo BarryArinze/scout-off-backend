@@ -50,8 +50,8 @@ const metadataUriSchema = z
   .refine(isValidMetadataUri, URI_VALIDATION_ERROR);
 
 export const registerSchema = z.union([
-  baseRegistrationSchema.extend({ metadata: metadataSchema }),
-  baseRegistrationSchema.extend({ metadataUri: metadataUriSchema }),
+  baseRegistrationSchema.extend({ metadata: metadataSchema }).strict(),
+  baseRegistrationSchema.extend({ metadataUri: metadataUriSchema }).strict(),
 ]);
 
 export type RegisterPlayerRequest = z.infer<typeof registerSchema>;
@@ -353,8 +353,8 @@ export async function filterPlayers(
 
 /** PUT /api/players/:playerId — profile owner only */
 export const updatePlayerSchema = z.union([
-  z.object({ metadata: z.record(z.unknown()) }),
-  z.object({ metadataUri: metadataUriSchema }),
+  z.object({ metadata: z.record(z.unknown()) }).strict(),
+  z.object({ metadataUri: metadataUriSchema }).strict(),
 ]);
 
 export async function updatePlayer(
@@ -390,12 +390,13 @@ export async function updatePlayer(
   });
 }
 
-const milestonesQuerySchema = z.object({
+export const milestonesQuerySchema = z.object({
   sortBy: z.enum(["submittedAt", "approvedAt"]).default("submittedAt"),
   order: z.enum(["asc", "desc"]).default("asc"),
   // `sort` is an accepted alias for `order` — the task spec uses `sort`
   sort: z.enum(["asc", "desc"]).optional(),
-  status: z.enum(["approved", "pending", "all"]).default("all"),
+  // Omit status to include approved + pending + on-chain (all). No "all" value.
+  status: z.enum(["pending", "approved", "rejected"]).optional(),
   limit: z.coerce
     .number()
     .int()
@@ -458,29 +459,52 @@ export async function getPlayerMilestones(
   const order = parsed.data.sort ?? parsed.data.order;
 
   // Map status to the event type filter used by queryEvents.
-  // "pending"  → milestone_submitted events
-  // "approved" → milestone_approved events
-  // "all"      → both (fetch approved then layer in submitted)
-  const approvedEvents =
-    status !== "pending"
-      ? queryEvents("milestone_approved")
-          .filter((e) => e.payload.player_id === playerId)
-          .map((e) => ({ ...e.payload, status: "approved" as const }))
-      : [];
+  // omitted     → approved + pending + all on-chain (normalized with status)
+  // "approved"  → milestone_approved + on-chain where approved===true
+  // "pending"   → milestone_submitted + on-chain where approved===false
+  // "rejected"  → milestone_rejected only (on-chain has no rejected flag)
+  const includeApproved = status === undefined || status === "approved";
+  const includePending = status === undefined || status === "pending";
+  const includeRejected = status === "rejected";
 
-  const pendingEvents =
-    status !== "approved"
-      ? queryEvents("milestone_submitted")
-          .filter((e) => e.payload.player_id === playerId)
-          .map((e) => ({ ...e.payload, status: "pending" as const }))
-      : [];
+  const approvedEvents = includeApproved
+    ? queryEvents("milestone_approved")
+        .filter((e) => e.payload.player_id === playerId)
+        .map((e) => ({ ...e.payload, status: "approved" as const }))
+    : [];
+
+  const pendingEvents = includePending
+    ? queryEvents("milestone_submitted")
+        .filter((e) => e.payload.player_id === playerId)
+        .map((e) => ({ ...e.payload, status: "pending" as const }))
+    : [];
+
+  const rejectedEvents = includeRejected
+    ? queryEvents("milestone_rejected")
+        .filter((e) => e.payload.player_id === playerId)
+        .map((e) => ({ ...e.payload, status: "rejected" as const }))
+    : [];
 
   const onChainMilestones = await queryMilestones(playerId);
+  const filteredOnChain =
+    status === "rejected"
+      ? []
+      : onChainMilestones
+          .filter((m) => {
+            if (status === "approved") return m.approved === true;
+            if (status === "pending") return m.approved === false;
+            return true; // omitted → all on-chain
+          })
+          .map((m) => ({
+            ...m,
+            status: (m.approved ? "approved" : "pending") as "approved" | "pending",
+          }));
 
   const combined = [
     ...approvedEvents,
     ...pendingEvents,
-    ...(onChainMilestones as unknown as Record<string, unknown>[]),
+    ...rejectedEvents,
+    ...filteredOnChain,
   ];
 
   combined.sort((a, b) => {

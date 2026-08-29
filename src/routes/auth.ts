@@ -1,8 +1,9 @@
 import { Router } from 'express';
-import { getChallenge, postToken, postRefresh, postLogout } from '../controllers/authController';
+import { getChallenge, postToken, postRefresh, postLogout, tokenSchema, refreshSchema, logoutSchema } from '../controllers/authController';
 import { requireAuth } from '../middleware/auth';
 import { rateLimit } from '../middleware/rateLimit';
 import { methodNotAllowed } from '../middleware/methodNotAllowed';
+import { validateBody } from '../middleware/validate';
 import config from '../config';
 
 const router = Router();
@@ -42,7 +43,7 @@ router.route('/challenge')
  * @response 401 { success: false, error: string } - Invalid signature or expired challenge
  */
 router.route('/token')
-  .post(authRateLimit, postToken)
+  .post(authRateLimit, validateBody(tokenSchema), postToken)
   .all(methodNotAllowed(['POST']));
 
 /**
@@ -56,7 +57,7 @@ router.route('/token')
  * @response 401 { success: false, error } — invalid, expired, or revoked refresh token
  */
 router.route('/refresh')
-  .post(authRateLimit, postRefresh)
+  .post(authRateLimit, validateBody(refreshSchema), postRefresh)
   .all(methodNotAllowed(['POST']));
 
 /**
@@ -70,7 +71,7 @@ router.route('/refresh')
  * @response 401 — missing/invalid bearer token
  */
 router.route('/logout')
-  .post(requireAuth, postLogout)
+  .post(requireAuth, validateBody(logoutSchema), postLogout)
   .all(methodNotAllowed(['POST']));
 
 export default router;
