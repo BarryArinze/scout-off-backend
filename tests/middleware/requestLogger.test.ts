@@ -29,7 +29,13 @@ import config from '../../src/config';
 const mockInfo = logger.info as jest.Mock;
 
 function makeReq(path: string): Request {
-  return { path, method: 'GET', headers: {}, correlationId: undefined } as unknown as Request;
+  return {
+    path,
+    method: 'GET',
+    headers: {},
+    correlationId: undefined,
+    socket: { remoteAddress: '127.0.0.1' },
+  } as unknown as Request;
 }
 
 const mockRes = {} as Response;
