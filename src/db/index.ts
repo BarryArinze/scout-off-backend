@@ -308,6 +308,122 @@ export interface EventsPageFilter {
   endDate?: Date;
 }
 
+/**
+ * Opaque cursor used by the keyset-pagination variant of the events listing.
+ * Encodes the (ledger, id) position of the last row returned on the previous
+ * page so that the next page starts immediately after it, independent of
+ * concurrent inserts.
+ */
+export interface EventsCursor {
+  ledger: number;
+  id: number;
+}
+
+/**
+ * Encode a (ledger, id) pair into a URL-safe opaque cursor string.
+ */
+export function encodeEventsCursor(cursor: EventsCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString('base64url');
+}
+
+/**
+ * Decode a cursor string produced by {@link encodeEventsCursor}.
+ * Returns `null` when the value is missing, malformed, or contains
+ * non-integer fields — callers should treat `null` as "start from the
+ * beginning".
+ */
+export function decodeEventsCursor(raw: string | undefined): EventsCursor | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(raw, 'base64url').toString('utf8')) as unknown;
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      'ledger' in parsed &&
+      'id' in parsed &&
+      Number.isInteger((parsed as Record<string, unknown>).ledger) &&
+      Number.isInteger((parsed as Record<string, unknown>).id)
+    ) {
+      return parsed as EventsCursor;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch one page of events using a stable keyset cursor over (ledger DESC, id DESC).
+ * When `afterCursor` is supplied only rows with (ledger, id) < (cursor.ledger, cursor.id)
+ * are returned, making pagination stable under concurrent inserts.
+ *
+ * Returns up to `limit` rows and, when there are more rows beyond the page, a
+ * `nextCursor` value ready to be encoded and returned to the client.
+ */
+export function getEventsPageKeyset(
+  filter: EventsPageFilter,
+  limit: number,
+  afterCursor: EventsCursor | null,
+): { rows: EventExportRow[]; nextCursor: EventsCursor | null } {
+  const db = getDb();
+  const clauses: string[] = [];
+  const params: unknown[] = [];
+
+  if (filter.type) {
+    clauses.push('type = ?');
+    params.push(filter.type);
+  }
+  if (filter.startDate) {
+    clauses.push('created_at >= ?');
+    params.push(filter.startDate.getTime());
+  }
+  if (filter.endDate) {
+    clauses.push('created_at <= ?');
+    params.push(filter.endDate.getTime());
+  }
+  if (afterCursor) {
+    // Keyset condition: rows that come before the cursor in DESC order
+    clauses.push('(ledger < ? OR (ledger = ? AND id < ?))');
+    params.push(afterCursor.ledger, afterCursor.ledger, afterCursor.id);
+  }
+
+  const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
+  // Fetch one extra row to know whether a next page exists
+  const fetchLimit = limit + 1;
+  params.push(fetchLimit);
+
+  const sql =
+    'SELECT id, type, ledger, payload, created_at FROM events ' +
+    where +
+    ' ORDER BY ledger DESC, id DESC LIMIT ?';
+
+  const rawRows = timedQuery(sql, () => db.prepare(sql).all(...(params as unknown[]))) as Array<{
+    id: number;
+    type: string;
+    ledger: number;
+    payload: string;
+    created_at: number | null;
+  }>;
+
+  const hasMore = rawRows.length > limit;
+  const pageRows = hasMore ? rawRows.slice(0, limit) : rawRows;
+
+  const rows: EventExportRow[] = pageRows.map((r) => ({
+    type: r.type as ContractEventType,
+    ledger: r.ledger,
+    createdAt: r.created_at,
+    payload: JSON.parse(r.payload) as Record<string, unknown>,
+  }));
+
+  let nextCursor: EventsCursor | null = null;
+  if (hasMore && pageRows.length > 0) {
+    const last = pageRows[pageRows.length - 1]!;
+    nextCursor = { ledger: last.ledger, id: last.id };
+  }
+
+  return { rows, nextCursor };
+}
+
 /** A single row read directly off the `events` table, including `ledger`, for CSV export. */
 export interface EventExportRow {
   type: ContractEventType;
