@@ -20,6 +20,7 @@ import { metricsMiddleware, createMetricsHandler } from './middleware/metrics';
 import { requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
 import { getDb } from './db';
+import { mountGraphQL } from './graphql';
 
 /** Probe the SQLite database with a lightweight SELECT 1.
  *  Resolves 'ok' or 'error'; never rejects.
@@ -138,6 +139,12 @@ for (const prefix of prefixes) {
   app.use(`${prefix}/validators`, validatorRoutes);
   app.use(`${prefix}/admin`, adminRoutes);
 }
+
+// Mount the /graphql endpoint. The route is guarded by the `graphql_enabled`
+// feature flag — it returns 404 when the flag is off. Toggle is dynamic:
+// changing the flag in the database takes effect within one cache TTL window
+// (default 5 s) without a process restart. See docs/graphql.md for details.
+mountGraphQL(app);
 
 // Catch-all 404 handler for unmatched routes
 app.use((_req, res) => {

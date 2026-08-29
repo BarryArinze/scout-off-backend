@@ -9,8 +9,10 @@ import { stellarHealth } from './services/stellar';
 import { checkHealth } from './services/ipfs';
 import { indexEvents } from './services/indexer';
 import { getLastLedger, setLastLedger } from './db';
+import { bootstrapFeatureFlags } from './services/featureFlags';
 
 initDb();
+bootstrapFeatureFlags();
 
 // If INDEXER_BACKFILL_FROM_LEDGER is set and is less than the stored last_ledger,
 // reset last_ledger so the next poll replays from that point.
