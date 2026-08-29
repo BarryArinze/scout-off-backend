@@ -1,13 +1,14 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
-import { getEvents, getLastLedger, setLastLedger, getValidatorStats } from '../db';
+import { getEvents, getLastLedger, setLastLedger, getValidatorStats, getWebhookDeliveries, getWebhookDeliverySummary } from '../db';
 import { ApiResponse, EventRecord } from '../types';
 import { logAuditEvent } from '../services/audit';
 import { withdrawFees as stellarWithdrawFees, FeeWithdrawalError, FeeWithdrawalResult } from '../services/stellar';
 import config from '../config';
 import { logger } from '../utils/logger';
 import { ErrorCode } from '../utils/errorCodes';
+import type { Request, Response, NextFunction } from 'express';
 
 const STELLAR_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
 
@@ -530,6 +531,72 @@ export async function updatePlatformFee(req: Request, res: Response, next: NextF
       message: `Platform fee update to ${platformFeeBps} bps submitted (simulated)`,
       transactionId: 'stub-platform-fee-txn-placeholder',
     });
+  } catch (err) {
+    next(err);
+  }
+}
+
+// ─── Webhook delivery history ─────────────────────────────────────────────────
+
+const webhookDeliveryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
+  windowMs: z.coerce.number().int().min(1).optional(),
+});
+
+/**
+ * GET /api/admin/webhooks/:id/deliveries
+ *
+ * Returns paginated delivery-attempt records for a given webhook subscription.
+ * `:id` is the subscription identifier (URL-encoded endpoint URL).
+ *
+ * @query limit   - Page size (1–100, default 20)
+ * @query offset  - Row offset (default 0)
+ * @response 200 { success: true, data: WebhookDeliveryRow[], total, limit, offset }
+ */
+export async function getWebhookDeliveriesEndpoint(req: Request, res: Response, next: NextFunction) {
+  try {
+    const subscriptionId = decodeURIComponent(req.params.id);
+    const parsed = webhookDeliveryQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+    const { limit, offset } = parsed.data;
+    const { data, total } = getWebhookDeliveries({ subscriptionId, limit, offset });
+    res.json({ success: true, data, total, limit, offset });
+  } catch (err) {
+    next(err);
+  }
+}
+
+/**
+ * GET /api/admin/webhooks/:id/summary
+ *
+ * Returns a rolled-up success-rate summary for a subscription over a time window.
+ *
+ * @query windowMs  - Window size in milliseconds (default: 86400000 = 24 h)
+ * @response 200 { success: true, data: WebhookDeliverySummary }
+ */
+export async function getWebhookDeliverySummaryEndpoint(req: Request, res: Response, next: NextFunction) {
+  try {
+    const subscriptionId = decodeURIComponent(req.params.id);
+    const parsed = webhookDeliveryQuerySchema.safeParse(req.query);
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        error: parsed.error.errors[0]?.message ?? 'Invalid query parameters',
+        code: ErrorCode.VALIDATION_ERROR,
+      });
+      return;
+    }
+    const windowMs = parsed.data.windowMs ?? 24 * 60 * 60 * 1000;
+    const summary = getWebhookDeliverySummary(subscriptionId, windowMs);
+    res.json({ success: true, data: summary });
   } catch (err) {
     next(err);
   }

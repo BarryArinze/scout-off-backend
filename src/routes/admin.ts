@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getStats, getAllEvents, getFeeSummary, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, introspectToken, reindex, getValidatorStatsEndpoint, getAuditLog } from '../controllers/adminController';
+import { getStats, getAllEvents, getFeeSummary, registerValidator, revokeValidator, pauseContract, unpauseContract, withdrawFeesController, introspectToken, reindex, getValidatorStatsEndpoint, getAuditLog, getWebhookDeliveriesEndpoint, getWebhookDeliverySummaryEndpoint } from '../controllers/adminController';
 import { exportEvents } from '../controllers/exportController';
 import { requireRole } from '../middleware/auth';
 
@@ -160,5 +160,31 @@ router.post('/introspect', requireRole('admin'), introspectToken);
 router.post('/indexer/reindex', requireRole('admin'), reindex);
 
 router.get('/validators/:wallet/stats', requireRole('admin'), getValidatorStatsEndpoint);
+
+/**
+ * GET /api/admin/webhooks/:id/deliveries
+ *
+ * Returns paginated delivery-attempt records (success + failure) for a webhook
+ * subscription. `:id` should be the URL-encoded subscription identifier
+ * (typically the endpoint URL).
+ *
+ * @query limit  - Page size 1–100 (default 20)
+ * @query offset - Row offset (default 0)
+ * @response 200 { success: true, data: WebhookDeliveryRow[], total, limit, offset }
+ * @auth Bearer (admin role required)
+ */
+router.get('/webhooks/:id/deliveries', requireRole('admin'), getWebhookDeliveriesEndpoint);
+
+/**
+ * GET /api/admin/webhooks/:id/summary
+ *
+ * Returns a rolled-up success-rate summary (total, successes, failures,
+ * success_rate, last_success_at) for a subscription over a configurable window.
+ *
+ * @query windowMs - Window in milliseconds (default 86400000 = 24 h)
+ * @response 200 { success: true, data: WebhookDeliverySummary }
+ * @auth Bearer (admin role required)
+ */
+router.get('/webhooks/:id/summary', requireRole('admin'), getWebhookDeliverySummaryEndpoint);
 
 export default router;

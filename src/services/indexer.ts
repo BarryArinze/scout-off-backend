@@ -7,6 +7,7 @@ import {
   upsertPlayer,
   updatePlayerProgress,
   getEvents,
+  pruneWebhookDeliveries,
 } from '../db';
 import { dispatchEventWebhook } from './webhooks';
 import { logger } from '../utils/logger';
@@ -156,4 +157,15 @@ export async function indexEvents(): Promise<void> {
   const latest = response.events.at(-1)!;
   setLastLedger(latest.ledger + 1);
   indexerLedgerLag = Math.max(0, response.latestLedger - latest.ledger);
+
+  // Prune webhook_deliveries rows older than 30 days on each poll cycle.
+  // Runs in the background; failure is non-fatal.
+  try {
+    const pruned = pruneWebhookDeliveries();
+    if (pruned > 0) {
+      logger.debug(`[indexer] pruned ${pruned} webhook delivery records`);
+    }
+  } catch (err) {
+    logger.warn(`[indexer] webhook delivery pruning failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
