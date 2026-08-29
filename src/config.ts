@@ -527,6 +527,21 @@ const config = {
    */
   readinessGracePeriodMs: parseNumericEnv('READINESS_GRACE_PERIOD_MS', process.env.READINESS_GRACE_PERIOD_MS, 5 * 60 * 1000, { min: 0, integer: true }),
 
+  /**
+   * Log redaction configuration for sensitive data in production logs.
+   * In development, redaction is always disabled (pass-through).
+   */
+  logRedaction: {
+    /** Enable redaction in non-development environments (default: true for staging/production) */
+    enabled: nodeEnv !== 'development' && process.env.LOG_REDACTION_ENABLED !== 'false',
+    /** Number of characters to preserve at the start of masked wallet addresses (default: 1) */
+    walletPrefixLength: parseNumericEnv('LOG_REDACTION_WALLET_PREFIX', process.env.LOG_REDACTION_WALLET_PREFIX, 1, { min: 1, max: 10, integer: true }),
+    /** Number of characters to preserve at the end of masked wallet addresses (default: 4) */
+    walletSuffixLength: parseNumericEnv('LOG_REDACTION_WALLET_SUFFIX', process.env.LOG_REDACTION_WALLET_SUFFIX, 4, { min: 1, max: 10, integer: true }),
+    /** Hash correlation IDs instead of logging them raw (default: false) */
+    hashCorrelationIds: process.env.LOG_REDACTION_HASH_CORRELATION_IDS === 'true',
+  },
+
 };
 
 export default config;
