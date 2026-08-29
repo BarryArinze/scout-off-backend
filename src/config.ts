@@ -344,6 +344,33 @@ const config = {
      */
     timeoutMs: parseNumericEnv('WEBHOOK_TIMEOUT_MS', process.env.WEBHOOK_TIMEOUT_MS, 10000, { min: 1, integer: true }),
   },
+  /**
+   * Dead-letter queue alerting (#1131).
+   * Size threshold: absolute pending+in_progress row count.
+   * Rate threshold: inserts within rateWindowMs.
+   * Optional PLATFORM_ADMIN_NOTIFY_URL receives a JSON POST on crossing.
+   */
+  webhookDeadLetterAlert: {
+    sizeThreshold: parseNumericEnv(
+      'WEBHOOK_DLQ_SIZE_THRESHOLD',
+      process.env.WEBHOOK_DLQ_SIZE_THRESHOLD,
+      100,
+      { min: 1, integer: true },
+    ),
+    rateThreshold: parseNumericEnv(
+      'WEBHOOK_DLQ_RATE_THRESHOLD',
+      process.env.WEBHOOK_DLQ_RATE_THRESHOLD,
+      50,
+      { min: 1, integer: true },
+    ),
+    rateWindowMs: parseNumericEnv(
+      'WEBHOOK_DLQ_RATE_WINDOW_MS',
+      process.env.WEBHOOK_DLQ_RATE_WINDOW_MS,
+      5 * 60 * 1000,
+      { min: 1000, integer: true },
+    ),
+    adminNotifyUrl: process.env.PLATFORM_ADMIN_NOTIFY_URL ?? '',
+  },
   // Symmetric key (32-byte hex, e.g. `openssl rand -hex 32`) used to encrypt
   // webhook_subscriptions.secret at rest (#686). Required in production —
   // see src/utils/webhookSecretCipher.ts and docs/secrets-rotation.md.
