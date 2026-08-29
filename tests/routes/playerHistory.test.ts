@@ -52,7 +52,10 @@ describe("Player profile history", () => {
 
   // ── Shared setup: register player and perform 2 updates ────────────────────
 
-  async function setupPlayerWithHistory(): Promise<void> {
+  async function setupPlayerWithHistory(): Promise<{
+    playerId: string;
+    ownerToken: string;
+  }> {
     const playerToken = makeToken(PLAYER_WALLET, "player");
 
     const registerRes = await request(app)
@@ -65,28 +68,40 @@ describe("Player profile history", () => {
         metadataUri: "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
       });
     expect(registerRes.status).toBe(201);
+    const playerId = registerRes.body.data.playerId;
 
+    // requireOwner compares the JWT subject to the :playerId route param, so
+    // the update token's sub must be the player id (not the wallet).
+    const ownerToken = makeToken(playerId, "player");
+
+    // Optimistic concurrency (#1151): the first update has no prior token, so
+    // use the documented override; the response ETag is the token for the
+    // second update.
     const put1 = await request(app)
-      .put(`/api/players/${PLAYER_WALLET}`)
-      .set("Authorization", `Bearer ${playerToken}`)
+      .put(`/api/players/${playerId}`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .set("If-Match", "*")
       .send({ metadataUri: "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG" });
     expect(put1.status).toBe(200);
 
     const put2 = await request(app)
-      .put(`/api/players/${PLAYER_WALLET}`)
-      .set("Authorization", `Bearer ${playerToken}`)
+      .put(`/api/players/${playerId}`)
+      .set("Authorization", `Bearer ${ownerToken}`)
+      .set("If-Match", put1.headers.etag)
       .send({ metadataUri: "QmSoLV4Bbm51jM9C4gDYZQ9Cy3U6aXMJDAbzgu2fzaDs64" });
     expect(put2.status).toBe(200);
+
+    return { playerId, ownerToken };
   }
 
   // ── GET /api/players/:playerId/history ─────────────────────────────────────
 
   it("accumulates across multiple PUT updates and history returns version list (admin)", async () => {
-    await setupPlayerWithHistory();
+    const { playerId } = await setupPlayerWithHistory();
 
     const adminToken = makeToken(ADMIN_WALLET, "admin");
     const historyRes = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history`)
+      .get(`/api/players/${playerId}/history`)
       .set("Authorization", `Bearer ${adminToken}`);
 
     expect(historyRes.status).toBe(200);
@@ -121,12 +136,11 @@ describe("Player profile history", () => {
   });
 
   it("owner can access their own history", async () => {
-    await setupPlayerWithHistory();
+    const { playerId, ownerToken } = await setupPlayerWithHistory();
 
-    const playerToken = makeToken(PLAYER_WALLET, "player");
     const res = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history`)
-      .set("Authorization", `Bearer ${playerToken}`);
+      .get(`/api/players/${playerId}/history`)
+      .set("Authorization", `Bearer ${ownerToken}`);
 
     expect(res.status).toBe(200);
     expect(res.body.success).toBe(true);
@@ -135,11 +149,11 @@ describe("Player profile history", () => {
   // ── GET /api/players/:playerId/history/:version ────────────────────────────
 
   it("returns version 1 snapshot correctly", async () => {
-    await setupPlayerWithHistory();
+    const { playerId } = await setupPlayerWithHistory();
 
     const adminToken = makeToken(ADMIN_WALLET, "admin");
     const res = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history/1`)
+      .get(`/api/players/${playerId}/history/1`)
       .set("Authorization", `Bearer ${adminToken}`);
 
     expect(res.status).toBe(200);
@@ -152,11 +166,11 @@ describe("Player profile history", () => {
   });
 
   it("returns version 2 snapshot correctly", async () => {
-    await setupPlayerWithHistory();
+    const { playerId } = await setupPlayerWithHistory();
 
     const adminToken = makeToken(ADMIN_WALLET, "admin");
     const res = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history/2`)
+      .get(`/api/players/${playerId}/history/2`)
       .set("Authorization", `Bearer ${adminToken}`);
 
     expect(res.status).toBe(200);
@@ -169,11 +183,11 @@ describe("Player profile history", () => {
   });
 
   it("returns 404 for a non-existent version", async () => {
-    await setupPlayerWithHistory();
+    const { playerId } = await setupPlayerWithHistory();
 
     const adminToken = makeToken(ADMIN_WALLET, "admin");
     const res = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history/99`)
+      .get(`/api/players/${playerId}/history/99`)
       .set("Authorization", `Bearer ${adminToken}`);
 
     expect(res.status).toBe(404);
@@ -191,11 +205,11 @@ describe("Player profile history", () => {
   });
 
   it("returns 400 for non-numeric version", async () => {
-    await setupPlayerWithHistory();
+    const { playerId } = await setupPlayerWithHistory();
 
     const adminToken = makeToken(ADMIN_WALLET, "admin");
     const res = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history/abc`)
+      .get(`/api/players/${playerId}/history/abc`)
       .set("Authorization", `Bearer ${adminToken}`);
 
     expect(res.status).toBe(400);
@@ -205,11 +219,11 @@ describe("Player profile history", () => {
   // ── GET /api/players/:playerId/history/:version/diff ──────────────────────
 
   it("diff between version 2 and version 1 shows metadataUri changed", async () => {
-    await setupPlayerWithHistory();
+    const { playerId } = await setupPlayerWithHistory();
 
     const adminToken = makeToken(ADMIN_WALLET, "admin");
     const res = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history/2/diff`)
+      .get(`/api/players/${playerId}/history/2/diff`)
       .set("Authorization", `Bearer ${adminToken}`);
 
     expect(res.status).toBe(200);
@@ -228,11 +242,11 @@ describe("Player profile history", () => {
   });
 
   it("diff for version 1 (initial snapshot) has empty diff and null previousVersion", async () => {
-    await setupPlayerWithHistory();
+    const { playerId } = await setupPlayerWithHistory();
 
     const adminToken = makeToken(ADMIN_WALLET, "admin");
     const res = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history/1/diff`)
+      .get(`/api/players/${playerId}/history/1/diff`)
       .set("Authorization", `Bearer ${adminToken}`);
 
     expect(res.status).toBe(200);
@@ -249,11 +263,11 @@ describe("Player profile history", () => {
   });
 
   it("diff returns 404 for non-existent version", async () => {
-    await setupPlayerWithHistory();
+    const { playerId } = await setupPlayerWithHistory();
 
     const adminToken = makeToken(ADMIN_WALLET, "admin");
     const res = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history/99/diff`)
+      .get(`/api/players/${playerId}/history/99/diff`)
       .set("Authorization", `Bearer ${adminToken}`);
 
     expect(res.status).toBe(404);
@@ -271,11 +285,11 @@ describe("Player profile history", () => {
   });
 
   it("diff returns 400 for non-numeric version", async () => {
-    await setupPlayerWithHistory();
+    const { playerId } = await setupPlayerWithHistory();
 
     const adminToken = makeToken(ADMIN_WALLET, "admin");
     const res = await request(app)
-      .get(`/api/players/${PLAYER_WALLET}/history/abc/diff`)
+      .get(`/api/players/${playerId}/history/abc/diff`)
       .set("Authorization", `Bearer ${adminToken}`);
 
     expect(res.status).toBe(400);

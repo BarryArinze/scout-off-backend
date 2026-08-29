@@ -68,7 +68,8 @@ router.route("/register")
  *
  * Fetch a single player profile, including a live `offerCount`. Deactivated
  * profiles return 404 to non-owners/non-admins. Supports conditional
- * requests via ETag (304 when `If-None-Match` matches).
+ * requests via ETag (304 when `If-None-Match` matches). The same ETag is the
+ * version token for optimistic concurrency — echo it as `If-Match` on PUT.
  *
  * @param playerId {string} - Player's unique identifier (cuid2)
  * @response 200 { success: true, data: PlayerDetail }
@@ -81,14 +82,20 @@ router.route("/register")
  *
  * Update a player's profile metadata. Owner-only. Accepts either a raw
  * `metadata` object (pinned to IPFS by the backend) or a pre-pinned
- * `metadataUri`.
+ * `metadataUri`. Optimistic concurrency (#1151): the ETag returned by GET
+ * must be echoed in the `If-Match` header. A missing header is rejected with
+ * 428, a stale one with 412 (no write happens); `If-Match: *` is the
+ * documented override.
  *
  * @param playerId {string} - Player's unique identifier (cuid2)
+ * @header If-Match {string} - ETag from GET /api/players/:playerId (required; "*" to override)
  * @body { metadata: object } | { metadataUri: string }
  * @response 200 { success: true, data: { metadataUri, playerId } }
  * @response 400 { success: false, error: string } - Invalid playerId or body
  * @response 403 { success: false, error: string } - Not the profile owner
  * @response 404 { success: false, error: string } - Player not found
+ * @response 412 { success: false, error: string } - If-Match does not match the current profile version
+ * @response 428 { success: false, error: string } - If-Match header required
  * @auth Bearer (player role required, profile owner only)
  */
 router.route("/:playerId")

@@ -1954,7 +1954,7 @@
         ],
         "summary": "Fetch a single player profile, including a live `offerCount`.",
         "operationId": "getPlayer",
-        "description": "Fetch a single player profile, including a live `offerCount`. Deactivated\nprofiles return 404 to non-owners/non-admins. Supports conditional\nrequests via ETag (304 when `If-None-Match` matches).",
+        "description": "Fetch a single player profile, including a live `offerCount`. Deactivated\nprofiles return 404 to non-owners/non-admins. Supports conditional\nrequests via ETag (304 when `If-None-Match` matches). The same ETag is the\nversion token for optimistic concurrency — echo it as `If-Match` on PUT.",
         "parameters": [
           {
             "name": "playerId",
@@ -1993,7 +1993,7 @@
         ],
         "summary": "Update a player's profile metadata.",
         "operationId": "updatePlayer",
-        "description": "Update a player's profile metadata. Owner-only. Accepts either a raw\n`metadata` object (pinned to IPFS by the backend) or a pre-pinned\n`metadataUri`.",
+        "description": "Update a player's profile metadata. Owner-only. Accepts either a raw\n`metadata` object (pinned to IPFS by the backend) or a pre-pinned\n`metadataUri`. Optimistic concurrency (#1151): the ETag returned by GET\nmust be echoed in the `If-Match` header. A missing header is rejected with\n428, a stale one with 412 (no write happens); `If-Match: *` is the\ndocumented override.",
         "parameters": [
           {
             "name": "playerId",
@@ -2003,6 +2003,15 @@
               "type": "string"
             },
             "description": "Player's unique identifier (cuid2)"
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "ETag from GET /api/players/:playerId (required; \"*\" to override)"
           }
         ],
         "requestBody": {
@@ -2054,6 +2063,12 @@
           },
           "404": {
             "description": "{ success: false, error: string } - Player not found"
+          },
+          "412": {
+            "description": "{ success: false, error: string } - If-Match does not match the current profile version"
+          },
+          "428": {
+            "description": "{ success: false, error: string } - If-Match header required"
           }
         },
         "security": [
@@ -4422,6 +4437,65 @@
           },
           "409": {
             "description": "{ success: false, error: string } - Idempotency key reused with a different request"
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "apiKeyAuth": [
+              "write:trial_offers"
+            ]
+          }
+        ],
+        "x-required-role": [
+          "scout"
+        ],
+        "x-api-key-scope": "write:trial_offers",
+        "x-owner-only": true
+      }
+    },
+    "/scouts/{wallet}/trial-offers/{offerId}": {
+      "delete": {
+        "tags": [
+          "scouts"
+        ],
+        "summary": "Cancel (withdraw) a pending trial offer submitted by this scout.",
+        "operationId": "cancelTrialOfferHandler",
+        "description": "Cancel (withdraw) a pending trial offer submitted by this scout.\nOnly the originating scout may cancel their own offer, and only while it is\nstill in 'pending' status — the player has not yet accepted or rejected it.\n\nAfter cancellation, the player's accept/reject attempts return 410 Gone.",
+        "parameters": [
+          {
+            "name": "wallet",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Scout's Stellar public key"
+          },
+          {
+            "name": "offerId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Trial offer ID to cancel"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "{ success: true, data: { offerId, status: 'cancelled', cancelledAt } }"
+          },
+          "403": {
+            "description": "{ success: false, error: string } - Wallet mismatch or offer belongs to another scout"
+          },
+          "404": {
+            "description": "{ success: false, error: string } - Trial offer not found"
+          },
+          "409": {
+            "description": "{ success: false, error: string } - Offer already accepted/rejected or already cancelled"
           }
         },
         "security": [

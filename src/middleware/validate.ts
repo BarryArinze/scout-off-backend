@@ -120,9 +120,14 @@ export function validateQuery<T>(schema: ZodSchema<T>, options?: ValidationOptio
       });
       return;
     }
-    // Cast so the controller can read coerced + defaulted values via req.query
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (req as any).query = sanitizeObject(result.data);
+    // Express 5 exposes req.query as a getter-only property, so a plain
+    // assignment throws — define the sanitized value explicitly instead so
+    // controllers keep reading coerced + defaulted values via req.query.
+    Object.defineProperty(req, 'query', {
+      value: sanitizeObject(result.data),
+      writable: true,
+      configurable: true,
+    });
     next();
   };
 }

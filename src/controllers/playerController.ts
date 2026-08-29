@@ -9,6 +9,7 @@ import { serializeIpfsResult } from "../utils/ipfsSerializer";
 import {
   queryEvents,
   getPlayerById,
+  getPlayerProfileHistory,
   insertPlayerProfileHistory,
   countPlayers,
   searchPlayers,
@@ -141,6 +142,40 @@ export async function registerPlayer(
   res.status(201).json(body);
 }
 
+/**
+ * Build the profile detail object served by GET /api/players/:playerId.
+ * Key order is significant: the ETag digest is a hash of this exact JSON,
+ * so GET (which may serve from cache) and PUT (which reads fresh from the
+ * DB) must construct identical objects for the same stored row.
+ */
+function buildPlayerDetail(row: PlayerRow): Record<string, unknown> {
+  const { tierName: tierNameMeta, tierDescription } = getTierMeta(row.progress_level as number);
+  return {
+    player_id: row.player_id,
+    wallet: row.wallet,
+    position: row.position,
+    region: row.region,
+    metadataUri: row.metadata_uri,
+    progress_level: row.progress_level,
+    created_at: row.created_at,
+    is_active: row.is_active,
+    tierName: tierNameMeta,
+    tierDescription,
+    progress_tier_name: tierName(row.progress_level as number),
+  };
+}
+
+/**
+ * Version token for a player profile (#1151). One token serves both caching
+ * (If-None-Match → 304) and optimistic concurrency (If-Match on PUT): it is
+ * a hash of the profile payload plus the profile-history version (the count
+ * of recorded metadata updates, which the profile-history feature already
+ * tracks and which bumps on every successful PUT).
+ */
+function playerEtag(detail: Record<string, unknown>, profileVersion: number): string {
+  return `"${createHash("sha1").update(JSON.stringify({ ...detail, profileVersion })).digest("hex")}"`;
+}
+
 /** GET /api/players/:playerId */
 export async function getPlayer(
   req: Request,
@@ -161,20 +196,7 @@ export async function getPlayer(
       res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
       return;
     }
-    const { tierName: tierNameMeta, tierDescription } = getTierMeta(row.progress_level as number);
-    data = {
-      player_id: row.player_id,
-      wallet: row.wallet,
-      position: row.position,
-      region: row.region,
-      metadataUri: row.metadata_uri,
-      progress_level: row.progress_level,
-      created_at: row.created_at,
-      is_active: row.is_active,
-      tierName: tierNameMeta,
-      tierDescription,
-      progress_tier_name: tierName(row.progress_level as number),
-    };
+    data = buildPlayerDetail(row);
     await cacheSet(cacheKey, data);
   }
 
@@ -185,7 +207,10 @@ export async function getPlayer(
     return;
   }
 
-  const etag = `"${createHash("sha1").update(JSON.stringify(data)).digest("hex")}"`;
+  // The profile-history version is part of the ETag so a profile update that
+  // does not change the cached row payload still moves the version token.
+  const profileHistory = await getPlayerProfileHistory(playerId);
+  const etag = playerEtag(data, profileHistory.length);
   if (req.headers["if-none-match"] === etag) {
     res.status(304).end();
     return;
@@ -363,6 +388,39 @@ export async function updatePlayer(
   next: NextFunction,
 ): Promise<void> {
   const playerId = sanitizeInput(req.params.playerId as string);
+
+  // Optimistic concurrency (#1151): the ETag returned by GET doubles as the
+  // version token. Compare against the *current* stored state (fresh read —
+  // the GET path may serve from cache) so a client editing a stale profile
+  // can never silently clobber a newer update.
+  const row = await getPlayerById(playerId);
+  if (!row) {
+    res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+    return;
+  }
+  const profileHistory = await getPlayerProfileHistory(playerId);
+  const currentEtag = playerEtag(buildPlayerDetail(row), profileHistory.length);
+
+  const ifMatch = req.headers["if-match"];
+  if (ifMatch === undefined) {
+    res.status(428).json({
+      success: false,
+      error: "If-Match header required — echo the ETag from GET /api/players/:playerId (or send \"*\" to override)",
+      code: ErrorCode.PRECONDITION_REQUIRED,
+    });
+    return;
+  }
+  // "*" is the standard override: the request proceeds as long as the
+  // resource exists (which the row lookup above already confirmed).
+  if (ifMatch !== "*" && ifMatch !== currentEtag) {
+    res.status(412).json({
+      success: false,
+      error: "Precondition Failed — the profile changed since it was last fetched; re-fetch and retry",
+      code: ErrorCode.PRECONDITION_FAILED,
+    });
+    return;
+  }
+
   const parsed = updatePlayerSchema.parse(req.body);
   const metadataUri =
     "metadata" in parsed
@@ -380,6 +438,10 @@ export async function updatePlayer(
 
   // Bust the single-player cache so the next GET reflects the update.
   await invalidatePlayerCache(playerId);
+
+  // The version has moved (one more history row) — return the new token so
+  // the client can chain another PUT without a round-trip GET.
+  res.set("ETag", playerEtag(buildPlayerDetail(row), profileHistory.length + 1));
 
   res.status(200).json({
     success: true,
