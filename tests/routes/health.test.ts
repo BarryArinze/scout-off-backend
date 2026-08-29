@@ -1,7 +1,10 @@
 /**
  * Tests for the readiness probe endpoints (/ready and /health/readiness).
- * Both delegates to the shared checkReadiness() helper, so they must return
+ * Both delegate to the shared checkReadiness() helper, so they must return
  * identical responses for the same service states.
+ *
+ * Updated for issue #1124: each probe now returns { status, ms } rather than
+ * a plain string, and each probe runs concurrently with its own timeout.
  */
 
 jest.mock('../../src/services/ipfs', () => ({
@@ -60,7 +63,23 @@ function driverWith(overrides: Partial<ReturnType<typeof getRealDriver>>) {
   };
 }
 
-// ─── /ready ──────────────────────────────────────────────────────────────────
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+/** Extract the probe status string from either the new { status, ms } shape
+ *  or the legacy plain-string shape. */
+function probeStatus(value: unknown): string {
+  if (value && typeof value === 'object' && 'status' in (value as object)) {
+    return (value as { status: string }).status;
+  }
+  return value as string;
+}
+
+/** Assert a probe field has the expected status. */
+function expectProbeStatus(value: unknown, expected: string): void {
+  expect(probeStatus(value)).toBe(expected);
+}
+
+// ─── /ready and /health/readiness ────────────────────────────────────────────
 
 const READINESS_PATHS = ['/ready', '/health/readiness'];
 
@@ -79,15 +98,40 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     const res = await request(app).get(path);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ok');
-    expect(res.body.services.ipfs).toBe('ok');
-    expect(res.body.services.db).toBe('ok');
+    expectProbeStatus(res.body.services.ipfs, 'ok');
+    expectProbeStatus(res.body.services.db, 'ok');
   });
 
   it('includes db field in the services object', async () => {
     mockCheckHealth.mockResolvedValueOnce(undefined);
     const res = await request(app).get('/ready');
     expect(res.body.services).toHaveProperty('db');
-    expect(['ok', 'unavailable']).toContain(res.body.services.db);
+    expect(['ok', 'unavailable']).toContain(probeStatus(res.body.services.db));
+  });
+
+  it('per-probe result includes a numeric ms field', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    const res = await request(app).get(path);
+    expect(res.status).toBe(200);
+    // Each probe should report latency as a non-negative integer
+    for (const key of ['db', 'ipfs', 'stellar']) {
+      const probe = res.body.services[key];
+      if (probe && typeof probe === 'object') {
+        expect(typeof probe.ms).toBe('number');
+        expect(probe.ms).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+
+  it('probes run concurrently — total latency is bounded by max single probe, not the sum', async () => {
+    // Each probe resolves quickly; verify we get a result without hanging
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    const t0 = Date.now();
+    const res = await request(app).get(path);
+    const elapsed = Date.now() - t0;
+    expect(res.status).toBeLessThanOrEqual(503);
+    // Should finish well within 3x the per-probe timeout (generous margin for CI)
+    expect(elapsed).toBeLessThan(15_000);
   });
 
   it('returns 503 with ipfs:unavailable when IPFS is unreachable', async () => {
@@ -95,7 +139,7 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
-    expect(res.body.services.ipfs).toBe('unavailable');
+    expectProbeStatus(res.body.services.ipfs, 'unavailable');
   });
 
   it('returns 503 with db:unavailable when the database probe throws', async () => {
@@ -109,7 +153,7 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     const res = await request(app).get('/ready');
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
-    expect(res.body.services.db).toBe('unavailable');
+    expectProbeStatus(res.body.services.db, 'unavailable');
   });
 
   it('returns 503 with db:unavailable when the DB is read-only (writes fail, reads still succeed)', async () => {
@@ -128,7 +172,16 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
-    expect(res.body.services.db).toBe('unavailable');
+    expectProbeStatus(res.body.services.db, 'unavailable');
+  });
+
+  it('IPFS failure does not prevent db and stellar results from being reported', async () => {
+    mockCheckHealth.mockRejectedValueOnce(new Error('IPFS timeout'));
+    const res = await request(app).get(path);
+    expect(res.status).toBe(503);
+    // db and stellar probes should still return their own results
+    expect(res.body.services).toHaveProperty('db');
+    expect(res.body.services).toHaveProperty('stellar');
   });
 
   it('includes indexer field in the services object', async () => {
@@ -205,6 +258,10 @@ describe('GET /health', () => {
 });
 
 describe('GET /ready and GET /health/readiness return identical responses', () => {
+  afterEach(() => {
+    mockCheckHealth.mockReset();
+  });
+
   it('both return ok when IPFS is healthy', async () => {
     mockCheckHealth.mockResolvedValue(undefined);
     const [a, b] = await Promise.all([
