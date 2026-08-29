@@ -15,6 +15,7 @@ not a directory listing.
 | [API_DOCUMENTATION.md](API_DOCUMENTATION.md) | Contributor | How the OpenAPI spec is generated from route JSDoc comments, and the annotation format to keep it accurate when adding or changing routes |
 | [api-versioning.md](api-versioning.md) | Contributor | The API versioning policy: `/api/v1`, `/api/v2`, and the `API-Version` header semantics |
 | [events.md](events.md) | Operator & client developer | The SSE event stream (`/api/events/stream`): how to connect, filter parameters, frame format, wallet-relevance rules, and reconnection limitations |
+| [ipfs-pinata-gateway.md](ipfs-pinata-gateway.md) | Operator | IPFS gateway configuration: `PINATA_GATEWAY` vs `IPFS_GATEWAYS`, default fallback order, HTTPS validation, and retrieval retry behavior |
 | [webhooks.md](webhooks.md) | Operator & subscriber | Outbound event webhooks: subscribing, HMAC signature verification, delivery/retry, the dead-letter queue, and admin replay |
 
 ## Auth & Security
@@ -29,6 +30,7 @@ not a directory listing.
 
 | Doc | Audience | Description |
 | --- | -------- | ----------- |
+| [data-model.md](data-model.md) | Contributor | All application tables, their purposes, and how they are populated (indexer, API writes, migrations) — consult this before writing queries |
 | [data-privacy.md](data-privacy.md) | Operator | GDPR right-to-erasure: what the backend can erase, and the immutable on-chain boundary |
 | [postgres-migration.md](postgres-migration.md) | Operator | Migrating a deployment from SQLite to PostgreSQL |
 | [tier-promotion.md](tier-promotion.md) | Contributor | How a player's progress tier (0–3) is derived from approved milestones |
