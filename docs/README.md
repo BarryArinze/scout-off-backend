@@ -17,6 +17,8 @@ not a directory listing.
 | [events.md](events.md) | Operator & client developer | The SSE event stream (`/api/events/stream`): how to connect, filter parameters, frame format, wallet-relevance rules, and reconnection limitations |
 | [ipfs-pinata-gateway.md](ipfs-pinata-gateway.md) | Operator | IPFS gateway configuration: `PINATA_GATEWAY` vs `IPFS_GATEWAYS`, default fallback order, HTTPS validation, and retrieval retry behavior |
 | [webhooks.md](webhooks.md) | Operator & subscriber | Outbound event webhooks: subscribing, HMAC signature verification, delivery/retry, the dead-letter queue, and admin replay |
+| [trace-correlation.md](trace-correlation.md) | Contributor | End-to-end correlation lifecycle across HTTP → Soroban tx → indexer → webhook/SSE (#1113) |
+| [event-ordering.md](event-ordering.md) | Contributor | Deterministic indexer event total order and co-transaction atomicity (#1111) |
 
 ## Auth & Security
 
@@ -42,6 +44,7 @@ not a directory listing.
 | --- | -------- | ----------- |
 | [runbook.md](runbook.md) | Operator | Incident → action runbook: indexer lag, wrong tiers, webhook failures, RPC/IPFS outages, DB slowness, reindex/replay, dead-letter drain, cache flush, circuit breaker, pause/unpause |
 | [performance.md](performance.md) | Contributor | Latency budgets for key endpoints and how to run the load-test suites |
+| [soroban-sandbox-e2e.md](soroban-sandbox-e2e.md) | Contributor | Local + CI Soroban sandbox that deploys all five contracts and runs live backend E2E (#1117) |
 
 ## History
 

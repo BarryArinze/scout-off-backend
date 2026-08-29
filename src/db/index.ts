@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
 import { EventRecord, ContractEventType } from '../types';
+import { EVENTS_ORDER_BY_SQL } from '../services/eventOrdering';
 import { runMigrations } from './migrate';
 import { logger } from '../utils/logger';
 import { computeChainHash, auditChainContent, GENESIS_HASH } from '../utils/hashChain';
@@ -125,16 +126,26 @@ export async function initDb(): Promise<void> {
     // Create initial schema inline (for backwards compatibility with in-memory test databases)
     _driver.exec(`
       CREATE TABLE IF NOT EXISTS events (
-        id         INTEGER PRIMARY KEY AUTOINCREMENT,
-        type       TEXT NOT NULL,
-        ledger     INTEGER NOT NULL,
-        ledger_hash TEXT,
-        tx_hash    TEXT NOT NULL UNIQUE,
-        payload    TEXT NOT NULL,
-        created_at INTEGER
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        type                 TEXT NOT NULL,
+        ledger               INTEGER NOT NULL,
+        ledger_hash          TEXT,
+        tx_hash              TEXT NOT NULL,
+        payload              TEXT NOT NULL,
+        created_at           INTEGER,
+        tx_application_order INTEGER NOT NULL DEFAULT 0,
+        event_index          INTEGER NOT NULL DEFAULT 0,
+        contract_id          TEXT NOT NULL DEFAULT ''
       );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_tx_event ON events (tx_hash, event_index);
       CREATE INDEX IF NOT EXISTS idx_events_ledger ON events (ledger);
       CREATE INDEX IF NOT EXISTS idx_events_type_ledger ON events (type, ledger);
+      CREATE INDEX IF NOT EXISTS idx_events_ordinal ON events (ledger, tx_application_order, event_index, contract_id);
+      CREATE TABLE IF NOT EXISTS tx_correlations (
+        tx_hash        TEXT PRIMARY KEY,
+        correlation_id TEXT NOT NULL,
+        created_at     INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS indexer_state (
         key   TEXT PRIMARY KEY,
         value TEXT NOT NULL
@@ -257,16 +268,16 @@ export function queryEvents(
   let sql: string;
   let rows: EventRow[];
   if (type && hasPagination) {
-    sql = 'SELECT * FROM events WHERE type = ? ORDER BY ledger ASC LIMIT ? OFFSET ?';
+    sql = `SELECT * FROM events WHERE type = ? ORDER BY ${EVENTS_ORDER_BY_SQL} LIMIT ? OFFSET ?`;
     rows = timedQuery(sql, () => db.prepare(sql).all(type, limit, offset) as EventRow[]);
   } else if (type) {
-    sql = 'SELECT * FROM events WHERE type = ? ORDER BY ledger ASC';
+    sql = `SELECT * FROM events WHERE type = ? ORDER BY ${EVENTS_ORDER_BY_SQL}`;
     rows = timedQuery(sql, () => db.prepare(sql).all(type) as EventRow[]);
   } else if (hasPagination) {
-    sql = 'SELECT * FROM events ORDER BY ledger ASC LIMIT ? OFFSET ?';
+    sql = `SELECT * FROM events ORDER BY ${EVENTS_ORDER_BY_SQL} LIMIT ? OFFSET ?`;
     rows = timedQuery(sql, () => db.prepare(sql).all(limit, offset) as EventRow[]);
   } else {
-    sql = 'SELECT * FROM events ORDER BY ledger ASC';
+    sql = `SELECT * FROM events ORDER BY ${EVENTS_ORDER_BY_SQL}`;
     rows = timedQuery(sql, () => db.prepare(sql).all() as EventRow[]);
   }
 
@@ -376,7 +387,10 @@ export function getEventsPage(filter: EventsPageFilter, limit: number, offset: n
   }
 
   const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
-  const sql = 'SELECT type, ledger, payload, created_at FROM events ' + where + ' ORDER BY ledger ASC, id ASC LIMIT ? OFFSET ?';
+  const sql =
+    'SELECT type, ledger, payload, created_at FROM events ' +
+    where +
+    ` ORDER BY ${EVENTS_ORDER_BY_SQL} LIMIT ? OFFSET ?`;
   params.push(limit, offset);
 
   const rows = timedQuery(sql, () => db.prepare(sql).all(...(params as unknown[]))) as Array<{
@@ -422,7 +436,10 @@ export function* getEventsIterable(filter: EventsPageFilter): Generator<EventExp
   }
 
   const where = clauses.length ? 'WHERE ' + clauses.join(' AND ') : '';
-  const sql = 'SELECT type, ledger, payload, created_at FROM events ' + where + ' ORDER BY ledger ASC, id ASC';
+  const sql =
+    'SELECT type, ledger, payload, created_at FROM events ' +
+    where +
+    ` ORDER BY ${EVENTS_ORDER_BY_SQL}`;
 
   const stmt = db.prepare(sql);
   const iterator = stmt.iterate(...(params as unknown[])) as IterableIterator<{
@@ -2798,6 +2815,23 @@ export function countWebhookDeadLetters(): number {
     const row = getDb().prepare(sql).get() as { count: number } | undefined;
     return row?.count ?? 0;
   });
+}
+
+/**
+ * Dead-letter counts grouped by subscription_id for metrics and alerting (#1131).
+ */
+export function countWebhookDeadLettersBySubscription(): Array<{
+  subscription_id: number | null;
+  count: number;
+}> {
+  const sql = `SELECT subscription_id, COUNT(*) AS count
+               FROM webhook_dead_letters
+               WHERE status IN ('pending', 'in_progress')
+               GROUP BY subscription_id
+               ORDER BY count DESC`;
+  return timedQuery(sql, () =>
+    getDb().prepare(sql).all() as Array<{ subscription_id: number | null; count: number }>,
+  );
 }
 
 export function getWebhookDeadLetterById(id: number): WebhookDeadLetter | undefined {
