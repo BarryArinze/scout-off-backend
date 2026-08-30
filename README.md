@@ -829,6 +829,8 @@ Operator topics (secrets rotation, data privacy, Postgres migration, deployment)
 | `SUBSCRIPTION_GRACE_PERIOD_HOURS` | Grace period after subscription expiry during which access is still granted (default: `24`)                           |
 | `TRIAL_OFFER_TTL_MS`              | How long a trial offer remains open for accept/reject, in milliseconds (default: `2592000000` = 30 days). Set to `0` to disable expiry. |
 | `REQUEST_TIMEOUT_MS`              | Global request timeout in milliseconds before responding with 503 (default: `30000`)                                  |
+| `IPFS_HTTP_TIMEOUT_MS`            | Per-request HTTP timeout for Pinata/IPFS axios calls in milliseconds (default: `15000`)                               |
+| `STELLAR_RPC_TIMEOUT_MS`          | Per-request HTTP timeout for Soroban RPC / Stellar SDK calls in milliseconds (default: `15000`)                       |
 | `ADMIN_IP_ALLOWLIST`              | Comma-separated list of IPv4 addresses/CIDRs allowed on admin routes (unset = allow all)                              |
 | `SLOW_QUERY_THRESHOLD_MS`         | Log a structured warning for DB queries slower than this, in milliseconds (default: `50`)                             |
 | `SSE_KEEPALIVE_INTERVAL_MS`       | Interval in milliseconds to send SSE keep-alive comments (default: `15000` = 15 seconds)                              |

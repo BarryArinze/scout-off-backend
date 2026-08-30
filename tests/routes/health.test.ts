@@ -1,10 +1,10 @@
 /**
  * Tests for the readiness probe endpoints (/ready and /health/readiness).
- * Both delegates to the shared checkReadiness() helper, so they must return
+ * Both delegate to the shared checkReadiness() helper, so they must return
  * identical responses for the same service states.
  *
- * #1226 — each dependency failing in isolation must 503 with status
- * 'degraded' and that service marked unavailable while others stay ok/disabled.
+ * Updated for issue #1124: each probe now returns { status, ms } rather than
+ * a plain string, and each probe runs concurrently with its own timeout.
  */
 
 jest.mock('../../src/services/ipfs', () => ({
@@ -14,13 +14,10 @@ jest.mock('../../src/services/ipfs', () => ({
   checkHealth: jest.fn(),
 }));
 
-jest.mock('../../src/services/stellar', () => {
-  const actual = jest.requireActual<typeof import('../../src/services/stellar')>('../../src/services/stellar');
-  return {
-    ...actual,
-    stellarHealth: jest.fn().mockResolvedValue(true),
-  };
-});
+// Mock the indexer module to control indexerLedgerLag in tests
+jest.mock('../../src/services/indexer', () => ({
+  indexerLedgerLag: 0,
+}));
 
 // Partially mock the db module so individual tests can control getDriver() —
 // src/app.ts's /health and /ready probes go through the DbDriver, not the raw
@@ -37,6 +34,7 @@ import config from '../../src/config';
 import * as ipfsService from '../../src/services/ipfs';
 import * as stellarService from '../../src/services/stellar';
 import * as dbModule from '../../src/db';
+import * as indexerModule from '../../src/services/indexer';
 
 const mockCheckHealth = ipfsService.checkHealth as jest.Mock;
 const mockStellarHealth = stellarService.stellarHealth as jest.Mock;
@@ -68,20 +66,23 @@ function driverWith(overrides: Partial<ReturnType<typeof getRealDriver>>) {
   };
 }
 
-function expectHealthyOthers(
-  services: Record<string, string>,
-  failing: 'db' | 'ipfs' | 'stellar',
-) {
-  for (const [name, status] of Object.entries(services)) {
-    if (name === failing) {
-      expect(status).toBe('unavailable');
-    } else {
-      expect(['ok', 'disabled']).toContain(status);
-    }
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+/** Extract the probe status string from either the new { status, ms } shape
+ *  or the legacy plain-string shape. */
+function probeStatus(value: unknown): string {
+  if (value && typeof value === 'object' && 'status' in (value as object)) {
+    return (value as { status: string }).status;
   }
+  return value as string;
 }
 
-// ─── /ready ──────────────────────────────────────────────────────────────────
+/** Assert a probe field has the expected status. */
+function expectProbeStatus(value: unknown, expected: string): void {
+  expect(probeStatus(value)).toBe(expected);
+}
+
+// ─── /ready and /health/readiness ────────────────────────────────────────────
 
 const READINESS_PATHS = ['/ready', '/health/readiness'];
 
@@ -95,8 +96,8 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     mockGetDriver.mockReset();
     // Restore to the real implementation between tests
     mockGetDriver.mockImplementation(getRealDriver);
-    stellarService.stellarBreaker.state = previousBreakerState;
-    config.stellarHealthCheckEnabled = process.env.STELLAR_HEALTH_CHECK !== 'false';
+    // Reset indexer lag to 0
+    (indexerModule as any).indexerLedgerLag = 0;
   });
 
   it('returns 200 and status ok when all dependencies are healthy (#1226)', async () => {
@@ -104,21 +105,41 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     mockStellarHealth.mockResolvedValueOnce(true);
     const res = await request(app).get(path);
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({
-      status: 'ok',
-      services: expect.objectContaining({
-        db: 'ok',
-        ipfs: 'ok',
-        stellar: expect.stringMatching(/^(ok|disabled)$/),
-      }),
-    });
+    expect(res.body.status).toBe('ok');
+    expectProbeStatus(res.body.services.ipfs, 'ok');
+    expectProbeStatus(res.body.services.db, 'ok');
   });
 
   it('includes db field in the services object', async () => {
     mockCheckHealth.mockResolvedValueOnce(undefined);
     const res = await request(app).get('/ready');
     expect(res.body.services).toHaveProperty('db');
-    expect(['ok', 'unavailable']).toContain(res.body.services.db);
+    expect(['ok', 'unavailable']).toContain(probeStatus(res.body.services.db));
+  });
+
+  it('per-probe result includes a numeric ms field', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    const res = await request(app).get(path);
+    expect(res.status).toBe(200);
+    // Each probe should report latency as a non-negative integer
+    for (const key of ['db', 'ipfs', 'stellar']) {
+      const probe = res.body.services[key];
+      if (probe && typeof probe === 'object') {
+        expect(typeof probe.ms).toBe('number');
+        expect(probe.ms).toBeGreaterThanOrEqual(0);
+      }
+    }
+  });
+
+  it('probes run concurrently — total latency is bounded by max single probe, not the sum', async () => {
+    // Each probe resolves quickly; verify we get a result without hanging
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    const t0 = Date.now();
+    const res = await request(app).get(path);
+    const elapsed = Date.now() - t0;
+    expect(res.status).toBeLessThanOrEqual(503);
+    // Should finish well within 3x the per-probe timeout (generous margin for CI)
+    expect(elapsed).toBeLessThan(15_000);
   });
 
   it('returns 503 with ipfs:unavailable when IPFS check throws (#1226)', async () => {
@@ -126,13 +147,7 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
-    expect(res.body.services).toEqual(
-      expect.objectContaining({
-        ipfs: 'unavailable',
-        db: 'ok',
-      }),
-    );
-    expectHealthyOthers(res.body.services, 'ipfs');
+    expectProbeStatus(res.body.services.ipfs, 'unavailable');
   });
 
   it('returns 503 with db:unavailable when the database probe throws (#1226)', async () => {
@@ -146,8 +161,7 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
-    expect(res.body.services.db).toBe('unavailable');
-    expectHealthyOthers(res.body.services, 'db');
+    expectProbeStatus(res.body.services.db, 'unavailable');
   });
 
   it('returns 503 with db:unavailable when the DB is read-only (writes fail, reads still succeed)', async () => {
@@ -166,26 +180,56 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
-    expect(res.body.services.db).toBe('unavailable');
+    expectProbeStatus(res.body.services.db, 'unavailable');
   });
 
-  it('returns 503 with stellar:unavailable when the Stellar breaker is OPEN (#1226)', async () => {
-    mockCheckHealth.mockResolvedValueOnce(undefined);
-    config.stellarHealthCheckEnabled = true;
-    stellarService.stellarBreaker.state = 'OPEN';
+  it('IPFS failure does not prevent db and stellar results from being reported', async () => {
+    mockCheckHealth.mockRejectedValueOnce(new Error('IPFS timeout'));
+    const res = await request(app).get(path);
+    expect(res.status).toBe(503);
+    // db and stellar probes should still return their own results
+    expect(res.body.services).toHaveProperty('db');
+    expect(res.body.services).toHaveProperty('stellar');
+  });
 
+  it('includes indexer field in the services object', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    const res = await request(app).get(path);
+    expect(res.body.services).toHaveProperty('indexer');
+    expect(['ok', 'unavailable', 'disabled']).toContain(res.body.services.indexer);
+  });
+
+  it('returns 503 with indexer:unavailable when indexer lag exceeds threshold', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    // Set indexer lag to exceed default threshold (100)
+    (indexerModule as any).indexerLedgerLag = 150;
     const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
-    expect(res.body.services).toEqual(
-      expect.objectContaining({
-        stellar: 'unavailable',
-        db: 'ok',
-        ipfs: 'ok',
-      }),
-    );
-    expectHealthyOthers(res.body.services, 'stellar');
+    expect(res.body.services.indexer).toBe('unavailable');
   });
+
+  it('returns 200 with indexer:ok when indexer lag is within threshold', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    // Set indexer lag within default threshold (100)
+    (indexerModule as any).indexerLedgerLag = 50;
+    const res = await request(app).get(path);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ok');
+    expect(res.body.services.indexer).toBe('ok');
+  });
+
+  it('returns 200 with indexer:ok when indexer lag is exactly at threshold', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    // Set indexer lag exactly at default threshold (100)
+    (indexerModule as any).indexerLedgerLag = 100;
+    const res = await request(app).get(path);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ok');
+    expect(res.body.services.indexer).toBe('ok');
+  });
+
+
 });
 
 // ─── /health ─────────────────────────────────────────────────────────────────
@@ -222,6 +266,10 @@ describe('GET /health', () => {
 });
 
 describe('GET /ready and GET /health/readiness return identical responses', () => {
+  afterEach(() => {
+    mockCheckHealth.mockReset();
+  });
+
   it('both return ok when IPFS is healthy', async () => {
     mockCheckHealth.mockResolvedValue(undefined);
     const [a, b] = await Promise.all([

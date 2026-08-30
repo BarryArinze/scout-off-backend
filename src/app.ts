@@ -30,6 +30,7 @@ import { versionRouting } from './middleware/versionRouting';
 import docsRouter from './routes/docs';
 import eventsRoutes from './routes/events';
 import { logger } from './utils/logger';
+import { withTimeout } from './utils/withTimeout';
 import { requireRole } from './middleware/auth';
 import { getHealthDependencies } from './controllers/healthDependenciesController';
 import {
@@ -133,6 +134,8 @@ const corsOptions: CorsOptions = {
 };
 
 const app = express();
+// Track process startup time for readiness grace period
+const processStartTime = Date.now();
 // Disable Express's default X-Powered-By header. helmet() also does this, but
 // being explicit here ensures it is suppressed regardless of middleware order.
 app.disable('x-powered-by');
@@ -143,9 +146,8 @@ app.set('etag', false);
 
 // Apply CORS with the callback-based options built above.
 // Also handle pre-flight OPTIONS requests explicitly so they short-circuit
-// before any auth or body-parser middleware runs.
-// (`/*splat` is the Express 5 spelling of the Express 4 `*` wildcard route —
-// plain `'*'` is rejected by path-to-regexp v8.)
+// before any auth or body-parser middleware runs. Express 5 (path-to-regexp
+// v8) rejects a bare '*' route — '/*splat' is the v8 catch-all form.
 app.options('/*splat', cors(corsOptions));
 app.use(cors(corsOptions));
 app.use(compression({
@@ -240,43 +242,89 @@ app.get('/health', async (_req, res) => {
   res.json({ status: 'ok', healthStatus });
 });
 
-async function checkReadiness(): Promise<Record<string, 'ok' | 'unavailable' | 'disabled'>> {
-  const services: Record<string, 'ok' | 'unavailable' | 'disabled'> = {};
+/**
+ * Per-probe timeout configuration (ms).
+ * Each probe has its own independent timeout so a slow dependency only blocks
+ * its own result — not all three.
+ *
+ * Configurable via:
+ *   READINESS_DB_TIMEOUT_MS      (default: 2 000)
+ *   READINESS_IPFS_TIMEOUT_MS    (default: 5 000)
+ *   READINESS_STELLAR_TIMEOUT_MS (default: 5 000)
+ */
+function getReadinessTimeouts(): { db: number; ipfs: number; stellar: number } {
+  return {
+    db: parseInt(process.env.READINESS_DB_TIMEOUT_MS ?? '2000', 10),
+    ipfs: parseInt(process.env.READINESS_IPFS_TIMEOUT_MS ?? '5000', 10),
+    stellar: parseInt(process.env.READINESS_STELLAR_TIMEOUT_MS ?? '5000', 10),
+  };
+}
+
+export interface ProbeResult {
+  status: 'ok' | 'unavailable' | 'disabled';
+  ms: number;
+}
+
+async function checkReadiness(): Promise<Record<string, ProbeResult>> {
+  const timeouts = getReadinessTimeouts();
 
   const [dbResult, ipfsResult, stellarResult] = await Promise.all([
-    (async (): Promise<'ok' | 'unavailable'> => {
-      return (await probeDbWritable()) === 'ok' ? 'ok' : 'unavailable';
+    // DB probe — writable heartbeat upsert
+    (async (): Promise<ProbeResult> => {
+      const t0 = Date.now();
+      const outcome = await withTimeout(() => probeDbWritable(timeouts.db), timeouts.db);
+      return { status: outcome === 'ok' ? 'ok' : 'unavailable', ms: Date.now() - t0 };
     })(),
-    (async (): Promise<'ok' | 'unavailable'> => {
-      try {
-        await checkHealth();
-        return 'ok';
-      } catch {
-        return 'unavailable';
+
+    // IPFS probe — Pinata connectivity
+    (async (): Promise<ProbeResult> => {
+      const t0 = Date.now();
+      const outcome = await withTimeout(
+        async () => {
+          await checkHealth();
+        },
+        timeouts.ipfs,
+      );
+      return { status: outcome === 'ok' ? 'ok' : 'unavailable', ms: Date.now() - t0 };
+    })(),
+
+    // Stellar probe — RPC connectivity (can be disabled via config)
+    (async (): Promise<ProbeResult> => {
+      if (!config.stellarHealthCheckEnabled) {
+        return { status: 'disabled', ms: 0 };
       }
+      if (stellarBreaker.state === 'OPEN') {
+        return { status: 'unavailable', ms: 0 };
+      }
+      const t0 = Date.now();
+      const outcome = await withTimeout(
+        async () => {
+          const ok = await stellarHealth();
+          if (!ok) throw new Error('stellar unhealthy');
+        },
+        timeouts.stellar,
+      );
+      return { status: outcome === 'ok' ? 'ok' : 'unavailable', ms: Date.now() - t0 };
     })(),
     (async (): Promise<'ok' | 'unavailable' | 'disabled'> => {
-      if (!config.stellarHealthCheckEnabled) return 'disabled';
-      if (stellarBreaker.state === 'OPEN') return 'unavailable';
-      try {
-        const stellarOk = await stellarHealth();
-        return stellarOk ? 'ok' : 'unavailable';
-      } catch {
-        return 'unavailable';
-      }
+      // If max lag is 0, the check is disabled
+      if (config.readinessMaxLag === 0) return 'disabled';
+      
+      // During grace period, always report ok regardless of lag
+      const uptimeMs = Date.now() - processStartTime;
+      if (uptimeMs < config.readinessGracePeriodMs) return 'ok';
+      
+      // After grace period, check if lag is within threshold
+      return indexerLedgerLag <= config.readinessMaxLag ? 'ok' : 'unavailable';
     })(),
   ]);
 
-  services.db = dbResult;
-  services.ipfs = ipfsResult;
-  services.stellar = stellarResult;
-
-  return services;
+  return { db: dbResult, ipfs: ipfsResult, stellar: stellarResult };
 }
 
 app.get('/ready', async (_req, res) => {
   const services = await checkReadiness();
-  const allOk = Object.values(services).every(v => v === 'ok' || v === 'disabled');
+  const allOk = Object.values(services).every(v => v.status === 'ok' || v.status === 'disabled');
   if (allOk) {
     res.json({ status: 'ok', services });
   } else {
@@ -291,7 +339,7 @@ app.get('/health/liveness', createTimeout(5_000), (_req, res) => {
 
 app.get('/health/readiness', createTimeout(5_000), async (_req, res) => {
   const services = await checkReadiness();
-  const allOk = Object.values(services).every(v => v === 'ok' || v === 'disabled');
+  const allOk = Object.values(services).every(v => v.status === 'ok' || v.status === 'disabled');
   if (allOk) {
     res.json({ status: 'ok', services });
   } else {

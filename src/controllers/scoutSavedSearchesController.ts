@@ -25,6 +25,7 @@ import {
   type SavedSearchRow,
 } from '../db';
 import { logger } from '../utils/logger';
+import { MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from '../utils/pagination';
 
 // ─── Validation ───────────────────────────────────────────────────────────────
 
@@ -51,7 +52,7 @@ export const createSavedSearchSchema = z.object({
     .min(1, 'name is required')
     .max(100, 'name must be 100 characters or fewer'),
   filters: savedSearchFilterSchema,
-});
+}).strict();
 
 export type CreateSavedSearchRequest = z.infer<typeof createSavedSearchSchema>;
 
@@ -61,7 +62,7 @@ export type CreateSavedSearchRequest = z.infer<typeof createSavedSearchSchema>;
 export const updateSavedSearchSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   filters: savedSearchFilterSchema.optional(),
-});
+}).strict();
 
 export type UpdateSavedSearchRequest = z.infer<typeof updateSavedSearchSchema>;
 
@@ -306,7 +307,7 @@ export async function runSavedSearch(
 
   // Parse pagination params
   const page = Math.max(1, parseInt(req.query.page as string, 10) || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string, 10) || 20));
+  const pageSize = Math.min(MAX_PAGE_SIZE, Math.max(1, parseInt(req.query.pageSize as string, 10) || DEFAULT_PAGE_SIZE));
   const offset = (page - 1) * pageSize;
 
   // Query players with the saved filters

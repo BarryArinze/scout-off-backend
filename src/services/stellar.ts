@@ -12,6 +12,7 @@ import {
 } from '@stellar/stellar-sdk';
 import { trace, SpanStatusCode } from '@opentelemetry/api';
 import config from '../config';
+import { correlationMemoFromContext, recordTxCorrelation } from './txCorrelation';
 
 import { stellarBreaker } from '../utils/circuitBreaker';
 
@@ -19,7 +20,15 @@ const tracer = trace.getTracer('scout-off-backend');
 
 const rawServer = new rpc.Server(config.sorobanRpcUrl, {
   allowHttp: config.sorobanRpcUrl.startsWith('http://'),
+  timeout: config.stellarRpcTimeoutMs,
 });
+
+// Ensure the underlying HTTP client also respects the RPC timeout when the
+// SDK exposes it (version-dependent; optional chaining keeps this safe).
+if ((rawServer as { httpClient?: { defaults?: { timeout?: number } } }).httpClient?.defaults) {
+  (rawServer as { httpClient: { defaults: { timeout: number } } }).httpClient.defaults.timeout =
+    config.stellarRpcTimeoutMs;
+}
 
 const server = new Proxy(rawServer, {
   get(target, prop, receiver) {
@@ -38,6 +47,37 @@ export function networkPassphrase(): string {
     ? Networks.PUBLIC
     : Networks.TESTNET;
 }
+
+/**
+ * Build a TransactionBuilder with an optional short correlation memo (#1113).
+ * Memo is omitted when no request correlation context is active (background jobs).
+ */
+function createTxBuilder(sourceAccount: Account): TransactionBuilder {
+  const opts: ConstructorParameters<typeof TransactionBuilder>[1] = {
+    fee: BASE_FEE,
+    networkPassphrase: networkPassphrase(),
+  };
+  const memo = correlationMemoFromContext();
+  if (memo) {
+    opts.memo = memo;
+  }
+  return new TransactionBuilder(sourceAccount, opts);
+}
+
+/**
+ * Submit a prepared transaction and bridge the current correlation id to the
+ * resulting tx hash for later indexer / webhook re-attachment.
+ */
+async function sendTransactionWithCorrelation(
+  preparedTx: ReturnType<TransactionBuilder['build']>,
+) {
+  const sendResult = await server.sendTransaction(preparedTx);
+  if (sendResult.hash) {
+    recordTxCorrelation(sendResult.hash);
+  }
+  return sendResult;
+}
+
 
 export async function getLatestLedger(): Promise<number> {
   const ledger = await server.getLatestLedger();
@@ -176,10 +216,7 @@ export async function isSubscribed(
         const ephemeral = Keypair.random();
         const sourceAccount = new Account(ephemeral.publicKey(), '0');
 
-        const tx = new TransactionBuilder(sourceAccount, {
-          fee: BASE_FEE,
-          networkPassphrase: networkPassphrase(),
-        })
+        const tx = createTxBuilder(sourceAccount)
           .addOperation(
             contract.call('is_subscribed', Address.fromString(scoutWallet).toScVal()),
           )
@@ -269,10 +306,7 @@ export async function submitContactPayment(
 
       const contract = new Contract(config.subscriptionContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(
           contract.call(
             'pay_to_contact',
@@ -302,7 +336,7 @@ export async function submitContactPayment(
 
       let sendResult;
       try {
-        sendResult = await server.sendTransaction(preparedTx);
+        sendResult = await sendTransactionWithCorrelation(preparedTx);
       } catch (err) {
         throw new PaymentError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
@@ -387,10 +421,7 @@ export async function logTrialOffer(
 
       const contract = new Contract(config.connectionContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(
           contract.call(
             'log_trial_offer',
@@ -418,7 +449,7 @@ export async function logTrialOffer(
 
       let sendResult;
       try {
-        sendResult = await server.sendTransaction(preparedTx);
+        sendResult = await sendTransactionWithCorrelation(preparedTx);
       } catch (err) {
         throw new PaymentError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
@@ -580,10 +611,7 @@ export async function withdrawFees(recipient: string, amountStroops?: string): P
 
       const contract = new Contract(config.subscriptionContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(
           contract.call(
             'withdraw_fees',
@@ -620,7 +648,7 @@ export async function withdrawFees(recipient: string, amountStroops?: string): P
 
       let sendResult;
       try {
-        sendResult = await server.sendTransaction(preparedTx);
+        sendResult = await sendTransactionWithCorrelation(preparedTx);
       } catch (err) {
         throw new FeeWithdrawalError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
@@ -751,10 +779,7 @@ export async function purchaseSubscription(
 
       const contract = new Contract(config.subscriptionContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(
           contract.call(
             'subscribe',
@@ -786,7 +811,7 @@ export async function purchaseSubscription(
 
       let sendResult;
       try {
-        sendResult = await server.sendTransaction(preparedTx);
+        sendResult = await sendTransactionWithCorrelation(preparedTx);
       } catch (err) {
         throw new PaymentError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
@@ -898,10 +923,7 @@ export async function renewSubscription(
 
       const contract = new Contract(config.subscriptionContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(
           contract.call(
             'subscribe',
@@ -936,7 +958,7 @@ export async function renewSubscription(
 
       let sendResult;
       try {
-        sendResult = await server.sendTransaction(preparedTx);
+        sendResult = await sendTransactionWithCorrelation(preparedTx);
       } catch (err) {
         throw new PaymentError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
@@ -1056,10 +1078,7 @@ export async function cancelSubscriptionOnChain(
       const account = await server.getAccount(keypair.publicKey());
       const contract = new Contract(config.subscriptionContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(
           contract.call('cancel_subscription', Address.fromString(scoutWallet).toScVal()),
         )
@@ -1084,7 +1103,7 @@ export async function cancelSubscriptionOnChain(
       const preparedTx = rpc.assembleTransaction(tx, simResult).build();
       preparedTx.sign(keypair);
 
-      const sendResult = await server.sendTransaction(preparedTx);
+      const sendResult = await sendTransactionWithCorrelation(preparedTx);
       if (sendResult.status === 'ERROR') {
         throw new PaymentError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
       }
@@ -1159,10 +1178,7 @@ export async function unpauseContractOnChain(adminWallet: string): Promise<Contr
       // entrypoints for player-profile operations.
       const contract = new Contract(config.subscriptionContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(contract.call('unpause', Address.fromString(adminWallet).toScVal()))
         .setTimeout(30)
         .build();
@@ -1179,7 +1195,7 @@ export async function unpauseContractOnChain(adminWallet: string): Promise<Contr
       const preparedTx = rpc.assembleTransaction(tx, simResult).build();
       preparedTx.sign(keypair);
 
-      const sendResult = await server.sendTransaction(preparedTx);
+      const sendResult = await sendTransactionWithCorrelation(preparedTx);
       if (sendResult.status === 'ERROR') {
         throw new ContractActionError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
       }
@@ -1279,10 +1295,7 @@ export async function registerValidatorOnChain(
       const account = await server.getAccount(keypair.publicKey());
       const contract = new Contract(config.progressContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(
           contract.call('register_validator', Address.fromString(validatorWallet).toScVal()),
         )
@@ -1306,7 +1319,7 @@ export async function registerValidatorOnChain(
       const preparedTx = rpc.assembleTransaction(tx, simResult).build();
       preparedTx.sign(keypair);
 
-      const sendResult = await server.sendTransaction(preparedTx);
+      const sendResult = await sendTransactionWithCorrelation(preparedTx);
       if (sendResult.status === 'ERROR') {
         throw new ValidatorActionError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
       }
@@ -1366,10 +1379,7 @@ export async function pauseContractOnChain(adminWallet: string): Promise<Contrac
       const account = await server.getAccount(keypair.publicKey());
       const contract = new Contract(config.subscriptionContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(contract.call('pause', Address.fromString(adminWallet).toScVal()))
         .setTimeout(30)
         .build();
@@ -1386,7 +1396,7 @@ export async function pauseContractOnChain(adminWallet: string): Promise<Contrac
       const preparedTx = rpc.assembleTransaction(tx, simResult).build();
       preparedTx.sign(keypair);
 
-      const sendResult = await server.sendTransaction(preparedTx);
+      const sendResult = await sendTransactionWithCorrelation(preparedTx);
       if (sendResult.status === 'ERROR') {
         throw new ContractActionError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
       }
@@ -1458,10 +1468,7 @@ export async function updateProfile(
 
       const contract = new Contract(config.registerContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(
           contract.call(
             'update_profile',
@@ -1492,7 +1499,7 @@ export async function updateProfile(
 
       let sendResult;
       try {
-        sendResult = await server.sendTransaction(preparedTx);
+        sendResult = await sendTransactionWithCorrelation(preparedTx);
       } catch (err) {
         throw new PaymentError(`Submit request failed: ${(err as Error).message}`, 'NETWORK_ERROR');
       }
@@ -1589,10 +1596,7 @@ export async function queryMilestones(playerId: string): Promise<OnChainMileston
         const ephemeral = Keypair.random();
         const sourceAccount = new Account(ephemeral.publicKey(), '0');
 
-        const tx = new TransactionBuilder(sourceAccount, {
-          fee: BASE_FEE,
-          networkPassphrase: networkPassphrase(),
-        })
+        const tx = createTxBuilder(sourceAccount)
           .addOperation(
             contract.call('get_milestones', nativeToScVal(playerId, { type: 'string' })),
           )
@@ -1667,10 +1671,7 @@ export async function revokeValidatorOnChain(
       const account = await server.getAccount(keypair.publicKey());
       const contract = new Contract(config.progressContractId);
 
-      const tx = new TransactionBuilder(account, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(account)
         .addOperation(
           contract.call('revoke_validator', Address.fromString(validatorWallet).toScVal()),
         )
@@ -1696,7 +1697,7 @@ export async function revokeValidatorOnChain(
       const preparedTx = rpc.assembleTransaction(tx, simResult).build();
       preparedTx.sign(keypair);
 
-      const sendResult = await server.sendTransaction(preparedTx);
+      const sendResult = await sendTransactionWithCorrelation(preparedTx);
       if (sendResult.status === 'ERROR') {
         throw new ValidatorActionError(`Submit failed: ${sendResult.errorResult}`, 'NETWORK_ERROR');
       }
@@ -1767,10 +1768,7 @@ export async function getFeeBalance(): Promise<bigint> {
       const ephemeral = Keypair.random();
       const sourceAccount = new Account(ephemeral.publicKey(), '0');
 
-      const tx = new TransactionBuilder(sourceAccount, {
-        fee: BASE_FEE,
-        networkPassphrase: networkPassphrase(),
-      })
+      const tx = createTxBuilder(sourceAccount)
         .addOperation(contract.call('get_fee_balance'))
         .setTimeout(30)
         .build();

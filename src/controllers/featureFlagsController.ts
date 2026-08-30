@@ -19,18 +19,18 @@ import { setFeatureFlag, clearFeatureFlagCache } from '../services/featureFlags'
 /** Valid snake_case flag name: lowercase letter, then lowercase letters/digits/underscores. */
 const flagNameRegex = /^[a-z][a-z0-9_]*$/;
 
-const updateFeatureFlagBodySchema = z.object({
+export const updateFeatureFlagBodySchema = z.object({
   name: z
     .string()
     .min(1)
     .max(100)
     .regex(flagNameRegex, 'Flag name must be snake_case starting with a letter'),
   enabled: z.boolean(),
-});
+}).strict();
 
-const toggleFlagBodySchema = z.object({
+export const toggleFlagBodySchema = z.object({
   enabled: z.boolean({ required_error: 'enabled is required' }),
-});
+}).strict();
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

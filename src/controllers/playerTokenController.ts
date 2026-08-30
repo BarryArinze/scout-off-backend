@@ -56,10 +56,10 @@ export function _stubResetMutexes(): void {
 
 // ── Validation schemas ────────────────────────────────────────────────────────
 
-const buyTokenSchema = z.object({
+export const buyTokenSchema = z.object({
   amount: z.number().int().min(1, 'amount must be at least 1'),
   buyerWallet: z.string().min(1, 'buyerWallet is required'),
-});
+}).strict();
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

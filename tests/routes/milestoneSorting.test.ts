@@ -31,6 +31,18 @@ jest.mock('../../src/db', () => ({
         },
       ];
     }
+    if (type === 'milestone_rejected') {
+      return [
+        {
+          type: 'milestone_rejected',
+          payload: { player_id: 'player-1', submittedAt: 700, approvedAt: null, reason: 'insufficient evidence' },
+        },
+        {
+          type: 'milestone_rejected',
+          payload: { player_id: 'player-1', submittedAt: 900, approvedAt: null, reason: 'duplicate' },
+        },
+      ];
+    }
     return [];
   }),
   queryPlayers: jest.fn().mockReturnValue([]),
@@ -83,6 +95,32 @@ jest.mock('../../src/services/stellar', () => ({
 }));
 
 import app from '../../src/app';
+import { queryMilestones } from '../../src/services/stellar';
+import { queryEvents } from '../../src/db';
+
+const mixedOnChain = [
+  {
+    milestoneId: 'on-chain-approved',
+    playerId: 'player-1',
+    milestoneType: 'goal',
+    evidenceUri: 'ipfs://QmApproved',
+    approved: true,
+    approvedBy: 'GVALIDATOR',
+    ledger: 100,
+    submittedAt: 2500,
+  },
+  {
+    milestoneId: 'on-chain-pending',
+    playerId: 'player-1',
+    milestoneType: 'assist',
+    evidenceUri: 'ipfs://QmPending',
+    approved: false,
+    approvedBy: null,
+    ledger: 101,
+    submittedAt: 2600,
+  },
+];
+
 
 describe('GET /api/players/:playerId/milestones - sorting', () => {
   it('returns milestones with default sort (asc by submittedAt)', async () => {
@@ -164,6 +202,70 @@ describe('GET /api/players/:playerId/milestones - status filter', () => {
     const res = await request(app).get('/api/players/player-1/milestones?status=invalid');
     expect(res.status).toBe(400);
     expect(res.body.success).toBe(false);
+  });
+
+  it('returns 400 for legacy status=all (omit param instead)', async () => {
+    const res = await request(app).get('/api/players/player-1/milestones?status=all');
+    expect(res.status).toBe(400);
+    expect(res.body.success).toBe(false);
+  });
+
+  it('?status=rejected returns only milestone_rejected events', async () => {
+    const res = await request(app).get('/api/players/player-1/milestones?status=rejected');
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(queryEvents).toHaveBeenCalledWith('milestone_rejected');
+    const statuses: string[] = res.body.data.map((m: any) => m.status);
+    expect(statuses.every((s) => s === 'rejected')).toBe(true);
+    expect(statuses).toHaveLength(2);
+  });
+
+  it('?status=rejected does not include unapproved on-chain as rejected', async () => {
+    (queryMilestones as jest.Mock).mockResolvedValueOnce(mixedOnChain);
+    const res = await request(app).get('/api/players/player-1/milestones?status=rejected');
+    expect(res.status).toBe(200);
+    const ids = res.body.data.map((m: any) => m.milestoneId).filter(Boolean);
+    expect(ids).not.toContain('on-chain-pending');
+    expect(ids).not.toContain('on-chain-approved');
+    expect(res.body.data.every((m: any) => m.status === 'rejected')).toBe(true);
+  });
+});
+
+describe('GET /api/players/:playerId/milestones - on-chain status filter', () => {
+  beforeEach(() => {
+    (queryMilestones as jest.Mock).mockResolvedValue(mixedOnChain);
+  });
+
+  afterEach(() => {
+    (queryMilestones as jest.Mock).mockResolvedValue([]);
+  });
+
+  it('?status=approved includes approved on-chain and excludes unapproved', async () => {
+    const res = await request(app).get('/api/players/player-1/milestones?status=approved');
+    expect(res.status).toBe(200);
+    const onChain = res.body.data.filter((m: any) => m.milestoneId?.startsWith('on-chain'));
+    expect(onChain).toHaveLength(1);
+    expect(onChain[0].milestoneId).toBe('on-chain-approved');
+    expect(onChain[0].status).toBe('approved');
+    expect(res.body.data.every((m: any) => m.status === 'approved')).toBe(true);
+  });
+
+  it('?status=pending includes unapproved on-chain and excludes approved', async () => {
+    const res = await request(app).get('/api/players/player-1/milestones?status=pending');
+    expect(res.status).toBe(200);
+    const onChain = res.body.data.filter((m: any) => m.milestoneId?.startsWith('on-chain'));
+    expect(onChain).toHaveLength(1);
+    expect(onChain[0].milestoneId).toBe('on-chain-pending');
+    expect(onChain[0].status).toBe('pending');
+    expect(res.body.data.every((m: any) => m.status === 'pending')).toBe(true);
+  });
+
+  it('default (no status) includes on-chain rows with normalized status', async () => {
+    const res = await request(app).get('/api/players/player-1/milestones');
+    expect(res.status).toBe(200);
+    const onChain = res.body.data.filter((m: any) => m.milestoneId?.startsWith('on-chain'));
+    expect(onChain).toHaveLength(2);
+    expect(onChain.map((m: any) => m.status).sort()).toEqual(['approved', 'pending']);
   });
 });
 

@@ -34,10 +34,14 @@ function getErrorCodeByStatus(status: number): ErrorCode {
       return ErrorCode.NOT_FOUND;
     case 409:
       return ErrorCode.CONFLICT;
+    case 412:
+      return ErrorCode.PRECONDITION_FAILED;
     case 413:
       return ErrorCode.PAYLOAD_TOO_LARGE;
     case 415:
       return ErrorCode.UNSUPPORTED_MEDIA_TYPE;
+    case 428:
+      return ErrorCode.PRECONDITION_REQUIRED;
     case 500:
     default:
       return ErrorCode.INTERNAL_SERVER_ERROR;

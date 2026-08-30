@@ -62,12 +62,86 @@ export const INVALIDATION_MESSAGE = JSON.stringify({
   action: 'invalidate',
 });
 
+/**
+ * Maximum number of entries kept in the process-local in-memory cache.
+ * Configurable via PLAYER_CACHE_MAX_SIZE; defaults to 1000 entries as a
+ * stopgap against unbounded growth while Redis migration is pending.
+ */
+const DEFAULT_MAX_CACHE_SIZE = 1000;
+
+function getMaxCacheSize(): number {
+  const configured = Number(process.env.PLAYER_CACHE_MAX_SIZE);
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_MAX_CACHE_SIZE;
+}
+
+/**
+ * Process-local cache bound that layers LRU eviction on top of the existing
+ * TTL-based InMemoryCacheStore. Access order is tracked with a Map (iteration
+ * order = insertion order; re-inserting a key moves it to the end). When the
+ * configured size cap is exceeded, the first key in the map is evicted.
+ */
+class BoundedInMemoryCacheStore implements CacheStore {
+  private readonly store = new InMemoryCacheStore();
+  private readonly accessOrder = new Map<string, true>();
+  private readonly maxSize: number;
+
+  constructor(maxSize: number) {
+    this.maxSize = maxSize;
+  }
+
+  async get<T>(key: string): Promise<T | undefined> {
+    const value = await this.store.get<T>(key);
+    if (value === undefined) {
+      if (this.accessOrder.delete(key)) {
+        await this.store.del(key);
+      }
+      return undefined;
+    }
+    this.touch(key);
+    return value;
+  }
+
+  async set<T>(key: string, value: T, ttlMs: number): Promise<void> {
+    await this.store.set(key, value, ttlMs);
+    this.touch(key);
+    await this.evictIfNeeded();
+  }
+
+  async del(key: string): Promise<void> {
+    await this.store.del(key);
+    this.accessOrder.delete(key);
+  }
+
+  async deleteByPrefix(prefix: string): Promise<void> {
+    await this.store.deleteByPrefix(prefix);
+    for (const key of this.accessOrder.keys()) {
+      if (key.startsWith(prefix)) {
+        this.accessOrder.delete(key);
+      }
+    }
+  }
+
+  private touch(key: string): void {
+    this.accessOrder.delete(key);
+    this.accessOrder.set(key, true);
+  }
+
+  private async evictIfNeeded(): Promise<void> {
+    while (this.accessOrder.size > this.maxSize) {
+      const oldestKey = this.accessOrder.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.accessOrder.delete(oldestKey);
+      await this.store.del(oldestKey);
+    }
+  }
+}
+
 function createStore(): CacheStore {
   const client = getRedisClient();
   if (client) {
     return new RedisCacheStore(client);
   }
-  return new InMemoryCacheStore();
+  return new BoundedInMemoryCacheStore(getMaxCacheSize());
 }
 
 const store: CacheStore = createStore();

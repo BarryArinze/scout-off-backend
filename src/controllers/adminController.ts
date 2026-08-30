@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import jwt from 'jsonwebtoken';
-import { queryEvents, countEventsFiltered, getEventsPage, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow, getNewPlayersTimeSeries, getMilestonesApprovedTimeSeries, getContactUnlocksTimeSeries, getSubscriptionsStartedTimeSeries, getNewPlayersByRegionTimeSeries, TimeSeriesPoint, RegionBreakdownPoint, insertFeeWithdrawal } from '../db';
+import { queryEvents, countEventsFiltered, getEventsPage, getEventsPageKeyset, encodeEventsCursor, decodeEventsCursor, fetchLastIndexedLedger, persistLastIndexedLedger, getValidatorStats, getAuditLogs, getAuditLogsCount, AuditLogRow, getNewPlayersTimeSeries, getMilestonesApprovedTimeSeries, getContactUnlocksTimeSeries, getSubscriptionsStartedTimeSeries, getNewPlayersByRegionTimeSeries, TimeSeriesPoint, RegionBreakdownPoint, insertFeeWithdrawal } from '../db';
 import { getAllValidators, insertValidator, revokeValidatorRow, getValidatorByWallet } from '../services/indexer';
 import { isValidStellarAddress } from '../utils/stellarAddress';
 import { STELLAR_ADDRESS_RE } from '../utils/validators';
@@ -367,6 +367,14 @@ const eventsQuerySchema = z
     // ── ledger range ────────────────────────────────────────────────────────
     fromLedger: z.coerce.number().int().min(0).optional(),
     toLedger: z.coerce.number().int().min(0).optional(),
+    // ── keyset cursor (#1140) ────────────────────────────────────────────────
+    /**
+     * Opaque cursor returned as `nextCursor` by the previous page response.
+     * When supplied, OFFSET-based pagination is ignored and results start
+     * immediately after the cursor position (stable under concurrent inserts).
+     * Encode via `encodeEventsCursor`; do not construct manually.
+     */
+    cursor: z.string().optional(),
   })
   .refine(
     (d) => {
@@ -395,7 +403,7 @@ export async function getAllEvents(req: Request, res: Response, next: NextFuncti
     return;
   }
 
-  const { startDate, endDate, from, to, eventType, limit, offset, page, pageSize } = parsed.data;
+  const { startDate, endDate, from, to, eventType, limit, offset, page, pageSize, cursor } = parsed.data;
 
   // Resolve date range — ?from/?to are aliases for ?startDate/?endDate
   const resolvedStart = startDate ?? from;
@@ -405,12 +413,48 @@ export async function getAllEvents(req: Request, res: Response, next: NextFuncti
 
   const eventTypeFilter = eventType as ContractEventType | undefined;
 
+  const filter = { type: eventTypeFilter, startDate: startDateObj, endDate: endDateObj };
+
+  // ── Keyset cursor pagination (#1140) ─────────────────────────────────────
+  // When a `cursor` query param is present, use stable (ledger, id) keyset
+  // pagination that is unaffected by concurrent indexer inserts.  The cursor
+  // is an opaque base64url token encoding { ledger, id }.  Supplying a cursor
+  // also makes the response include a `nextCursor` field ready for the next
+  // page.  OFFSET-based params are still accepted but documented as deprecated.
+  if (cursor !== undefined) {
+    const afterCursor = decodeEventsCursor(cursor || undefined);
+    if (cursor !== '' && afterCursor === null) {
+      res.status(400).json({ success: false, error: 'Invalid cursor value', code: ErrorCode.VALIDATION_ERROR });
+      return;
+    }
+    const resolvedLimit = limit ?? pageSize ?? 20;
+    const { rows: pageRows, nextCursor } = getEventsPageKeyset(filter, resolvedLimit, afterCursor);
+
+    const data = pageRows.map((r) => ({
+      source: '',
+      type: r.type,
+      payload: r.payload,
+      contractAddress: '',
+      created_at: r.createdAt,
+    }));
+
+    const responseBody: Record<string, unknown> = {
+      success: true,
+      data,
+      pageSize: resolvedLimit,
+    };
+    if (nextCursor !== null) {
+      responseBody.nextCursor = encodeEventsCursor(nextCursor);
+    }
+    res.json(responseBody);
+    return;
+  }
+
+  // ── Legacy OFFSET-based pagination (deprecated) ───────────────────────────
   // Resolve pagination — legacy limit/offset takes precedence when supplied;
   // falls back to page/pageSize, then defaults (limit=20, offset=0).
   const resolvedLimit = limit ?? pageSize ?? 20;
   const resolvedOffset = offset ?? ((page ?? 1) - 1) * resolvedLimit;
-
-  const filter = { type: eventTypeFilter, startDate: startDateObj, endDate: endDateObj };
 
   // Fetch the page from the DB (date filtering happens at SQL level)
   const rows = getEventsPage(filter, resolvedLimit, resolvedOffset);
@@ -813,10 +857,10 @@ try {
   }
 }
 
-const revokeTokenSchema = z.object({
+export const revokeTokenSchema = z.object({
   jti: z.string().min(1).optional(),
   token: z.string().min(1).optional(),
-}).refine((d) => !!d.jti || !!d.token, { message: 'jti or token is required' });
+}).strict().refine((d) => !!d.jti || !!d.token, { message: 'jti or token is required' });
 
 /** POST /api/admin/tokens/revoke */
 export async function revokeTokenController(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -897,7 +941,7 @@ export const withdrawFeesSchema = z.object({
   recipient: z
     .string()
     .refine((v) => STELLAR_ADDRESS_RE.test(v), 'Invalid Stellar address'),
-});
+}).strict();
 
 /**
  * In-process mutex: prevents concurrent fee withdrawals.
@@ -1044,9 +1088,9 @@ export async function withdrawFeesController(req: Request, res: Response, next: 
   }
 }
 
-const reindexSchema = z.object({
+export const reindexSchema = z.object({
   fromLedger: z.number().int().min(0),
-});
+}).strict();
 
 /**
  * GET /api/admin/validators/:wallet/stats
@@ -1308,6 +1352,11 @@ export function parseCsvBody(text: string): ImportValidatorEntry[] {
   }
   return entries;
 }
+
+/** Envelope schema for the JSON body variant of POST /api/admin/validators/import. */
+export const importValidatorsBodySchema = z.object({
+  validators: z.array(z.unknown()).min(1),
+}).strict();
 
 /**
  * Process a batch of ImportValidatorEntry items and return per-entry results.
@@ -1579,7 +1628,7 @@ export async function importValidators(req: Request, res: Response, next: NextFu
 //                  writes to the fee_withdrawals idempotency_key column
 //                  as a storage-layer guard.
 
-const withdrawFeesV2Schema = z.object({
+export const withdrawFeesV2Schema = z.object({
   treasuryAddress: z
     .string({ required_error: 'treasuryAddress is required' })
     .refine(isValidStellarAddress, {
@@ -1591,7 +1640,7 @@ const withdrawFeesV2Schema = z.object({
     .refine((v) => /^\d+$/.test(v) && BigInt(v) > 0n, {
       message: 'amountStroops must be a positive integer',
     }),
-});
+}).strict();
 
 /**
  * POST /api/admin/fees/withdraw

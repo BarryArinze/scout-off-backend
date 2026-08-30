@@ -9,6 +9,7 @@ import { serializeIpfsResult } from "../utils/ipfsSerializer";
 import {
   queryEvents,
   getPlayerById,
+  getPlayerProfileHistory,
   insertPlayerProfileHistory,
   countPlayers,
   searchPlayers,
@@ -36,6 +37,7 @@ import { enrichPlayerResult } from "../utils/searchEnrichment";
 import { playerIdSchema } from "../utils/playerIdValidator";
 import { recordAudit } from "../utils/audit";
 import { canAccessPlayer } from "../utils/playerAccess";
+import { MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from "../utils/pagination";
 
 const baseRegistrationSchema = z.object({
   wallet: z.string().min(56).max(56),
@@ -50,8 +52,8 @@ const metadataUriSchema = z
   .refine(isValidMetadataUri, URI_VALIDATION_ERROR);
 
 export const registerSchema = z.union([
-  baseRegistrationSchema.extend({ metadata: metadataSchema }),
-  baseRegistrationSchema.extend({ metadataUri: metadataUriSchema }),
+  baseRegistrationSchema.extend({ metadata: metadataSchema }).strict(),
+  baseRegistrationSchema.extend({ metadataUri: metadataUriSchema }).strict(),
 ]);
 
 export type RegisterPlayerRequest = z.infer<typeof registerSchema>;
@@ -63,7 +65,7 @@ export const filterSchema = z.object({
   sortBy: z.enum(['relevance', 'tier', 'region', 'created_at']).default('relevance'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
   page: z.coerce.number().int().min(1).optional(),
-  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  pageSize: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).default(DEFAULT_PAGE_SIZE),
   cursor: z.string().optional(),
   /**
    * Comma-separated list of field names to include in each player object.
@@ -141,6 +143,40 @@ export async function registerPlayer(
   res.status(201).json(body);
 }
 
+/**
+ * Build the profile detail object served by GET /api/players/:playerId.
+ * Key order is significant: the ETag digest is a hash of this exact JSON,
+ * so GET (which may serve from cache) and PUT (which reads fresh from the
+ * DB) must construct identical objects for the same stored row.
+ */
+function buildPlayerDetail(row: PlayerRow): Record<string, unknown> {
+  const { tierName: tierNameMeta, tierDescription } = getTierMeta(row.progress_level as number);
+  return {
+    player_id: row.player_id,
+    wallet: row.wallet,
+    position: row.position,
+    region: row.region,
+    metadataUri: row.metadata_uri,
+    progress_level: row.progress_level,
+    created_at: row.created_at,
+    is_active: row.is_active,
+    tierName: tierNameMeta,
+    tierDescription,
+    progress_tier_name: tierName(row.progress_level as number),
+  };
+}
+
+/**
+ * Version token for a player profile (#1151). One token serves both caching
+ * (If-None-Match → 304) and optimistic concurrency (If-Match on PUT): it is
+ * a hash of the profile payload plus the profile-history version (the count
+ * of recorded metadata updates, which the profile-history feature already
+ * tracks and which bumps on every successful PUT).
+ */
+function playerEtag(detail: Record<string, unknown>, profileVersion: number): string {
+  return `"${createHash("sha1").update(JSON.stringify({ ...detail, profileVersion })).digest("hex")}"`;
+}
+
 /** GET /api/players/:playerId */
 export async function getPlayer(
   req: Request,
@@ -161,20 +197,7 @@ export async function getPlayer(
       res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
       return;
     }
-    const { tierName: tierNameMeta, tierDescription } = getTierMeta(row.progress_level as number);
-    data = {
-      player_id: row.player_id,
-      wallet: row.wallet,
-      position: row.position,
-      region: row.region,
-      metadataUri: row.metadata_uri,
-      progress_level: row.progress_level,
-      created_at: row.created_at,
-      is_active: row.is_active,
-      tierName: tierNameMeta,
-      tierDescription,
-      progress_tier_name: tierName(row.progress_level as number),
-    };
+    data = buildPlayerDetail(row);
     await cacheSet(cacheKey, data);
   }
 
@@ -185,7 +208,10 @@ export async function getPlayer(
     return;
   }
 
-  const etag = `"${createHash("sha1").update(JSON.stringify(data)).digest("hex")}"`;
+  // The profile-history version is part of the ETag so a profile update that
+  // does not change the cached row payload still moves the version token.
+  const profileHistory = await getPlayerProfileHistory(playerId);
+  const etag = playerEtag(data, profileHistory.length);
   if (req.headers["if-none-match"] === etag) {
     res.status(304).end();
     return;
@@ -402,8 +428,8 @@ export async function filterPlayers(
 
 /** PUT /api/players/:playerId — profile owner only */
 export const updatePlayerSchema = z.union([
-  z.object({ metadata: z.record(z.unknown()) }),
-  z.object({ metadataUri: metadataUriSchema }),
+  z.object({ metadata: z.record(z.unknown()) }).strict(),
+  z.object({ metadataUri: metadataUriSchema }).strict(),
 ]);
 
 export async function updatePlayer(
@@ -412,6 +438,39 @@ export async function updatePlayer(
   next: NextFunction,
 ): Promise<void> {
   const playerId = sanitizeInput(req.params.playerId as string);
+
+  // Optimistic concurrency (#1151): the ETag returned by GET doubles as the
+  // version token. Compare against the *current* stored state (fresh read —
+  // the GET path may serve from cache) so a client editing a stale profile
+  // can never silently clobber a newer update.
+  const row = await getPlayerById(playerId);
+  if (!row) {
+    res.status(404).json({ success: false, error: "Player not found", code: ErrorCode.PLAYER_NOT_FOUND });
+    return;
+  }
+  const profileHistory = await getPlayerProfileHistory(playerId);
+  const currentEtag = playerEtag(buildPlayerDetail(row), profileHistory.length);
+
+  const ifMatch = req.headers["if-match"];
+  if (ifMatch === undefined) {
+    res.status(428).json({
+      success: false,
+      error: "If-Match header required — echo the ETag from GET /api/players/:playerId (or send \"*\" to override)",
+      code: ErrorCode.PRECONDITION_REQUIRED,
+    });
+    return;
+  }
+  // "*" is the standard override: the request proceeds as long as the
+  // resource exists (which the row lookup above already confirmed).
+  if (ifMatch !== "*" && ifMatch !== currentEtag) {
+    res.status(412).json({
+      success: false,
+      error: "Precondition Failed — the profile changed since it was last fetched; re-fetch and retry",
+      code: ErrorCode.PRECONDITION_FAILED,
+    });
+    return;
+  }
+
   const parsed = updatePlayerSchema.parse(req.body);
   const metadataUri =
     "metadata" in parsed
@@ -430,6 +489,10 @@ export async function updatePlayer(
   // Bust the single-player cache so the next GET reflects the update.
   await invalidatePlayerCache(playerId);
 
+  // The version has moved (one more history row) — return the new token so
+  // the client can chain another PUT without a round-trip GET.
+  res.set("ETag", playerEtag(buildPlayerDetail(row), profileHistory.length + 1));
+
   res.status(200).json({
     success: true,
     data: {
@@ -439,12 +502,13 @@ export async function updatePlayer(
   });
 }
 
-const milestonesQuerySchema = z.object({
+export const milestonesQuerySchema = z.object({
   sortBy: z.enum(["submittedAt", "approvedAt"]).default("submittedAt"),
   order: z.enum(["asc", "desc"]).default("asc"),
   // `sort` is an accepted alias for `order` — the task spec uses `sort`
   sort: z.enum(["asc", "desc"]).optional(),
-  status: z.enum(["approved", "pending", "all"]).default("all"),
+  // Omit status to include approved + pending + on-chain (all). No "all" value.
+  status: z.enum(["pending", "approved", "rejected"]).optional(),
   limit: z.coerce
     .number()
     .int()
@@ -507,29 +571,52 @@ export async function getPlayerMilestones(
   const order = parsed.data.sort ?? parsed.data.order;
 
   // Map status to the event type filter used by queryEvents.
-  // "pending"  → milestone_submitted events
-  // "approved" → milestone_approved events
-  // "all"      → both (fetch approved then layer in submitted)
-  const approvedEvents =
-    status !== "pending"
-      ? queryEvents("milestone_approved")
-          .filter((e) => e.payload.player_id === playerId)
-          .map((e) => ({ ...e.payload, status: "approved" as const }))
-      : [];
+  // omitted     → approved + pending + all on-chain (normalized with status)
+  // "approved"  → milestone_approved + on-chain where approved===true
+  // "pending"   → milestone_submitted + on-chain where approved===false
+  // "rejected"  → milestone_rejected only (on-chain has no rejected flag)
+  const includeApproved = status === undefined || status === "approved";
+  const includePending = status === undefined || status === "pending";
+  const includeRejected = status === "rejected";
 
-  const pendingEvents =
-    status !== "approved"
-      ? queryEvents("milestone_submitted")
-          .filter((e) => e.payload.player_id === playerId)
-          .map((e) => ({ ...e.payload, status: "pending" as const }))
-      : [];
+  const approvedEvents = includeApproved
+    ? queryEvents("milestone_approved")
+        .filter((e) => e.payload.player_id === playerId)
+        .map((e) => ({ ...e.payload, status: "approved" as const }))
+    : [];
+
+  const pendingEvents = includePending
+    ? queryEvents("milestone_submitted")
+        .filter((e) => e.payload.player_id === playerId)
+        .map((e) => ({ ...e.payload, status: "pending" as const }))
+    : [];
+
+  const rejectedEvents = includeRejected
+    ? queryEvents("milestone_rejected")
+        .filter((e) => e.payload.player_id === playerId)
+        .map((e) => ({ ...e.payload, status: "rejected" as const }))
+    : [];
 
   const onChainMilestones = await queryMilestones(playerId);
+  const filteredOnChain =
+    status === "rejected"
+      ? []
+      : onChainMilestones
+          .filter((m) => {
+            if (status === "approved") return m.approved === true;
+            if (status === "pending") return m.approved === false;
+            return true; // omitted → all on-chain
+          })
+          .map((m) => ({
+            ...m,
+            status: (m.approved ? "approved" : "pending") as "approved" | "pending",
+          }));
 
   const combined = [
     ...approvedEvents,
     ...pendingEvents,
-    ...(onChainMilestones as unknown as Record<string, unknown>[]),
+    ...rejectedEvents,
+    ...filteredOnChain,
   ];
 
   combined.sort((a, b) => {
@@ -540,6 +627,21 @@ export async function getPlayerMilestones(
 
   // Apply limit (parameterised, no interpolation)
   const paginated = combined.slice(0, limit);
+
+  // ── ETag / conditional GET (#1139) ─────────────────────────────────────────
+  // Derive a weak ETag from the count of milestones and the latest event
+  // timestamp so the tag changes exactly when the list changes.  This mirrors
+  // the playerEtag() pattern used by GET /api/players/:playerId.
+  const milestoneEtag = playerEtag(
+    { count: paginated.length, items: paginated },
+    paginated.length,
+  );
+  if (req.headers["if-none-match"] === milestoneEtag) {
+    res.status(304).end();
+    return;
+  }
+  res.set("ETag", milestoneEtag);
+  res.set("Cache-Control", "no-cache");
 
   res.json({ success: true, data: paginated });
 }
