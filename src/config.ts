@@ -497,6 +497,9 @@ const config = {
   // it falls back to an in-memory Map — no setup required for local dev/CI.
   redisUrl: process.env.REDIS_URL || '',
 
+  /** In-memory search cache max entries; LRU eviction applies after TTL expiry (default: 1000). */
+  searchCacheMaxEntries: parseNumericEnv('SEARCH_CACHE_MAX_ENTRIES', process.env.SEARCH_CACHE_MAX_ENTRIES, 1000, { min: 1, integer: true }),
+
   /** TTL for pinJson deduplication cache entries in milliseconds (default: 5 min). */
   pinJsonCacheTtlMs: parseNumericEnv('PIN_JSON_CACHE_TTL_MS', process.env.PIN_JSON_CACHE_TTL_MS, 300000, { min: 0, integer: true }),
 
