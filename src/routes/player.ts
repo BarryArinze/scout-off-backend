@@ -117,8 +117,13 @@ router.route("/:playerId")
  * (pending|approved|rejected; omit for all), `sortBy`, `order`/`sort`, and
  * `limit` (max 50) query params.
  *
+ * Supports conditional GET via ETag / If-None-Match (returns 304 when the
+ * list has not changed since the previous fetch). Cache-Control is set to
+ * no-cache, matching the player-profile endpoint (#1139).
+ *
  * @param playerId {string} - Player's unique identifier (cuid2)
  * @response 200 { success: true, data: Milestone[] }
+ * @response 304 Not Modified (when If-None-Match matches the current ETag)
  * @response 400 { success: false, error: string } - Invalid playerId, limit, or query params
  * @response 404 { success: false, error: string } - Player not found or not visible to caller
  */

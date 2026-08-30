@@ -579,6 +579,21 @@ export async function getPlayerMilestones(
   // Apply limit (parameterised, no interpolation)
   const paginated = combined.slice(0, limit);
 
+  // ── ETag / conditional GET (#1139) ─────────────────────────────────────────
+  // Derive a weak ETag from the count of milestones and the latest event
+  // timestamp so the tag changes exactly when the list changes.  This mirrors
+  // the playerEtag() pattern used by GET /api/players/:playerId.
+  const milestoneEtag = playerEtag(
+    { count: paginated.length, items: paginated },
+    paginated.length,
+  );
+  if (req.headers["if-none-match"] === milestoneEtag) {
+    res.status(304).end();
+    return;
+  }
+  res.set("ETag", milestoneEtag);
+  res.set("Cache-Control", "no-cache");
+
   res.json({ success: true, data: paginated });
 }
 
