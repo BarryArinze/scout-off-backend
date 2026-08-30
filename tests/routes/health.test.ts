@@ -14,6 +14,11 @@ jest.mock('../../src/services/ipfs', () => ({
   checkHealth: jest.fn(),
 }));
 
+// Mock the indexer module to control indexerLedgerLag in tests
+jest.mock('../../src/services/indexer', () => ({
+  indexerLedgerLag: 0,
+}));
+
 // Partially mock the db module so individual tests can control getDriver() —
 // src/app.ts's /health and /ready probes go through the DbDriver, not the raw
 // getDb() handle, so they work identically under DB_DRIVER=sqlite and
@@ -27,6 +32,7 @@ import request from 'supertest';
 import app from '../../src/app';
 import * as ipfsService from '../../src/services/ipfs';
 import * as dbModule from '../../src/db';
+import * as indexerModule from '../../src/services/indexer';
 
 const mockCheckHealth = ipfsService.checkHealth as jest.Mock;
 const mockGetDriver = dbModule.getDriver as jest.Mock;
@@ -83,6 +89,8 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     mockGetDriver.mockReset();
     // Restore to the real implementation between tests
     mockGetDriver.mockImplementation(getRealDriver);
+    // Reset indexer lag to 0
+    (indexerModule as any).indexerLedgerLag = 0;
   });
 
   it('returns 200 and includes db:ok when all dependencies are healthy', async () => {
@@ -175,6 +183,45 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     expect(res.body.services).toHaveProperty('db');
     expect(res.body.services).toHaveProperty('stellar');
   });
+
+  it('includes indexer field in the services object', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    const res = await request(app).get(path);
+    expect(res.body.services).toHaveProperty('indexer');
+    expect(['ok', 'unavailable', 'disabled']).toContain(res.body.services.indexer);
+  });
+
+  it('returns 503 with indexer:unavailable when indexer lag exceeds threshold', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    // Set indexer lag to exceed default threshold (100)
+    (indexerModule as any).indexerLedgerLag = 150;
+    const res = await request(app).get(path);
+    expect(res.status).toBe(503);
+    expect(res.body.status).toBe('degraded');
+    expect(res.body.services.indexer).toBe('unavailable');
+  });
+
+  it('returns 200 with indexer:ok when indexer lag is within threshold', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    // Set indexer lag within default threshold (100)
+    (indexerModule as any).indexerLedgerLag = 50;
+    const res = await request(app).get(path);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ok');
+    expect(res.body.services.indexer).toBe('ok');
+  });
+
+  it('returns 200 with indexer:ok when indexer lag is exactly at threshold', async () => {
+    mockCheckHealth.mockResolvedValueOnce(undefined);
+    // Set indexer lag exactly at default threshold (100)
+    (indexerModule as any).indexerLedgerLag = 100;
+    const res = await request(app).get(path);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('ok');
+    expect(res.body.services.indexer).toBe('ok');
+  });
+
+
 });
 
 // ─── /health ─────────────────────────────────────────────────────────────────

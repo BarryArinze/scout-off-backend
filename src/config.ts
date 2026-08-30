@@ -511,6 +511,37 @@ const config = {
   /** Minimum response size in bytes to trigger compression (default: 1024 bytes). */
   compressionThresholdBytes: parseNumericEnv('COMPRESSION_THRESHOLD', process.env.COMPRESSION_THRESHOLD ?? process.env.COMPRESSION_THRESHOLD_BYTES, 1024, { min: 1, integer: true }),
 
+  /**
+   * Maximum indexer ledger lag (in ledgers) allowed for readiness check.
+   * If the indexer is more than this many ledgers behind the chain tip,
+   * the readiness check will report the indexer as unavailable.
+   * Default: 100 ledgers. Set to 0 to disable the lag check.
+   */
+  readinessMaxLag: parseNumericEnv('READINESS_MAX_LAG', process.env.READINESS_MAX_LAG, 100, { min: 0, integer: true }),
+
+  /**
+   * Startup grace period in milliseconds for the readiness lag check.
+   * After process startup, the indexer is allowed to lag without failing
+   * readiness for this duration (to accommodate initial sync from persisted cursor).
+   * Default: 5 minutes. Set to 0 to disable the grace period.
+   */
+  readinessGracePeriodMs: parseNumericEnv('READINESS_GRACE_PERIOD_MS', process.env.READINESS_GRACE_PERIOD_MS, 5 * 60 * 1000, { min: 0, integer: true }),
+
+  /**
+   * Log redaction configuration for sensitive data in production logs.
+   * In development, redaction is always disabled (pass-through).
+   */
+  logRedaction: {
+    /** Enable redaction in non-development environments (default: true for staging/production) */
+    enabled: nodeEnv !== 'development' && process.env.LOG_REDACTION_ENABLED !== 'false',
+    /** Number of characters to preserve at the start of masked wallet addresses (default: 1) */
+    walletPrefixLength: parseNumericEnv('LOG_REDACTION_WALLET_PREFIX', process.env.LOG_REDACTION_WALLET_PREFIX, 1, { min: 1, max: 10, integer: true }),
+    /** Number of characters to preserve at the end of masked wallet addresses (default: 4) */
+    walletSuffixLength: parseNumericEnv('LOG_REDACTION_WALLET_SUFFIX', process.env.LOG_REDACTION_WALLET_SUFFIX, 4, { min: 1, max: 10, integer: true }),
+    /** Hash correlation IDs instead of logging them raw (default: false) */
+    hashCorrelationIds: process.env.LOG_REDACTION_HASH_CORRELATION_IDS === 'true',
+  },
+
 };
 
 export default config;

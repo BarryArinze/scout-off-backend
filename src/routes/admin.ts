@@ -34,7 +34,8 @@ import { getFeatureFlags, updateFeatureFlag, toggleFeatureFlag, updateFeatureFla
 import { exportEvents } from '../controllers/exportController';
 import { listDeadLetters, replayDeadLetter, purgeOldDeadLetters, requeueDeadLetter, purgeDeadLetter } from '../controllers/webhookAdminController';
 import { setIpReputationController, getIpReputationController, setIpReputationSchema } from '../controllers/ipReputationController';
-import { triggerReindex, reindexStatusHandler, reindexBodySchema } from '../controllers/reindexController';
+import { triggerReindex, reindexStatusHandler, reindexBodySchema, cancelReindexHandler } from '../controllers/reindexController';
+import { triggerReplay, replayStatusHandler, replayBodySchema } from '../controllers/replayController';
 import { requireRole } from '../middleware/auth';
 import { idempotency } from '../middleware/idempotency';
 import { ipAllowlistMiddleware } from '../middleware/ipAllowlist';
@@ -589,6 +590,52 @@ router.route('/reindex/status')
 router.route('/reindex/cancel')
   .post(requireRole('admin'), cancelReindexHandler)
   .all(methodNotAllowed(['POST']));
+
+/**
+ * POST /api/admin/events/replay
+ *
+ * Trigger a targeted event replay for a small ledger range without modifying
+ * the main indexer cursor. This is a surgical tool for fixing narrow historical
+ * gaps (e.g., "we think ledgers 500123-500130 were missed") while the indexer
+ * is live near tip.
+ *
+ * Maximum range is 200 ledgers. Events are upserted using INSERT OR IGNORE,
+ * so duplicates are silently skipped. Returns a count of newly inserted events.
+ *
+ * @body { fromLedger: number, toLedger: number }
+ * @response 200 { success: true, data: { fromLedger, toLedger, eventsInserted } }
+ * @response 409 { success: false, error: string } - job already running
+ * @response 422 { success: false, error: string } - range ≥ 200 or invalid range
+ * @auth Bearer (admin role required)
+ */
+router.route('/events/replay')
+  .post(requireRole('admin'), validateBody(replayBodySchema), triggerReplay)
+  .all(methodNotAllowed(['POST']));
+
+/**
+ * GET /api/admin/events/replay/status
+ *
+ * Return the current state of the replay job.
+ *
+ * @response 200 {
+ *   success: true,
+ *   data: {
+ *     status: 'idle' | 'running' | 'complete' | 'error',
+ *     from_ledger: number,
+ *     to_ledger: number,
+ *     ledgers_processed: number,
+ *     ledgers_total: number,
+ *     events_inserted: number,
+ *     started_at: string | null,
+ *     completed_at: string | null,
+ *     error_message: string | null
+ *   }
+ * }
+ * @auth Bearer (admin role required)
+ */
+router.route('/events/replay/status')
+  .get(requireRole('admin'), replayStatusHandler)
+  .all(methodNotAllowed(['GET', 'HEAD']));
 
 /**
  * GET /api/admin/webhooks/dead-letters
