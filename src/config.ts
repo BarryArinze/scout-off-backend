@@ -406,6 +406,13 @@ const config = {
     windowMs: parseNumericEnv('WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS', process.env.WEBHOOK_TEST_RATE_LIMIT_WINDOW_MS, 60000, { min: 1, integer: true }),
     max: parseNumericEnv('WEBHOOK_TEST_RATE_LIMIT_MAX', process.env.WEBHOOK_TEST_RATE_LIMIT_MAX, process.env.NODE_ENV === 'test' ? 1000 : 5, { min: 1, integer: true }),
   },
+  // Per-player milestone submission rate limit (#1137): guards against a
+  // validator (or compromised key) flooding a single player's milestone history.
+  // Default: 10 submissions per player per hour.
+  milestonePlayerRateLimit: {
+    windowMs: parseNumericEnv('MILESTONE_PLAYER_RATE_WINDOW_MS', process.env.MILESTONE_PLAYER_RATE_WINDOW_MS, 3_600_000, { min: 1, integer: true }),
+    max: parseNumericEnv('MILESTONE_PLAYER_RATE_MAX', process.env.MILESTONE_PLAYER_RATE_MAX, process.env.NODE_ENV === 'test' ? 1000 : 10, { min: 1, integer: true }),
+  },
   bodyLimit: {
     // Maximum JSON payload size (default: 1MB)
     json: process.env.JSON_PAYLOAD_LIMIT ?? '1mb',
@@ -490,6 +497,9 @@ const config = {
   // it falls back to an in-memory Map — no setup required for local dev/CI.
   redisUrl: process.env.REDIS_URL || '',
 
+  /** In-memory search cache max entries; LRU eviction applies after TTL expiry (default: 1000). */
+  searchCacheMaxEntries: parseNumericEnv('SEARCH_CACHE_MAX_ENTRIES', process.env.SEARCH_CACHE_MAX_ENTRIES, 1000, { min: 1, integer: true }),
+
   /** TTL for pinJson deduplication cache entries in milliseconds (default: 5 min). */
   pinJsonCacheTtlMs: parseNumericEnv('PIN_JSON_CACHE_TTL_MS', process.env.PIN_JSON_CACHE_TTL_MS, 300000, { min: 0, integer: true }),
 
@@ -526,6 +536,21 @@ const config = {
    * Default: 5 minutes. Set to 0 to disable the grace period.
    */
   readinessGracePeriodMs: parseNumericEnv('READINESS_GRACE_PERIOD_MS', process.env.READINESS_GRACE_PERIOD_MS, 5 * 60 * 1000, { min: 0, integer: true }),
+
+  /**
+   * Log redaction configuration for sensitive data in production logs.
+   * In development, redaction is always disabled (pass-through).
+   */
+  logRedaction: {
+    /** Enable redaction in non-development environments (default: true for staging/production) */
+    enabled: nodeEnv !== 'development' && process.env.LOG_REDACTION_ENABLED !== 'false',
+    /** Number of characters to preserve at the start of masked wallet addresses (default: 1) */
+    walletPrefixLength: parseNumericEnv('LOG_REDACTION_WALLET_PREFIX', process.env.LOG_REDACTION_WALLET_PREFIX, 1, { min: 1, max: 10, integer: true }),
+    /** Number of characters to preserve at the end of masked wallet addresses (default: 4) */
+    walletSuffixLength: parseNumericEnv('LOG_REDACTION_WALLET_SUFFIX', process.env.LOG_REDACTION_WALLET_SUFFIX, 4, { min: 1, max: 10, integer: true }),
+    /** Hash correlation IDs instead of logging them raw (default: false) */
+    hashCorrelationIds: process.env.LOG_REDACTION_HASH_CORRELATION_IDS === 'true',
+  },
 
 };
 

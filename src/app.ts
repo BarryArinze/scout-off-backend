@@ -23,6 +23,7 @@ import { ipReputationMiddleware } from './middleware/ipReputation';
 import { createTimeout, requestTimeout } from './middleware/timeout';
 import { indexerLedgerLag } from './services/indexer';
 import { getDriver } from './db';
+import { withTimeout } from './utils/withTimeout';
 import { getVersionInfo } from './version';
 import { apiVersion } from './middleware/apiVersion';
 import { versionRouting } from './middleware/versionRouting';
@@ -180,9 +181,16 @@ app.use((req, res, next) => {
 app.use(requestTimeout);
 app.use(correlationId);
 app.use(traceId);
-// helmet first so the explicit values below (driven by config.securityHeaders) win
-// on any header both middlewares set.
-app.use(helmet());
+// Overlapping headers (CSP, nosniff, frame options, referrer-policy, HSTS) are
+// owned exclusively by securityHeaders below — disable those helmet modules so
+// each header has exactly one source of truth.
+app.use(helmet({
+  contentSecurityPolicy: false,
+  xContentTypeOptions: false,
+  xFrameOptions: false,
+  referrerPolicy: false,
+  strictTransportSecurity: false,
+}));
 app.use(securityHeaders);
 app.use(responseTime);
 // Set X-API-Version on every response before route handlers run
