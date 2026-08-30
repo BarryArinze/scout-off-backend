@@ -34,13 +34,16 @@ const router = Router();
 /**
  * GET /api/players
  * optionalAuth so req.account is set when a Bearer token is present (for audit logging)
+ * Supports conditional GET (If-None-Match / If-Modified-Since → 304) and HEAD.
  *
  * @response 200 { success: true, data: PlayerSummary[], total, page, pageSize, pages }
+ * @response 304 Not Modified
  * @response 400 { success: false, error: string } - Invalid query parameters
  * @response 422 { success: false, error: string } - minTier out of range
  */
 router.route("/")
   .get(optionalAuth, validateQuery(filterSchema), filterPlayers)
+  .head(optionalAuth, validateQuery(filterSchema), filterPlayers)
   .all(methodNotAllowed(['GET', 'HEAD']));
 
 /**

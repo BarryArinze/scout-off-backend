@@ -30,11 +30,14 @@ jest.mock('../../src/db', () => {
 
 import request from 'supertest';
 import app from '../../src/app';
+import config from '../../src/config';
 import * as ipfsService from '../../src/services/ipfs';
+import * as stellarService from '../../src/services/stellar';
 import * as dbModule from '../../src/db';
 import * as indexerModule from '../../src/services/indexer';
 
 const mockCheckHealth = ipfsService.checkHealth as jest.Mock;
+const mockStellarHealth = stellarService.stellarHealth as jest.Mock;
 const mockGetDriver = dbModule.getDriver as jest.Mock;
 // getDriver() throws until initDb() has run (tests/setup.ts's beforeAll), so
 // this can't be resolved at module-import time — read it lazily instead.
@@ -84,8 +87,12 @@ function expectProbeStatus(value: unknown, expected: string): void {
 const READINESS_PATHS = ['/ready', '/health/readiness'];
 
 describe.each(READINESS_PATHS)('%s', (path) => {
+  const previousBreakerState = stellarService.stellarBreaker.state;
+
   afterEach(() => {
     mockCheckHealth.mockReset();
+    mockStellarHealth.mockReset();
+    mockStellarHealth.mockResolvedValue(true);
     mockGetDriver.mockReset();
     // Restore to the real implementation between tests
     mockGetDriver.mockImplementation(getRealDriver);
@@ -93,8 +100,9 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     (indexerModule as any).indexerLedgerLag = 0;
   });
 
-  it('returns 200 and includes db:ok when all dependencies are healthy', async () => {
+  it('returns 200 and status ok when all dependencies are healthy (#1226)', async () => {
     mockCheckHealth.mockResolvedValueOnce(undefined);
+    mockStellarHealth.mockResolvedValueOnce(true);
     const res = await request(app).get(path);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('ok');
@@ -134,7 +142,7 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     expect(elapsed).toBeLessThan(15_000);
   });
 
-  it('returns 503 with ipfs:unavailable when IPFS is unreachable', async () => {
+  it('returns 503 with ipfs:unavailable when IPFS check throws (#1226)', async () => {
     mockCheckHealth.mockRejectedValueOnce(new Error('IPFS connection refused'));
     const res = await request(app).get(path);
     expect(res.status).toBe(503);
@@ -142,7 +150,7 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     expectProbeStatus(res.body.services.ipfs, 'unavailable');
   });
 
-  it('returns 503 with db:unavailable when the database probe throws', async () => {
+  it('returns 503 with db:unavailable when the database probe throws (#1226)', async () => {
     mockCheckHealth.mockResolvedValueOnce(undefined);
     // Simulate a locked or corrupted DB. /ready's readiness probe
     // (probeDbWritable in src/app.ts) checks writability via driver.run(),
@@ -150,7 +158,7 @@ describe.each(READINESS_PATHS)('%s', (path) => {
     mockGetDriver.mockImplementation(() =>
       driverWith({ run: () => Promise.reject(new Error('SQLITE_BUSY: database is locked')) }),
     );
-    const res = await request(app).get('/ready');
+    const res = await request(app).get(path);
     expect(res.status).toBe(503);
     expect(res.body.status).toBe('degraded');
     expectProbeStatus(res.body.services.db, 'unavailable');

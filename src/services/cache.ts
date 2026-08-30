@@ -202,6 +202,23 @@ export async function cacheSet<T>(
 }
 
 /**
+ * Millisecond timestamp of the last player-list mutation (registration, tier
+ * promotion, profile update, etc.). Used as Last-Modified / list ETag input
+ * for GET /api/players cheap revalidation.
+ */
+let playerListLastModifiedMs = Date.now();
+
+/** Latest list-mutation time (ms since epoch). */
+export function getPlayerListLastModified(): number {
+  return playerListLastModifiedMs;
+}
+
+/** Test helper — reset the list validator clock without going through Redis. */
+export function __setPlayerListLastModifiedForTests(ms: number): void {
+  playerListLastModifiedMs = ms;
+}
+
+/**
  * Invalidate player-list cache entries (`players:list:*` — every paginated
  * search result) and, when `playerId` is given, the individual
  * `players:<playerId>` entry.
@@ -211,8 +228,12 @@ export async function cacheSet<T>(
  * player-list cache. Failures are logged and swallowed: the invalidation must
  * never crash the caller (e.g. the indexer mid-batch) nor fail an indexing
  * operation whose DB write already succeeded.
+ *
+ * Also bumps {@link getPlayerListLastModified} so HTTP cache validators
+ * (Last-Modified / list ETag on GET /api/players) change immediately.
  */
 export async function invalidatePlayerCache(playerId?: string): Promise<void> {
+  playerListLastModifiedMs = Date.now();
   try {
     await store.deleteByPrefix(namespacedKey('players:list'));
     if (playerId) {
@@ -266,6 +287,7 @@ export function createInvalidationHandler(
   return async (channel: string, _message: string): Promise<void> => {
     if (channel !== INVALIDATION_CHANNEL) return;
     try {
+      playerListLastModifiedMs = Date.now();
       await storeToUse.deleteByPrefix(namespacedKey('players:list'));
     } catch (err) {
       logger.warn(
