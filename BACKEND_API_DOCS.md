@@ -729,6 +729,58 @@ router.get('/slow-endpoint', createTimeout(60_000), requireRole('admin'), myHand
 
 ---
 
+## Pagination
+
+Paginated list endpoints consistently cap page size to prevent resource exhaustion and provide predictable response times. A shared constant (`MAX_PAGE_SIZE`) is enforced across all REST and GraphQL endpoints.
+
+### Limits
+
+| Setting | Value | Description |
+|---------|-------|-------------|
+| **Default page size** | `20` | Results returned when `pageSize` is omitted |
+| **Maximum page size** | `100` | Hard cap applied to all list endpoints; requests exceeding this are clamped |
+
+### Behavior
+
+When a client requests a `pageSize` greater than the maximum:
+- The request is **clamped** to `100` results
+- The response includes the actual `pageSize` used (not the requested value)
+- No error is returned — the clamp is silent (by design, to simplify client retry logic)
+
+**Example:**
+```bash
+# Request 500 results
+curl "http://localhost:4000/api/v1/players?pageSize=500"
+
+# Response contains pageSize: 100 (not 500)
+# Client must inspect the response to detect the clamp
+{
+  "success": true,
+  "data": [...],
+  "total": 50000,
+  "page": 1,
+  "pageSize": 100,
+  "pages": 500
+}
+```
+
+### Affected endpoints
+
+**REST endpoints:**
+- `GET /api/players` (filter/search)
+- `GET /api/scouts/:wallet/saved-searches/:id/run`
+
+**GraphQL queries:**
+- `players(region, position, minTier, page, pageSize)`
+
+All of these use the shared `MAX_PAGE_SIZE = 100` constant defined in `src/utils/pagination.ts`. The clamp is applied consistently whether the endpoint is called via REST query parameters or GraphQL arguments.
+
+### Rationale
+
+Inconsistent or undocumented page-size caps surprise clients — asking for 500 results and silently getting 100 with no indication creates debugging confusion. A single shared constant plus documentation in responses makes the contract predictable and reduces client-side surprises.
+
+---
+
 ## Error Format
 
 All error responses follow this shape:
@@ -757,44 +809,75 @@ The `code` field provides a machine-readable error classification for programmat
 
 **Note:** When an error is thrown with an explicit `code` property already set, that code takes precedence over the status-based mapping.
 
+### Error Code Reference
+
+All error codes used in REST and GraphQL responses are defined in `src/utils/errorCodes.ts` and documented below. Each code indicates when it occurs and what the client should do.
+
+#### Generic Errors
+
+| Code | HTTP Status | When It Occurs | Client Action |
+|------|------------|-------------|--------------|
+| `INTERNAL_SERVER_ERROR` | 500 | Unexpected server error | Retry with exponential backoff; contact support if persists |
+| `NOT_FOUND` | 404 | Requested resource does not exist | Verify the resource ID/path is correct; check if it was deleted |
+| `VALIDATION_ERROR` | 400 | Request validation failed (Zod schema, required fields, etc.) | Fix the request payload; check field names and types against API docs |
+| `MALFORMED_JSON` | 400 | Request body contains invalid JSON syntax | Verify JSON syntax; ensure Content-Type is application/json |
+| `PAYLOAD_TOO_LARGE` | 413 | Request body size exceeds the server limit | Reduce payload size; split into multiple requests if needed |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | Request Content-Type is not supported | Set Content-Type: application/json in request headers |
+
+#### Authentication & Authorization
+
+| Code | HTTP Status | When It Occurs | Client Action |
+|------|------------|-------------|--------------|
+| `UNAUTHORIZED` | 401 | Request lacks valid authentication (missing/invalid JWT or API key) | Provide a valid Bearer token or X-API-Key header; refresh expired tokens |
+| `FORBIDDEN` | 403 | Request is authenticated but lacks permission | Verify your account role/scope; contact support to request access |
+| `TOKEN_INVALID` | 401 | JWT token is invalid (malformed, signed with wrong key) | Re-authenticate and obtain a fresh token |
+| `TOKEN_EXPIRED` | 401 | JWT token has expired | Refresh the token or re-authenticate |
+
+#### Resource-Specific Errors
+
+| Code | HTTP Status | When It Occurs | Client Action |
+|------|------------|-------------|--------------|
+| `PLAYER_NOT_FOUND` | 404 | The specified player was not found or is hidden from this user | Verify the player_id is correct; check if the player is deactivated |
+| `WALLET_MISMATCH` | 400 | The wallet/account in the request does not match the authenticated user | Use your own wallet address in the request path |
+| `FEATURE_DISABLED` | 403 | A requested feature is disabled (feature flag not enabled) | Contact support to enable the feature; check docs for availability |
+
+#### Subscription & Access Control
+
+| Code | HTTP Status | When It Occurs | Client Action |
+|------|------------|-------------|--------------|
+| `NOT_SUBSCRIBED` | 402 | Scout has no active subscription (required for this operation) | Subscribe first via /api/scouts/:wallet/subscribe |
+| `SUBSCRIPTION_REQUIRED` | 403 | An active subscription is required to perform this action | Subscribe first via /api/scouts/:wallet/subscribe |
+
+#### Payment & Blockchain Errors
+
+| Code | HTTP Status | When It Occurs | Client Action |
+|------|------------|-------------|--------------|
+| `INSUFFICIENT_FUNDS` | 402 | Account balance is insufficient to complete the payment | Check account balance; deposit funds or reduce transaction amount |
+| `INVALID_ACCOUNT` | 400 | The specified account does not exist or is invalid | Verify the account identifier is valid and exists |
+| `NETWORK_ERROR` | 503 | A network error occurred (blockchain RPC unreachable, etc.) | Retry after a short delay; check if the blockchain is operational |
+| `PAYMENT_UNKNOWN` | 500 | A payment operation failed for an unknown reason | Retry; if it persists, contact support with transaction details |
+| `NO_FEES` | 400 | No accumulated fees are available to withdraw | Check again after platform fees accrue from transactions |
+| `INVALID_RECIPIENT` | 400 | The withdrawal recipient address is invalid or not supported | Verify the recipient wallet/account format |
+| `CONTRACT_PAUSED` | 503 | The subscription contract is paused (emergency maintenance) | Retry after a delay; operations will resume when unpaused |
+
+#### Conflict & Concurrency Errors
+
+| Code | HTTP Status | When It Occurs | Client Action |
+|------|------------|-------------|--------------|
+| `CONFLICT` | 409 | A resource conflict occurred (duplicate key, state mismatch, etc.) | Check the current state; retry with updated data or a different key |
+| `PRECONDITION_FAILED` | 412 | If-Match header supplied but does not match current resource version | Fetch the current resource, get the new ETag, and retry with new ETag |
+| `PRECONDITION_REQUIRED` | 428 | Request requires an If-Match header (conditional request) that was not supplied | Include the If-Match header with the current ETag from a prior GET request |
+
+#### Administrative Actions
+
+| Code | HTTP Status | When It Occurs | Client Action |
+|------|------------|-------------|--------------|
+| `EXPIRED_ACTION` | 410 | A multi-sig admin action has expired and can no longer be approved | Propose the action again to create a fresh request |
+| `ACTION_EXECUTED` | 409 | A multi-sig admin action has already been executed | Check the action status; cannot re-approve completed actions |
+
 ---
 
-## Error Codes
 
-When a request triggers a Soroban contract error, the API translates the on-chain error code into an appropriate HTTP status and returns a human-readable message. The `code` field in the response body will contain the snake_case `ErrorCode` constant (e.g. `PLAYER_NOT_FOUND`).
-
-| Code | Error              | HTTP Status              | Description                                    | Resolution                                                      |
-| ---- | ------------------ | ------------------------ | ---------------------------------------------- | --------------------------------------------------------------- |
-| 1    | AlreadyInitialized | 409 Conflict             | Contract already initialized                   | No action needed; contract is ready                             |
-| 2    | NotInitialized     | 503 Service Unavailable  | Contract not initialized                       | Admin must call `initialize` first                              |
-| 3    | PlayerNotFound     | 404 Not Found            | Player ID does not exist                       | Verify `player_id` from the registration transaction            |
-| 4    | InvalidValidator   | 403 Forbidden            | Caller is not a registered validator           | Admin must register the validator address first                 |
-| 5    | MilestoneNotFound  | 404 Not Found            | Milestone ID does not exist                    | Refresh the milestone list and verify the ID                    |
-| 6    | AlreadyVerified    | 409 Conflict             | Milestone already approved                     | No duplicate approvals needed; check milestone status           |
-| 7    | InsufficientFee    | 402 Payment Required     | Payment is below the required contact fee      | Fetch the current fee via `get_contact_fee()` and retry         |
-| 8    | NotSubscribed      | 402 Payment Required     | Scout has no active subscription               | Call `subscribe` before browsing premium data; or attempting to cancel an already-cancelled or expired subscription |
-| 9    | Unauthorized       | 401 Unauthorized         | Caller is not authorized for this action       | Confirm you are signing with the correct Stellar account        |
-| 10   | ContractPaused     | 503 Service Unavailable  | Contract is paused by the admin                | Wait for admin to call `unpause_contract()`                     |
-| 11   | Overflow           | 500 Internal Server Error| Arithmetic overflow in fee calculation         | Use amounts within the safe u128 range                          |
-
-### Endpoint Error Code Cross-Reference
-
-| Endpoint | Possible Error Codes |
-| -------- | -------------------- |
-| `POST /api/players/register` | 2 (NotInitialized), 10 (ContractPaused) |
-| `GET /api/players/:playerId` | 3 (PlayerNotFound) |
-| `GET /api/players/:playerId/milestones` | 3 (PlayerNotFound), 5 (MilestoneNotFound) |
-| `POST /api/validators/milestone` | 2 (NotInitialized), 4 (InvalidValidator), 10 (ContractPaused) |
-| `POST /api/scouts/:wallet/contacts/:playerId/unlock` | 7 (InsufficientFee), 8 (NotSubscribed), 9 (Unauthorized), 10 (ContractPaused) |
-| `GET /api/scouts/:wallet/subscription` | 8 (NotSubscribed) |
-| `DELETE /api/scouts/:wallet/subscription` | 8 (NotSubscribed — no active subscription or already cancelled), 9 (Unauthorized), 10 (ContractPaused) |
-| `GET /api/admin/fees` | 10 (ContractPaused) |
-| `POST /api/admin/contract/pause` | 9 (Unauthorized), 2 (NotInitialized) |
-| `POST /api/admin/contract/unpause` | 9 (Unauthorized), 2 (NotInitialized) |
-
-### Cancel Subscription
-
-`DELETE /api/scouts/:wallet/subscription` — Cancels a scout's active on-chain subscription.
 
 **On-chain semantics:**
 - The `cancel_subscription(scout)` entrypoint on the `subscription` contract marks the subscription as expired at the current ledger (no refund).

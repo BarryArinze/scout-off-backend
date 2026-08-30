@@ -37,6 +37,7 @@ import { enrichPlayerResult } from "../utils/searchEnrichment";
 import { playerIdSchema } from "../utils/playerIdValidator";
 import { recordAudit } from "../utils/audit";
 import { canAccessPlayer } from "../utils/playerAccess";
+import { MAX_PAGE_SIZE, DEFAULT_PAGE_SIZE } from "../utils/pagination";
 
 const baseRegistrationSchema = z.object({
   wallet: z.string().min(56).max(56),
@@ -64,7 +65,7 @@ export const filterSchema = z.object({
   sortBy: z.enum(['relevance', 'tier', 'region', 'created_at']).default('relevance'),
   sortOrder: z.enum(['asc', 'desc']).default('desc'),
   page: z.coerce.number().int().min(1).optional(),
-  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  pageSize: z.coerce.number().int().min(1).max(MAX_PAGE_SIZE).default(DEFAULT_PAGE_SIZE),
   cursor: z.string().optional(),
   /**
    * Comma-separated list of field names to include in each player object.
